@@ -380,6 +380,23 @@ connection, where a server-side fetch runs at datacenter bandwidth.
   genuinely local: a file the user created, or one that exists only on
   this machine with no URL Galaxy can reach itself.
 
+### Invoking a Galaxy workflow
+
+Call \`galaxy_get_workflow_input_template\` before \`galaxy_invoke_workflow\`
+and fill the returned \`inputs_template\` as-is:
+
+- **Every** input slot goes in \`inputs\`, keyed by step index — data and
+  non-data alike. A collection slot takes \`{"src":"hdca","id":…}\`; an
+  integer/text/genome slot takes the bare scalar (\`5\`, \`"hg38"\`).
+- Pass \`inputs_by="step_index|step_uuid"\` verbatim — the pipe-separated
+  form is one valid value, not a choice between two.
+- **Workflow inputs never go in \`params\`.** \`params\` is the legacy
+  per-step tool-parameter override map for non-input steps, and its values
+  must be *dicts* (\`{"5": {"minScore": 10}}\`), so a scalar there fails with
+  \`Input should be a valid dictionary in ('body','parameters',<key>)\`. On
+  that error, move the slot into \`inputs\` — re-keying it under \`params\` by
+  label, step index, or uuid will never work.
+
 ### Executing a Galaxy step
 
 **Galaxy invocations run in the background by default — submit and hand
