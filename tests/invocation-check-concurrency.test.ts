@@ -208,6 +208,35 @@ describe("checkInvocations concurrency (#391)", () => {
     expect(readFileSync(nbPath, "utf-8")).toContain("last_polled_at: 2099-01-01T00:00:00Z");
   });
 
+  it("does not re-announce a completion another poll recorded first", async () => {
+    writeFileSync(nbPath, `# Notes\n\n${renderInvocationYaml(invocation())}`, "utf-8");
+    vi.spyOn(galaxyApi, "galaxyGet").mockImplementation(async () => {
+      // An overlapping poll finished first with the same news and, unlike the
+      // stale-poll case, a perfectly ordinary earlier timestamp.
+      writeFileSync(
+        nbPath,
+        `# Notes\n\n${renderInvocationYaml(
+          invocation({
+            status: "completed",
+            summary: "Workflow completed: 1 jobs succeeded",
+            lastPolledAt: "2026-04-25T00:00:01Z",
+          }),
+        )}`,
+        "utf-8",
+      );
+      return galaxyResponse("inv-1", ["ok"]) as never;
+    });
+
+    const result = await checkInvocations(undefined);
+
+    // The transition was already recorded, so it isn't ours to toast…
+    expect(JSON.parse(result.content[0].text).results[0].autoAction).toBeUndefined();
+    // …but the fresh counters still land.
+    const block = findInvocationBlocks(readFileSync(nbPath, "utf-8"))[0];
+    expect(block.status).toBe("completed");
+    expect(block.lastPolledAt).not.toBe("2026-04-25T00:00:01Z");
+  });
+
   it("keeps an agent edit to the block's own fields made during the poll", async () => {
     writeFileSync(nbPath, `# Notes\n\n${renderInvocationYaml(invocation())}`, "utf-8");
     vi.spyOn(galaxyApi, "galaxyGet").mockImplementation(async () => {

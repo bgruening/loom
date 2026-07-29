@@ -727,7 +727,7 @@ export async function checkInvocations(
   // rename fails the stamp check and is retried against fresh content rather
   // than silently overwriting it.
   if (updates.length > 0) {
-    const applied = await withNotebookLock(notebookPath, () =>
+    const transitioned = await withNotebookLock(notebookPath, () =>
       persistInvocationUpdates(notebookPath, updates),
     );
     // A transition we didn't actually record isn't news. The poller turns
@@ -736,7 +736,7 @@ export async function checkInvocations(
     // already advanced — would announce a state change nothing wrote.
     for (const entry of results) {
       const announced = entry.autoAction === "completed" || entry.autoAction === "failed";
-      if (announced && !applied.has(entry.invocationId)) entry.autoAction = undefined;
+      if (announced && !transitioned.has(entry.invocationId)) entry.autoAction = undefined;
     }
   }
 
@@ -763,7 +763,7 @@ const MAX_PERSIST_ATTEMPTS = 3;
 /**
  * Read -> fold in the polled blocks -> write, retrying against fresh content if
  * the notebook changed under us. Call with the notebook lock held. Returns the
- * invocation ids that actually made it to disk.
+ * invocation ids this call moved to a terminal state on disk.
  *
  * The stamp is taken *before* the read on purpose. Stamping afterwards would
  * let a write that landed between the read and the stat look unchanged — the
@@ -777,14 +777,21 @@ async function persistInvocationUpdates(
   let lastError: unknown;
   for (let attempt = 0; attempt < MAX_PERSIST_ATTEMPTS; attempt++) {
     const stamp = await statNotebook(notebookPath);
+    // No stamp means no compare-and-swap, and an unguarded whole-file write is
+    // the thing #391 is about. Treat it as a lost race rather than quietly
+    // downgrading; if the notebook really is gone the read below says so first.
+    if (!stamp) {
+      lastError = new NotebookChangedError(notebookPath);
+      continue;
+    }
     const fresh = await readNotebook(notebookPath);
-    const { content, applied } = applyInvocationUpdates(fresh, updates);
+    const { content, applied, transitioned } = applyInvocationUpdates(fresh, updates);
     // Every block was deleted or already has a newer poll on disk — nothing to
     // write, so don't rewrite the file (and don't risk a race) for no change.
     if (applied.length === 0) return new Set();
     try {
-      await writeNotebook(notebookPath, content, stamp ?? undefined);
-      return new Set(applied);
+      await writeNotebook(notebookPath, content, stamp);
+      return new Set(transitioned);
     } catch (error) {
       if (!(error instanceof NotebookChangedError)) throw error;
       lastError = error;

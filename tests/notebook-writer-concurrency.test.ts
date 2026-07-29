@@ -141,6 +141,21 @@ describe("writeNotebook staleness guard", () => {
     expect(readFileSync(nbPath, "utf-8")).toBe("unguarded\n");
   });
 
+  it("stages each write separately, so overlapping writes can't blend", async () => {
+    // A shared scratch path would let one writer rename the other's bytes, or
+    // delete a staging file still in use. Both payloads are the same length, so
+    // a torn result would show up as a mix rather than a length mismatch.
+    const a = "a".repeat(4096);
+    const b = "b".repeat(4096);
+    await writeNotebook(nbPath, "seed\n");
+
+    await Promise.all([writeNotebook(nbPath, a), writeNotebook(nbPath, b)]);
+
+    const final = readFileSync(nbPath, "utf-8");
+    expect([a, b]).toContain(final);
+    expect(readdirSync(dir)).toEqual(["notebook.md"]);
+  });
+
   it("statNotebook returns null for a missing file", async () => {
     expect(await statNotebook(join(dir, "nope.md"))).toBeNull();
   });
@@ -171,14 +186,47 @@ describe("applyInvocationUpdates", () => {
 
   it("applies an update in place against the supplied content", () => {
     const content = `# Notes\n\n${renderInvocationYaml(base)}`;
-    const { content: next, applied } = applyInvocationUpdates(content, [
+    const {
+      content: next,
+      applied,
+      transitioned,
+    } = applyInvocationUpdates(content, [
       poll({ transition: { status: "completed", summary: "all done" } }),
     ]);
     expect(applied).toEqual(["inv-1"]);
+    expect(transitioned).toEqual(["inv-1"]);
     expect(next).toContain("status: completed");
     expect(next).toContain("summary: all done");
     expect(next).toContain("completed_jobs: 2");
     expect(next).toContain("# Notes");
+  });
+
+  it("refreshes counters but claims no transition when the block is already terminal", () => {
+    const onDisk = renderInvocationYaml({
+      ...base,
+      status: "completed",
+      summary: "Workflow completed: 2 jobs succeeded",
+      lastPolledAt: "2026-04-25T00:30:00Z",
+    });
+    const { content, applied, transitioned } = applyInvocationUpdates(onDisk, [
+      poll({ transition: { status: "completed", summary: "recomputed" } }),
+    ]);
+    expect(applied).toEqual(["inv-1"]);
+    expect(transitioned).toEqual([]);
+    const block = findInvocationBlocks(content)[0];
+    expect(block.status).toBe("completed");
+    expect(block.summary).toBe("Workflow completed: 2 jobs succeeded");
+    expect(block.completedJobs).toBe(2);
+    expect(block.lastPolledAt).toBe("2026-04-25T01:00:00Z");
+  });
+
+  it("will not move a terminal block to a different terminal state", () => {
+    const onDisk = renderInvocationYaml({ ...base, status: "completed" });
+    const { content, transitioned } = applyInvocationUpdates(onDisk, [
+      poll({ transition: { status: "failed", summary: "Workflow failed: 1 job(s) errored" } }),
+    ]);
+    expect(transitioned).toEqual([]);
+    expect(findInvocationBlocks(content)[0].status).toBe("completed");
   });
 
   it("keeps the fields the poller doesn't own", () => {

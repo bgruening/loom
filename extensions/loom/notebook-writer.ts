@@ -7,6 +7,7 @@
  * Galaxy invocation polling tools read and write.
  */
 
+import { randomBytes } from "crypto";
 import * as fs from "fs/promises";
 import * as path from "path";
 
@@ -50,6 +51,11 @@ export function withNotebookLock<T>(filePath: string, work: () => Promise<T>): P
  * Cheap fingerprint of the notebook on disk, used as the expected-value half
  * of a compare-and-swap write. Size alone catches every append; mtime catches
  * same-length rewrites.
+ *
+ * A heuristic, not a content hash: a rewrite that preserves both the byte count
+ * and the observed mtime (coarse filesystem timestamps, or a tool that restores
+ * times) still compares equal. Good enough for the accidental-interleaving case
+ * this guards, and cheap enough to run on every write.
  */
 export interface NotebookStamp {
   mtimeMs: number;
@@ -77,12 +83,11 @@ export async function statNotebook(filePath: string): Promise<NotebookStamp | nu
 // Per-write scratch name. A fixed `<file>.tmp` is shared by every writer, so
 // two of them (two Loom processes on one notebook, or one process that abandons
 // a guarded write while another is staging one) can overwrite or delete each
-// other's staging file and rename the wrong bytes into place. Unique names cost
-// nothing and take that off the table.
-let tmpCounter = 0;
+// other's staging file and rename the wrong bytes into place. Random names cost
+// nothing and take that off the table; paired with the `wx` flag below they also
+// mean we never write through a path someone else got to first.
 function tmpPathFor(filePath: string): string {
-  tmpCounter = (tmpCounter + 1) % Number.MAX_SAFE_INTEGER;
-  return `${filePath}.tmp.${process.pid}.${tmpCounter}`;
+  return `${filePath}.tmp.${randomBytes(8).toString("hex")}`;
 }
 
 /**
@@ -110,8 +115,10 @@ export async function writeNotebook(
   expected?: NotebookStamp,
 ): Promise<void> {
   const tmp = tmpPathFor(filePath);
-  // O_TRUNC | O_WRONLY | O_CREAT via fs.writeFile — but write to tmp first.
-  await fs.writeFile(tmp, content, "utf-8");
+  // `wx` is O_CREAT | O_EXCL: create the scratch file or fail. Never follow an
+  // existing path — a symlink planted at a scratch name would otherwise let a
+  // write land on whatever it points at.
+  await fs.writeFile(tmp, content, { encoding: "utf-8", flag: "wx" });
   if (expected) {
     const current = await statNotebook(filePath);
     if (!current || current.mtimeMs !== expected.mtimeMs || current.size !== expected.size) {
@@ -320,22 +327,29 @@ export interface InvocationPollUpdate {
  *   - the block on disk carries a newer `last_polled_at` than ours — a second
  *     poller (another Loom process, or the agent calling check_all while the
  *     background timer is mid-tick) already recorded a later reading, and our
- *     counters would walk it backwards. Status can't regress either way: a poll
- *     only writes one when it saw a transition, and transitions are terminal.
+ *     counters would walk it backwards.
  *
- * Returns the ids actually written, so a caller can tell what it really
- * persisted — and skip the write entirely when that set is empty.
+ * A transition is applied only to a block still sitting at `in_progress`, so
+ * terminal status is write-once no matter how the polls interleave: whoever
+ * lands the transition first owns it, and a slower poll carrying the same news
+ * refreshes the counters without restating it.
+ *
+ * Returns the ids written, and separately the ids this batch actually moved to
+ * a terminal state — the caller needs the second set to know which transitions
+ * are its to announce.
  */
 export function applyInvocationUpdates(
   content: string,
   updates: InvocationPollUpdate[],
-): { content: string; applied: string[] } {
+): { content: string; applied: string[]; transitioned: string[] } {
   let next = content;
   const applied: string[] = [];
+  const transitioned: string[] = [];
   for (const update of updates) {
     const current = findInvocationBlocks(next).find((b) => b.invocationId === update.invocationId);
     if (!current) continue;
     if (isNewerPoll(current.lastPolledAt, update.lastPolledAt)) continue;
+    const transition = update.transition && current.status === "in_progress";
     const merged: InvocationYaml = {
       ...current,
       totalSteps: update.totalSteps,
@@ -344,12 +358,13 @@ export function applyInvocationUpdates(
       completedJobs: update.completedJobs,
       failedJobs: update.failedJobs,
       lastPolledAt: update.lastPolledAt,
-      ...(update.transition ?? {}),
+      ...(transition ? update.transition : {}),
     };
     next = upsertInvocationBlock(next, merged);
     applied.push(update.invocationId);
+    if (transition) transitioned.push(update.invocationId);
   }
-  return { content: next, applied };
+  return { content: next, applied, transitioned };
 }
 
 /** True when `onDisk` is a strictly later poll timestamp than `ours`. */
