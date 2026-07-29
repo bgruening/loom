@@ -74,26 +74,42 @@ export async function statNotebook(filePath: string): Promise<NotebookStamp | nu
   }
 }
 
+// Per-write scratch name. A fixed `<file>.tmp` is shared by every writer, so
+// two of them (two Loom processes on one notebook, or one process that abandons
+// a guarded write while another is staging one) can overwrite or delete each
+// other's staging file and rename the wrong bytes into place. Unique names cost
+// nothing and take that off the table.
+let tmpCounter = 0;
+function tmpPathFor(filePath: string): string {
+  tmpCounter = (tmpCounter + 1) % Number.MAX_SAFE_INTEGER;
+  return `${filePath}.tmp.${process.pid}.${tmpCounter}`;
+}
+
 /**
- * Atomic notebook write: render to `<file>.tmp` then rename. The rename
+ * Atomic notebook write: render to a scratch sibling then rename. The rename
  * is atomic on POSIX, so the destination either has the old or the new
  * content — never partial. The file watcher in state.ts may still fire
  * on the rename, but it can no longer observe a half-written file.
  *
  * Pass `expected` (a stamp taken *before* the read this content was derived
  * from) to make the write a compare-and-swap: if the file changed in the
- * meantime — an agent `edit`/`bash` append, another Loom process — the write
- * is abandoned with `NotebookChangedError` instead of overwriting a stranger's
- * update (#391). The check sits between the tmp write and the rename so the
- * remaining window is one `rename` syscall. Callers are expected to re-read
- * and retry; without `expected` the write is unconditional, as before.
+ * meantime — an agent `edit`/`bash` append, or another writer entirely — the
+ * write is abandoned with `NotebookChangedError` instead of overwriting a
+ * stranger's update (#391). Callers are expected to re-read and retry; without
+ * `expected` the write is unconditional, as before.
+ *
+ * The check sits between the staging write and the rename, which narrows the
+ * exposure to a single `rename` syscall but does not close it: stat-then-rename
+ * is not atomic, and a writer that lands in that gap is still overwritten.
+ * Closing it for real needs an OS-level lock (or routing every notebook write
+ * through one owner), which is a bigger change than #391.
  */
 export async function writeNotebook(
   filePath: string,
   content: string,
   expected?: NotebookStamp,
 ): Promise<void> {
-  const tmp = `${filePath}.tmp`;
+  const tmp = tmpPathFor(filePath);
   // O_TRUNC | O_WRONLY | O_CREAT via fs.writeFile — but write to tmp first.
   await fs.writeFile(tmp, content, "utf-8");
   if (expected) {
@@ -271,9 +287,31 @@ export function upsertInvocationBlock(content: string, inv: InvocationYaml): str
 }
 
 /**
+ * What one Galaxy poll learned about an invocation — the fields the poller
+ * owns, and nothing else.
+ *
+ * Deliberately not a whole `InvocationYaml`: `label`, `notebook_anchor`,
+ * `submitted_at` and friends belong to whoever recorded the invocation, and
+ * writing back a copy captured before the Galaxy round trip would clobber an
+ * edit the agent made in the meantime — #391 again, one block down.
+ */
+export interface InvocationPollUpdate {
+  invocationId: string;
+  totalSteps: number;
+  completedSteps: number;
+  totalJobs: number;
+  completedJobs: number;
+  failedJobs: number;
+  lastPolledAt: string;
+  /** Present only when this poll decided the invocation reached a terminal state. */
+  transition?: { status: InvocationYaml["status"]; summary: string };
+}
+
+/**
  * Fold a batch of freshly-polled invocations into notebook content that was
  * read *after* the poll, so the result is built on current bytes rather than a
- * pre-poll snapshot (#391).
+ * pre-poll snapshot (#391). Each update is merged onto the block as it exists
+ * in `content`, so fields the poller doesn't own survive.
  *
  * Two updates are dropped rather than applied:
  *   - the block is gone from `content` — someone deleted it while we were
@@ -281,24 +319,35 @@ export function upsertInvocationBlock(content: string, inv: InvocationYaml): str
  *     end of the file;
  *   - the block on disk carries a newer `last_polled_at` than ours — a second
  *     poller (another Loom process, or the agent calling check_all while the
- *     background timer is mid-tick) already wrote a fresher reading, and ours
- *     would regress its counters and status.
+ *     background timer is mid-tick) already recorded a later reading, and our
+ *     counters would walk it backwards. Status can't regress either way: a poll
+ *     only writes one when it saw a transition, and transitions are terminal.
  *
- * `applied` is 0 when nothing survives, which lets the caller skip the write
- * entirely instead of rewriting the file for no reason.
+ * Returns the ids actually written, so a caller can tell what it really
+ * persisted — and skip the write entirely when that set is empty.
  */
 export function applyInvocationUpdates(
   content: string,
-  updates: InvocationYaml[],
-): { content: string; applied: number } {
+  updates: InvocationPollUpdate[],
+): { content: string; applied: string[] } {
   let next = content;
-  let applied = 0;
+  const applied: string[] = [];
   for (const update of updates) {
     const current = findInvocationBlocks(next).find((b) => b.invocationId === update.invocationId);
     if (!current) continue;
     if (isNewerPoll(current.lastPolledAt, update.lastPolledAt)) continue;
-    next = upsertInvocationBlock(next, update);
-    applied++;
+    const merged: InvocationYaml = {
+      ...current,
+      totalSteps: update.totalSteps,
+      completedSteps: update.completedSteps,
+      totalJobs: update.totalJobs,
+      completedJobs: update.completedJobs,
+      failedJobs: update.failedJobs,
+      lastPolledAt: update.lastPolledAt,
+      ...(update.transition ?? {}),
+    };
+    next = upsertInvocationBlock(next, merged);
+    applied.push(update.invocationId);
   }
   return { content: next, applied };
 }

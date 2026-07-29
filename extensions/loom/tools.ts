@@ -23,6 +23,7 @@ import {
   statNotebook,
   NotebookChangedError,
   type InvocationYaml,
+  type InvocationPollUpdate,
 } from "./notebook-writer";
 import { getGalaxyConfig, galaxyGet, type GalaxyInvocationResponse } from "./galaxy-api";
 import { listEnabledSkillRepos, findSkillRepo } from "./skills";
@@ -634,7 +635,7 @@ export async function checkInvocations(
   // seconds-stale snapshot. Errors stay per-block: a 502 on one invocation must
   // not cost the others their update.
   const results: CheckResultEntry[] = [];
-  const updates: InvocationYaml[] = [];
+  const updates: InvocationPollUpdate[] = [];
 
   for (const block of toCheck) {
     try {
@@ -665,32 +666,36 @@ export async function checkInvocations(
       }
 
       let autoAction: string | undefined;
-      let nextStatus: InvocationYaml["status"] = block.status;
-      let nextSummary = block.summary;
+      let transition: InvocationPollUpdate["transition"];
 
       if (summary.error === 0 && summary.running === 0 && summary.queued === 0 && summary.ok > 0) {
-        nextStatus = "completed";
-        nextSummary = `Workflow completed: ${summary.ok} jobs succeeded`;
+        transition = {
+          status: "completed",
+          summary: `Workflow completed: ${summary.ok} jobs succeeded`,
+        };
         autoAction = "completed";
       } else if (summary.error > 0) {
-        nextStatus = "failed";
-        nextSummary = `Workflow failed: ${summary.error} job(s) errored, ${summary.ok} succeeded`;
+        transition = {
+          status: "failed",
+          summary: `Workflow failed: ${summary.error} job(s) errored, ${summary.ok} succeeded`,
+        };
         autoAction = "failed";
       }
 
       // Always update the block — even if the rolled-up status didn't
       // change, the per-poll counters (and last_polled_at) did, and the
-      // renderer wants those for the live progress bar.
+      // renderer wants those for the live progress bar. Status and summary
+      // ride along only on a transition, so a no-op poll can't overwrite an
+      // edit the agent made to the block while we were talking to Galaxy.
       updates.push({
-        ...block,
-        status: nextStatus,
-        summary: nextSummary,
+        invocationId: block.invocationId,
         totalSteps: inv.steps.length,
         completedSteps,
         totalJobs,
         completedJobs: summary.ok,
         failedJobs: summary.error,
         lastPolledAt: new Date().toISOString(),
+        transition,
       });
 
       results.push({
@@ -722,7 +727,17 @@ export async function checkInvocations(
   // rename fails the stamp check and is retried against fresh content rather
   // than silently overwriting it.
   if (updates.length > 0) {
-    await withNotebookLock(notebookPath, () => persistInvocationUpdates(notebookPath, updates));
+    const applied = await withNotebookLock(notebookPath, () =>
+      persistInvocationUpdates(notebookPath, updates),
+    );
+    // A transition we didn't actually record isn't news. The poller turns
+    // "completed"/"failed" straight into a user-facing toast, so leaving the
+    // flag on a block that was deleted mid-poll — or that another poller had
+    // already advanced — would announce a state change nothing wrote.
+    for (const entry of results) {
+      const announced = entry.autoAction === "completed" || entry.autoAction === "failed";
+      if (announced && !applied.has(entry.invocationId)) entry.autoAction = undefined;
+    }
   }
 
   return {
@@ -747,7 +762,8 @@ const MAX_PERSIST_ATTEMPTS = 3;
 
 /**
  * Read -> fold in the polled blocks -> write, retrying against fresh content if
- * the notebook changed under us. Call with the notebook lock held.
+ * the notebook changed under us. Call with the notebook lock held. Returns the
+ * invocation ids that actually made it to disk.
  *
  * The stamp is taken *before* the read on purpose. Stamping afterwards would
  * let a write that landed between the read and the stat look unchanged — the
@@ -756,8 +772,8 @@ const MAX_PERSIST_ATTEMPTS = 3;
  */
 async function persistInvocationUpdates(
   notebookPath: string,
-  updates: InvocationYaml[],
-): Promise<void> {
+  updates: InvocationPollUpdate[],
+): Promise<Set<string>> {
   let lastError: unknown;
   for (let attempt = 0; attempt < MAX_PERSIST_ATTEMPTS; attempt++) {
     const stamp = await statNotebook(notebookPath);
@@ -765,10 +781,10 @@ async function persistInvocationUpdates(
     const { content, applied } = applyInvocationUpdates(fresh, updates);
     // Every block was deleted or already has a newer poll on disk — nothing to
     // write, so don't rewrite the file (and don't risk a race) for no change.
-    if (applied === 0) return;
+    if (applied.length === 0) return new Set();
     try {
       await writeNotebook(notebookPath, content, stamp ?? undefined);
-      return;
+      return new Set(applied);
     } catch (error) {
       if (!(error instanceof NotebookChangedError)) throw error;
       lastError = error;

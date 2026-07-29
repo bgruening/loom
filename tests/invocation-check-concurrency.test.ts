@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { appendFileSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { resetState, setNotebookPath } from "../extensions/loom/state";
@@ -167,7 +167,7 @@ describe("checkInvocations concurrency (#391)", () => {
     expect(write).not.toHaveBeenCalled();
   });
 
-  it("does not resurrect a block deleted while Galaxy was polled", async () => {
+  it("does not resurrect a block deleted while Galaxy was polled, and reports no transition", async () => {
     writeFileSync(nbPath, `# Notes\n\n${renderInvocationYaml(invocation())}`, "utf-8");
     vi.spyOn(galaxyApi, "galaxyGet").mockImplementation(async () => {
       // The agent pruned the block from the notebook mid-poll.
@@ -175,11 +175,71 @@ describe("checkInvocations concurrency (#391)", () => {
       return galaxyResponse("inv-1", ["ok"]) as never;
     });
 
-    await checkInvocations(undefined);
+    const result = await checkInvocations(undefined);
 
     const notebook = readFileSync(nbPath, "utf-8");
     expect(notebook).not.toContain("invocation_id: inv-1");
     expect(notebook).toContain("block removed by the agent");
+    // Nothing was written, so the poller must not toast a completion for it.
+    expect(JSON.parse(result.content[0].text).results[0].autoAction).toBeUndefined();
+  });
+
+  it("does not announce a transition another poller already recorded", async () => {
+    writeFileSync(nbPath, `# Notes\n\n${renderInvocationYaml(invocation())}`, "utf-8");
+    vi.spyOn(galaxyApi, "galaxyGet").mockImplementation(async () => {
+      // A second checker got there first with a strictly later reading.
+      writeFileSync(
+        nbPath,
+        `# Notes\n\n${renderInvocationYaml(
+          invocation({
+            status: "completed",
+            summary: "Workflow completed: 1 jobs succeeded",
+            lastPolledAt: "2099-01-01T00:00:00Z",
+          }),
+        )}`,
+        "utf-8",
+      );
+      return galaxyResponse("inv-1", ["ok"]) as never;
+    });
+
+    const result = await checkInvocations(undefined);
+
+    expect(JSON.parse(result.content[0].text).results[0].autoAction).toBeUndefined();
+    expect(readFileSync(nbPath, "utf-8")).toContain("last_polled_at: 2099-01-01T00:00:00Z");
+  });
+
+  it("keeps an agent edit to the block's own fields made during the poll", async () => {
+    writeFileSync(nbPath, `# Notes\n\n${renderInvocationYaml(invocation())}`, "utf-8");
+    vi.spyOn(galaxyApi, "galaxyGet").mockImplementation(async () => {
+      // The agent relabelled and re-anchored the block while we were waiting.
+      writeFileSync(
+        nbPath,
+        `# Notes\n\n${renderInvocationYaml(
+          invocation({ label: "Relabelled by the agent", notebookAnchor: "plan-b-step-4" }),
+        )}`,
+        "utf-8",
+      );
+      return galaxyResponse("inv-1", ["ok", "running"]) as never;
+    });
+
+    await checkInvocations(undefined);
+
+    const block = findInvocationBlocks(readFileSync(nbPath, "utf-8"))[0];
+    expect(block.label).toBe("Relabelled by the agent");
+    expect(block.notebookAnchor).toBe("plan-b-step-4");
+    // …and the counters this poll produced still landed.
+    expect(block.completedJobs).toBe(1);
+    expect(block.totalJobs).toBe(2);
+    expect(block.status).toBe("in_progress");
+  });
+
+  it("leaves no scratch files behind", async () => {
+    writeFileSync(nbPath, `# Notes\n\n${renderInvocationYaml(invocation())}`, "utf-8");
+    vi.spyOn(galaxyApi, "galaxyGet").mockResolvedValue(galaxyResponse("inv-1", ["ok"]) as never);
+
+    await checkInvocations(undefined);
+
+    expect(readdirSync(dir)).toEqual(["notebook.md"]);
   });
 
   it("holds no lock across the Galaxy GETs", async () => {

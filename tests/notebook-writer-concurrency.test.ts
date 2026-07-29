@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { appendFileSync, mkdtempSync, rmSync, readFileSync } from "fs";
+import { appendFileSync, mkdtempSync, readdirSync, rmSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
@@ -8,10 +8,12 @@ import {
   withNotebookLock,
   upsertInvocationBlock,
   applyInvocationUpdates,
+  findInvocationBlocks,
   statNotebook,
   NotebookChangedError,
   renderInvocationYaml,
   type InvocationYaml,
+  type InvocationPollUpdate,
 } from "../extensions/loom/notebook-writer";
 
 describe("writeNotebook + withNotebookLock", () => {
@@ -27,11 +29,11 @@ describe("writeNotebook + withNotebookLock", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("writeNotebook is atomic (no .tmp left behind on success)", async () => {
+  it("writeNotebook is atomic (no scratch file left behind on success)", async () => {
     await writeNotebook(nbPath, "hello\n");
     expect(readFileSync(nbPath, "utf-8")).toBe("hello\n");
-    // tmp file shouldn't survive; rename should have moved it.
-    expect(() => readFileSync(`${nbPath}.tmp`, "utf-8")).toThrow();
+    // Scratch file shouldn't survive; rename should have moved it.
+    expect(readdirSync(dir)).toEqual(["notebook.md"]);
   });
 
   it("two parallel upsert+write cycles serialize via the lock — neither update is lost", async () => {
@@ -117,7 +119,8 @@ describe("writeNotebook staleness guard", () => {
       NotebookChangedError,
     );
     expect(readFileSync(nbPath, "utf-8")).toBe("one\nappended out of band\n");
-    expect(() => readFileSync(`${nbPath}.tmp`, "utf-8")).toThrow();
+    // The abandoned staging file is cleaned up, not orphaned next to the notebook.
+    expect(readdirSync(dir)).toEqual(["notebook.md"]);
   });
 
   it("refuses the write when the file was deleted under us", async () => {
@@ -153,21 +156,61 @@ describe("applyInvocationUpdates", () => {
     status: "in_progress",
   };
 
+  function poll(overrides: Partial<InvocationPollUpdate> = {}): InvocationPollUpdate {
+    return {
+      invocationId: "inv-1",
+      totalSteps: 2,
+      completedSteps: 1,
+      totalJobs: 4,
+      completedJobs: 2,
+      failedJobs: 0,
+      lastPolledAt: "2026-04-25T01:00:00Z",
+      ...overrides,
+    };
+  }
+
   it("applies an update in place against the supplied content", () => {
     const content = `# Notes\n\n${renderInvocationYaml(base)}`;
     const { content: next, applied } = applyInvocationUpdates(content, [
-      { ...base, status: "completed", lastPolledAt: "2026-04-25T01:00:00Z" },
+      poll({ transition: { status: "completed", summary: "all done" } }),
     ]);
-    expect(applied).toBe(1);
+    expect(applied).toEqual(["inv-1"]);
     expect(next).toContain("status: completed");
+    expect(next).toContain("summary: all done");
+    expect(next).toContain("completed_jobs: 2");
     expect(next).toContain("# Notes");
   });
 
-  it("skips a block that is no longer in the content", () => {
-    const { content, applied } = applyInvocationUpdates("# Notes\n\nnothing here\n", [
-      { ...base, status: "completed" },
+  it("keeps the fields the poller doesn't own", () => {
+    // The block on disk is the agent's version, not the one the poll started from.
+    const onDisk = renderInvocationYaml({
+      ...base,
+      label: "Renamed by the agent",
+      notebookAnchor: "plan-2-step-9",
+      summary: "hand-written note",
+    });
+    const { content } = applyInvocationUpdates(onDisk, [poll()]);
+    const block = findInvocationBlocks(content)[0];
+    expect(block.label).toBe("Renamed by the agent");
+    expect(block.notebookAnchor).toBe("plan-2-step-9");
+    expect(block.summary).toBe("hand-written note");
+    expect(block.status).toBe("in_progress");
+    expect(block.completedJobs).toBe(2);
+  });
+
+  it("overwrites status and summary only on a transition", () => {
+    const onDisk = renderInvocationYaml({ ...base, summary: "hand-written note" });
+    const { content } = applyInvocationUpdates(onDisk, [
+      poll({ transition: { status: "failed", summary: "Workflow failed: 1 job(s) errored" } }),
     ]);
-    expect(applied).toBe(0);
+    const block = findInvocationBlocks(content)[0];
+    expect(block.status).toBe("failed");
+    expect(block.summary).toBe("Workflow failed: 1 job(s) errored");
+  });
+
+  it("skips a block that is no longer in the content", () => {
+    const { content, applied } = applyInvocationUpdates("# Notes\n\nnothing here\n", [poll()]);
+    expect(applied).toEqual([]);
     expect(content).toBe("# Notes\n\nnothing here\n");
   });
 
@@ -178,17 +221,26 @@ describe("applyInvocationUpdates", () => {
       lastPolledAt: "2026-04-25T02:00:00Z",
     });
     const { content, applied } = applyInvocationUpdates(onDisk, [
-      { ...base, status: "in_progress", lastPolledAt: "2026-04-25T01:00:00Z" },
+      poll({ lastPolledAt: "2026-04-25T01:00:00Z" }),
     ]);
-    expect(applied).toBe(0);
+    expect(applied).toEqual([]);
     expect(content).toBe(onDisk);
     expect(content).toContain("status: completed");
   });
 
   it("applies when the block on disk has never been polled", () => {
-    const { applied } = applyInvocationUpdates(renderInvocationYaml(base), [
-      { ...base, status: "completed", lastPolledAt: "2026-04-25T01:00:00Z" },
+    const { applied } = applyInvocationUpdates(renderInvocationYaml(base), [poll()]);
+    expect(applied).toEqual(["inv-1"]);
+  });
+
+  it("reports only the ids it wrote when a batch is partly skipped", () => {
+    const other: InvocationYaml = { ...base, invocationId: "inv-2", notebookAnchor: "plan-1-s2" };
+    const onDisk = `${renderInvocationYaml(base)}\n${renderInvocationYaml(other)}`;
+    const { applied } = applyInvocationUpdates(onDisk, [
+      poll(),
+      poll({ invocationId: "inv-gone" }),
+      poll({ invocationId: "inv-2" }),
     ]);
-    expect(applied).toBe(1);
+    expect(applied).toEqual(["inv-1", "inv-2"]);
   });
 });
