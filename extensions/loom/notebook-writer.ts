@@ -47,15 +47,62 @@ export function withNotebookLock<T>(filePath: string, work: () => Promise<T>): P
 }
 
 /**
+ * Cheap fingerprint of the notebook on disk, used as the expected-value half
+ * of a compare-and-swap write. Size alone catches every append; mtime catches
+ * same-length rewrites.
+ */
+export interface NotebookStamp {
+  mtimeMs: number;
+  size: number;
+}
+
+/** Thrown by a guarded `writeNotebook` when the file moved under the caller. */
+export class NotebookChangedError extends Error {
+  constructor(filePath: string) {
+    super(`Notebook changed on disk since it was read: ${filePath}`);
+    this.name = "NotebookChangedError";
+  }
+}
+
+/** Fingerprint the notebook, or null if it isn't there. */
+export async function statNotebook(filePath: string): Promise<NotebookStamp | null> {
+  try {
+    const st = await fs.stat(filePath);
+    return { mtimeMs: st.mtimeMs, size: st.size };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Atomic notebook write: render to `<file>.tmp` then rename. The rename
  * is atomic on POSIX, so the destination either has the old or the new
  * content — never partial. The file watcher in state.ts may still fire
  * on the rename, but it can no longer observe a half-written file.
+ *
+ * Pass `expected` (a stamp taken *before* the read this content was derived
+ * from) to make the write a compare-and-swap: if the file changed in the
+ * meantime — an agent `edit`/`bash` append, another Loom process — the write
+ * is abandoned with `NotebookChangedError` instead of overwriting a stranger's
+ * update (#391). The check sits between the tmp write and the rename so the
+ * remaining window is one `rename` syscall. Callers are expected to re-read
+ * and retry; without `expected` the write is unconditional, as before.
  */
-export async function writeNotebook(filePath: string, content: string): Promise<void> {
+export async function writeNotebook(
+  filePath: string,
+  content: string,
+  expected?: NotebookStamp,
+): Promise<void> {
   const tmp = `${filePath}.tmp`;
   // O_TRUNC | O_WRONLY | O_CREAT via fs.writeFile — but write to tmp first.
   await fs.writeFile(tmp, content, "utf-8");
+  if (expected) {
+    const current = await statNotebook(filePath);
+    if (!current || current.mtimeMs !== expected.mtimeMs || current.size !== expected.size) {
+      await fs.rm(tmp, { force: true });
+      throw new NotebookChangedError(filePath);
+    }
+  }
   await fs.rename(tmp, filePath);
 }
 
@@ -221,6 +268,48 @@ export function upsertInvocationBlock(content: string, inv: InvocationYaml): str
   const trimmed = content.replace(/\s+$/, "");
   const sep = trimmed.length > 0 ? "\n\n" : "";
   return trimmed + sep + newBlock.join("\n") + "\n";
+}
+
+/**
+ * Fold a batch of freshly-polled invocations into notebook content that was
+ * read *after* the poll, so the result is built on current bytes rather than a
+ * pre-poll snapshot (#391).
+ *
+ * Two updates are dropped rather than applied:
+ *   - the block is gone from `content` — someone deleted it while we were
+ *     talking to Galaxy, and `upsertInvocationBlock` would resurrect it at the
+ *     end of the file;
+ *   - the block on disk carries a newer `last_polled_at` than ours — a second
+ *     poller (another Loom process, or the agent calling check_all while the
+ *     background timer is mid-tick) already wrote a fresher reading, and ours
+ *     would regress its counters and status.
+ *
+ * `applied` is 0 when nothing survives, which lets the caller skip the write
+ * entirely instead of rewriting the file for no reason.
+ */
+export function applyInvocationUpdates(
+  content: string,
+  updates: InvocationYaml[],
+): { content: string; applied: number } {
+  let next = content;
+  let applied = 0;
+  for (const update of updates) {
+    const current = findInvocationBlocks(next).find((b) => b.invocationId === update.invocationId);
+    if (!current) continue;
+    if (isNewerPoll(current.lastPolledAt, update.lastPolledAt)) continue;
+    next = upsertInvocationBlock(next, update);
+    applied++;
+  }
+  return { content: next, applied };
+}
+
+/** True when `onDisk` is a strictly later poll timestamp than `ours`. */
+function isNewerPoll(onDisk: string | undefined, ours: string | undefined): boolean {
+  if (!onDisk || !ours) return false;
+  const a = Date.parse(onDisk);
+  const b = Date.parse(ours);
+  if (Number.isNaN(a) || Number.isNaN(b)) return false;
+  return a > b;
 }
 
 interface InvocationBlockRange {
