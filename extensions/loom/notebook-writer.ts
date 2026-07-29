@@ -329,14 +329,16 @@ export interface InvocationPollUpdate {
  *     background timer is mid-tick) already recorded a later reading, and our
  *     counters would walk it backwards.
  *
- * A transition is applied only to a block still sitting at `in_progress`, so
- * terminal status is write-once no matter how the polls interleave: whoever
- * lands the transition first owns it, and a slower poll carrying the same news
- * refreshes the counters without restating it.
+ * A transition always lands, including one terminal state correcting another:
+ * completion is inferred from the jobs Galaxy has materialized so far, so a
+ * poll that catches a workflow mid-schedule can call it complete and a later
+ * one has to be able to say otherwise. Refusing that would pin `completed` next
+ * to a nonzero `failed_jobs` — the counters and the status must agree.
  *
- * Returns the ids written, and separately the ids this batch actually moved to
- * a terminal state — the caller needs the second set to know which transitions
- * are its to announce.
+ * Returns the ids written, and separately the ids whose status this batch
+ * actually changed. The caller needs the second set to know which transitions
+ * are its to announce: re-writing `completed` over `completed` is a refresh,
+ * not news, and shouldn't produce a second "your workflow finished" toast.
  */
 export function applyInvocationUpdates(
   content: string,
@@ -349,7 +351,6 @@ export function applyInvocationUpdates(
     const current = findInvocationBlocks(next).find((b) => b.invocationId === update.invocationId);
     if (!current) continue;
     if (isNewerPoll(current.lastPolledAt, update.lastPolledAt)) continue;
-    const transition = update.transition && current.status === "in_progress";
     const merged: InvocationYaml = {
       ...current,
       totalSteps: update.totalSteps,
@@ -358,11 +359,11 @@ export function applyInvocationUpdates(
       completedJobs: update.completedJobs,
       failedJobs: update.failedJobs,
       lastPolledAt: update.lastPolledAt,
-      ...(transition ? update.transition : {}),
+      ...(update.transition ?? {}),
     };
     next = upsertInvocationBlock(next, merged);
     applied.push(update.invocationId);
-    if (transition) transitioned.push(update.invocationId);
+    if (merged.status !== current.status) transitioned.push(update.invocationId);
   }
   return { content: next, applied, transitioned };
 }

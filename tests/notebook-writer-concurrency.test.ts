@@ -201,7 +201,7 @@ describe("applyInvocationUpdates", () => {
     expect(next).toContain("# Notes");
   });
 
-  it("refreshes counters but claims no transition when the block is already terminal", () => {
+  it("re-stating the status the block already has is a refresh, not a transition", () => {
     const onDisk = renderInvocationYaml({
       ...base,
       status: "completed",
@@ -209,24 +209,39 @@ describe("applyInvocationUpdates", () => {
       lastPolledAt: "2026-04-25T00:30:00Z",
     });
     const { content, applied, transitioned } = applyInvocationUpdates(onDisk, [
-      poll({ transition: { status: "completed", summary: "recomputed" } }),
+      poll({
+        transition: { status: "completed", summary: "Workflow completed: 2 jobs succeeded" },
+      }),
     ]);
     expect(applied).toEqual(["inv-1"]);
     expect(transitioned).toEqual([]);
     const block = findInvocationBlocks(content)[0];
     expect(block.status).toBe("completed");
-    expect(block.summary).toBe("Workflow completed: 2 jobs succeeded");
     expect(block.completedJobs).toBe(2);
     expect(block.lastPolledAt).toBe("2026-04-25T01:00:00Z");
   });
 
-  it("will not move a terminal block to a different terminal state", () => {
-    const onDisk = renderInvocationYaml({ ...base, status: "completed" });
+  it("lets a later poll correct one terminal state to another", () => {
+    // Completion is inferred from the jobs Galaxy has materialized, so a poll
+    // that lands mid-schedule can call a workflow done before its failing step
+    // exists. The correction has to get through — and be announced.
+    const onDisk = renderInvocationYaml({
+      ...base,
+      status: "completed",
+      summary: "Workflow completed: 2 jobs succeeded",
+    });
     const { content, transitioned } = applyInvocationUpdates(onDisk, [
-      poll({ transition: { status: "failed", summary: "Workflow failed: 1 job(s) errored" } }),
+      poll({
+        failedJobs: 1,
+        transition: { status: "failed", summary: "Workflow failed: 1 job(s) errored" },
+      }),
     ]);
-    expect(transitioned).toEqual([]);
-    expect(findInvocationBlocks(content)[0].status).toBe("completed");
+    expect(transitioned).toEqual(["inv-1"]);
+    const block = findInvocationBlocks(content)[0];
+    // The status and the counters must not disagree.
+    expect(block.status).toBe("failed");
+    expect(block.failedJobs).toBe(1);
+    expect(block.summary).toBe("Workflow failed: 1 job(s) errored");
   });
 
   it("keeps the fields the poller doesn't own", () => {

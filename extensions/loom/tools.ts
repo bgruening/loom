@@ -763,7 +763,7 @@ const MAX_PERSIST_ATTEMPTS = 3;
 /**
  * Read -> fold in the polled blocks -> write, retrying against fresh content if
  * the notebook changed under us. Call with the notebook lock held. Returns the
- * invocation ids this call moved to a terminal state on disk.
+ * invocation ids whose status this call actually changed on disk.
  *
  * The stamp is taken *before* the read on purpose. Stamping afterwards would
  * let a write that landed between the read and the stat look unchanged — the
@@ -777,14 +777,17 @@ async function persistInvocationUpdates(
   let lastError: unknown;
   for (let attempt = 0; attempt < MAX_PERSIST_ATTEMPTS; attempt++) {
     const stamp = await statNotebook(notebookPath);
-    // No stamp means no compare-and-swap, and an unguarded whole-file write is
-    // the thing #391 is about. Treat it as a lost race rather than quietly
-    // downgrading; if the notebook really is gone the read below says so first.
+    // Read regardless of the stat, so a notebook that's actually gone or
+    // unreadable fails with its own ENOENT/EACCES instead of being dressed up
+    // as a race.
+    const fresh = await readNotebook(notebookPath);
+    // Readable but unstattable: without a stamp there's no compare-and-swap,
+    // and an unguarded whole-file write is the thing #391 is about. Treat it as
+    // a lost race rather than quietly downgrading to one.
     if (!stamp) {
       lastError = new NotebookChangedError(notebookPath);
       continue;
     }
-    const fresh = await readNotebook(notebookPath);
     const { content, applied, transitioned } = applyInvocationUpdates(fresh, updates);
     // Every block was deleted or already has a newer poll on disk — nothing to
     // write, so don't rewrite the file (and don't risk a race) for no change.
