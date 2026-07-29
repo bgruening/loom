@@ -383,13 +383,14 @@ connection, where a server-side fetch runs at datacenter bandwidth.
 ### Invoking a Galaxy workflow
 
 Call \`galaxy_get_workflow_input_template\` before \`galaxy_invoke_workflow\`.
-Keep the template's keys and shape, swap each placeholder (\`<value>\`,
-\`<dataset_id>\`) for a real value, and pass it as \`inputs\`:
+Keep the template's keys and shape, replace every placeholder it emits
+(\`<value>\`, \`<dataset_id>\`, \`<collection_id>\`) with a real value, and
+pass the result as \`inputs\`:
 
 - Data **and** non-data slots both belong in \`inputs\`, keyed by step index:
-  a collection slot takes \`{"src":"hdca","id":…}\`, an integer/text/genome
-  slot takes the bare scalar (\`5\`, \`"hg38"\`). Slots the template marks
-  optional, or that carry a default, may be left out.
+  a collection slot takes \`{"src":"hdca","id":"<collection_id>"}\`, an
+  integer/text/genome slot takes the bare scalar (\`5\`, \`"hg38"\`). Slots
+  the template marks \`optional\` may be left out.
 - Pass \`inputs_by="step_index|step_uuid"\` verbatim — the pipe-separated
   form is one valid value, not a choice between two.
 - **Don't route workflow inputs through \`params\`.** It's the legacy

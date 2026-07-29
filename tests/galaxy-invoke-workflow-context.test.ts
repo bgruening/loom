@@ -22,17 +22,21 @@ afterEach(() => {
 describe("buildGalaxyContextBlock workflow-invocation guidance", () => {
   it("points at the input-template tool before invoking", () => {
     const block = buildGalaxyContextBlock();
-    expect(block).toContain("galaxy_get_workflow_input_template");
-    expect(block).toContain("galaxy_invoke_workflow");
+    // Order matters -- guidance that named these the other way round would
+    // steer the model into invoking first, which is the bug being fixed.
+    expect(block).toMatch(
+      /galaxy_get_workflow_input_template`? before `?galaxy_invoke_workflow/,
+    );
   });
 
   it("says to replace the template placeholders rather than send them", () => {
     const block = buildGalaxyContextBlock();
-    expect(block).toMatch(/swap each placeholder/i);
-    // The literal placeholders build_workflow_input_template emits -- a model
-    // that submits these verbatim gets a confusing downstream failure.
+    expect(block).toMatch(/replace every placeholder/i);
+    // All three literals build_workflow_input_template emits (_placeholder_for);
+    // a model that submits any of them verbatim fails downstream.
     expect(block).toContain("<value>");
     expect(block).toContain("<dataset_id>");
+    expect(block).toContain("<collection_id>");
   });
 
   it("routes data and non-data slots alike into inputs", () => {
@@ -42,12 +46,13 @@ describe("buildGalaxyContextBlock workflow-invocation guidance", () => {
     expect(block).toMatch(/bare scalar/);
   });
 
-  it("allows optional and defaulted slots to be omitted", () => {
+  it("allows optional slots to be omitted, keyed off what the template exposes", () => {
     const block = buildGalaxyContextBlock();
-    // Galaxy only rejects a missing input that is neither optional nor
-    // defaulted (run_request.py _normalize_inputs), so the prompt must not
-    // demand a value for every slot.
-    expect(block).toMatch(/optional, or that carry a default, may be left out/);
+    // Galaxy accepts a missing input that is optional or defaulted, but the
+    // slot contract only carries `optional` -- so the prompt scopes the
+    // permission to the field a model can actually read back.
+    expect(block).toMatch(/marks `optional` may be left out/);
+    expect(block).not.toMatch(/carry a default/);
   });
 
   it("gives the pipe-separated inputs_by value verbatim", () => {
@@ -59,9 +64,11 @@ describe("buildGalaxyContextBlock workflow-invocation guidance", () => {
     const block = buildGalaxyContextBlock();
     expect(block).toMatch(/Don't route workflow inputs through `params`/);
     expect(block).toContain("dict[str, dict]");
-    // The error the model loops on, so it can match what it just saw.
-    expect(block).toContain(
-      "Input should be a valid dictionary in\n  ('body','parameters',<key>)",
+    // The error the model loops on, so it can match what it just saw. Compare
+    // whitespace-normalized -- the prompt line-wraps and a reflow shouldn't
+    // fail this.
+    expect(block.replace(/\s+/g, " ")).toContain(
+      "Input should be a valid dictionary in ('body','parameters',<key>)",
     );
   });
 
