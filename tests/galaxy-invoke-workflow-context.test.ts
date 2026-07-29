@@ -31,8 +31,9 @@ describe("buildGalaxyContextBlock workflow-invocation guidance", () => {
 
   it("names inputs_template so the whole wrapper isn't passed as inputs", () => {
     const block = buildGalaxyContextBlock();
-    // The tool returns {inputs_template, slots, inputs_by, warnings}; only the
-    // first is the inputs map, so the prompt has to say which field to take.
+    // The tool's payload is {inputs_template, slots, inputs_by, warnings}
+    // (under GalaxyResult.data); only the first is the inputs map, so the
+    // prompt has to say which field to take.
     expect(block).toContain("`inputs_template`");
     expect(block).toMatch(/not the\s+whole wrapper/);
   });
