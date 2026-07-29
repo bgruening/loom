@@ -383,9 +383,10 @@ connection, where a server-side fetch runs at datacenter bandwidth.
 ### Invoking a Galaxy workflow
 
 Call \`galaxy_get_workflow_input_template\` before \`galaxy_invoke_workflow\`.
-Keep the template's keys and shape, replace every placeholder it emits
-(\`<value>\`, \`<dataset_id>\`, \`<collection_id>\`) with a real value, and
-pass the result as \`inputs\`:
+Take the \`inputs_template\` map out of what it returns — that field, not the
+whole wrapper — keep its keys, replace every placeholder (\`<value>\`,
+\`<dataset_id>\`, \`<collection_id>\`) with a real value, and pass that map as
+\`inputs\`:
 
 - Data **and** non-data slots both belong in \`inputs\`, keyed by step index:
   a collection slot takes \`{"src":"hdca","id":"<collection_id>"}\`, an

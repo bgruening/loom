@@ -29,6 +29,14 @@ describe("buildGalaxyContextBlock workflow-invocation guidance", () => {
     );
   });
 
+  it("names inputs_template so the whole wrapper isn't passed as inputs", () => {
+    const block = buildGalaxyContextBlock();
+    // The tool returns {inputs_template, slots, inputs_by, warnings}; only the
+    // first is the inputs map, so the prompt has to say which field to take.
+    expect(block).toContain("`inputs_template`");
+    expect(block).toMatch(/not the\s+whole wrapper/);
+  });
+
   it("says to replace the template placeholders rather than send them", () => {
     const block = buildGalaxyContextBlock();
     expect(block).toMatch(/replace every placeholder/i);
