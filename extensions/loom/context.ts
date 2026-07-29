@@ -382,20 +382,21 @@ connection, where a server-side fetch runs at datacenter bandwidth.
 
 ### Invoking a Galaxy workflow
 
-Call \`galaxy_get_workflow_input_template\` before \`galaxy_invoke_workflow\`
-and fill the returned \`inputs_template\` as-is:
+Call \`galaxy_get_workflow_input_template\` before \`galaxy_invoke_workflow\`.
+Keep the template's keys and shape, swap each placeholder (\`<value>\`,
+\`<dataset_id>\`) for a real value, and pass it as \`inputs\`:
 
-- **Every** input slot goes in \`inputs\`, keyed by step index — data and
-  non-data alike. A collection slot takes \`{"src":"hdca","id":…}\`; an
-  integer/text/genome slot takes the bare scalar (\`5\`, \`"hg38"\`).
+- Data **and** non-data slots both belong in \`inputs\`, keyed by step index:
+  a collection slot takes \`{"src":"hdca","id":…}\`, an integer/text/genome
+  slot takes the bare scalar (\`5\`, \`"hg38"\`). Slots the template marks
+  optional, or that carry a default, may be left out.
 - Pass \`inputs_by="step_index|step_uuid"\` verbatim — the pipe-separated
   form is one valid value, not a choice between two.
-- **Workflow inputs never go in \`params\`.** \`params\` is the legacy
-  per-step tool-parameter override map for non-input steps, and its values
-  must be *dicts* (\`{"5": {"minScore": 10}}\`), so a scalar there fails with
-  \`Input should be a valid dictionary in ('body','parameters',<key>)\`. On
-  that error, move the slot into \`inputs\` — re-keying it under \`params\` by
-  label, step index, or uuid will never work.
+- **Don't route workflow inputs through \`params\`.** It's the legacy
+  per-step tool-override map, typed \`dict[str, dict]\`, so a scalar value
+  fails with \`Input should be a valid dictionary in
+  ('body','parameters',<key>)\`. Re-keying by label, index, or uuid won't fix
+  that — the key was never the problem. Put the value in \`inputs\`.
 
 ### Executing a Galaxy step
 

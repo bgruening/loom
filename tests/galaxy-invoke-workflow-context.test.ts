@@ -23,13 +23,31 @@ describe("buildGalaxyContextBlock workflow-invocation guidance", () => {
   it("points at the input-template tool before invoking", () => {
     const block = buildGalaxyContextBlock();
     expect(block).toContain("galaxy_get_workflow_input_template");
-    expect(block).toContain("inputs_template");
+    expect(block).toContain("galaxy_invoke_workflow");
   });
 
-  it("states that every input slot goes in inputs, data and non-data alike", () => {
+  it("says to replace the template placeholders rather than send them", () => {
     const block = buildGalaxyContextBlock();
-    expect(block).toMatch(/\*\*Every\*\* input slot goes in `inputs`/);
-    expect(block).toContain("non-data alike");
+    expect(block).toMatch(/swap each placeholder/i);
+    // The literal placeholders build_workflow_input_template emits -- a model
+    // that submits these verbatim gets a confusing downstream failure.
+    expect(block).toContain("<value>");
+    expect(block).toContain("<dataset_id>");
+  });
+
+  it("routes data and non-data slots alike into inputs", () => {
+    const block = buildGalaxyContextBlock();
+    expect(block).toMatch(/non-data slots both belong in `inputs`/);
+    expect(block).toContain('{"src":"hdca","id":');
+    expect(block).toMatch(/bare scalar/);
+  });
+
+  it("allows optional and defaulted slots to be omitted", () => {
+    const block = buildGalaxyContextBlock();
+    // Galaxy only rejects a missing input that is neither optional nor
+    // defaulted (run_request.py _normalize_inputs), so the prompt must not
+    // demand a value for every slot.
+    expect(block).toMatch(/optional, or that carry a default, may be left out/);
   });
 
   it("gives the pipe-separated inputs_by value verbatim", () => {
@@ -37,19 +55,24 @@ describe("buildGalaxyContextBlock workflow-invocation guidance", () => {
     expect(block).toContain('inputs_by="step_index|step_uuid"');
   });
 
-  it("rules out params for workflow inputs and names the pydantic error", () => {
+  it("explains why a scalar in params 400s, naming the exact error", () => {
     const block = buildGalaxyContextBlock();
-    expect(block).toMatch(/Workflow inputs never go in `params`/);
-    // The exact 400 the model loops on -- so it can match what it just saw.
+    expect(block).toMatch(/Don't route workflow inputs through `params`/);
+    expect(block).toContain("dict[str, dict]");
+    // The error the model loops on, so it can match what it just saw.
     expect(block).toContain(
-      "Input should be a valid dictionary in ('body','parameters',<key>)",
+      "Input should be a valid dictionary in\n  ('body','parameters',<key>)",
     );
   });
 
-  it("says params values are dicts, and re-keying under params never works", () => {
+  it("blames the value type, not the key, without overclaiming", () => {
     const block = buildGalaxyContextBlock();
-    expect(block).toContain("must be *dicts*");
-    expect(block).toMatch(/re-keying it under `params`[\s\S]*never work/);
+    expect(block).toMatch(/the key was never the problem/);
+    // params CAN legally carry a parameter_input as {"input": v} via Galaxy's
+    // legacy normalization, so the prompt must steer without asserting that
+    // params can never work -- a claim the source contradicts.
+    expect(block).not.toMatch(/never work/i);
+    expect(block).not.toMatch(/inputs never go in `params`/i);
   });
 
   it("omits the guidance entirely when Galaxy is not connected", () => {
