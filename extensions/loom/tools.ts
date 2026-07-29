@@ -19,7 +19,11 @@ import {
   withNotebookLock,
   findInvocationBlocks,
   upsertInvocationBlock,
+  applyInvocationUpdates,
+  statNotebook,
+  NotebookChangedError,
   type InvocationYaml,
+  type InvocationPollUpdate,
 } from "./notebook-writer";
 import { getGalaxyConfig, galaxyGet, type GalaxyInvocationResponse } from "./galaxy-api";
 import { listEnabledSkillRepos, findSkillRepo } from "./skills";
@@ -579,154 +583,162 @@ export async function checkInvocations(
     };
   }
 
-  // Wrap the entire read-poll-write cycle in a per-path lock so a parallel
-  // check_all or invocation_record can't overlap us and lose updates.
-  // Galaxy GETs run inside the lock — that's intentional: a concurrent
-  // writer must wait for our final upsert.
-  type LockOutcome =
-    | { kind: "early"; result: CheckInvocationsResult }
-    | { kind: "results"; results: CheckResultEntry[] };
-  const lockResult: LockOutcome = await withNotebookLock<LockOutcome>(notebookPath, async () => {
-    let content = await readNotebook(notebookPath);
-    const blocks = findInvocationBlocks(content);
+  // Phase 1 — decide what to poll. Read under the lock so we see any Loom
+  // write (a just-finished invocation_record) whole, but hold it only for the
+  // read: there is no network I/O in here.
+  const blocks = await withNotebookLock(notebookPath, async () =>
+    findInvocationBlocks(await readNotebook(notebookPath)),
+  );
 
-    let toCheck: InvocationYaml[];
-    if (specificId) {
-      const found = blocks.find((b) => b.invocationId === specificId);
-      if (!found) {
-        return {
-          kind: "early",
-          result: {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({
-                  success: false,
-                  error: `Invocation ${specificId} not found in notebook.`,
-                }),
-              },
-            ],
-            details: { error: true } as Record<string, unknown>,
-          },
-        };
-      }
-      toCheck = [found];
-    } else {
-      toCheck = blocks.filter((b) => b.status === "in_progress");
-    }
-
-    if (toCheck.length === 0) {
+  let toCheck: InvocationYaml[];
+  if (specificId) {
+    const found = blocks.find((b) => b.invocationId === specificId);
+    if (!found) {
       return {
-        kind: "early",
-        result: {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                success: true,
-                results: [],
-                message: "No in-progress invocations.",
-              }),
-            },
-          ],
-          details: { checked: 0 } as Record<string, unknown>,
-        },
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              success: false,
+              error: `Invocation ${specificId} not found in notebook.`,
+            }),
+          },
+        ],
+        details: { error: true } as Record<string, unknown>,
       };
     }
+    toCheck = [found];
+  } else {
+    toCheck = blocks.filter((b) => b.status === "in_progress");
+  }
 
-    const results: CheckResultEntry[] = [];
+  if (toCheck.length === 0) {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({
+            success: true,
+            results: [],
+            message: "No in-progress invocations.",
+          }),
+        },
+      ],
+      details: { checked: 0 } as Record<string, unknown>,
+    };
+  }
 
-    for (const block of toCheck) {
-      try {
-        const inv = await galaxyGet<GalaxyInvocationResponse>(
-          `/invocations/${block.invocationId}`,
-          signal,
-        );
+  // Phase 2 — talk to Galaxy with no lock held and nothing pinned in memory
+  // about the notebook. These GETs are the slow part (one round trip per
+  // in-flight invocation); before #391 they sat between the read and the write,
+  // so every notebook write the agent made meanwhile was overwritten by a
+  // seconds-stale snapshot. Errors stay per-block: a 502 on one invocation must
+  // not cost the others their update.
+  const results: CheckResultEntry[] = [];
+  const updates: InvocationPollUpdate[] = [];
 
-        const summary = { ok: 0, running: 0, queued: 0, error: 0, other: 0 };
-        let totalJobs = 0;
-        let completedSteps = 0;
-        for (const invStep of inv.steps) {
-          let stepJobs = 0;
-          let stepOk = 0;
-          for (const job of invStep.jobs) {
-            stepJobs++;
-            totalJobs++;
-            if (job.state === "ok") {
-              summary.ok++;
-              stepOk++;
-            } else if (job.state === "running") summary.running++;
-            else if (job.state === "queued" || job.state === "new" || job.state === "waiting")
-              summary.queued++;
-            else if (job.state === "error" || job.state === "deleted") summary.error++;
-            else summary.other++;
-          }
-          if (stepJobs > 0 && stepJobs === stepOk) completedSteps++;
+  for (const block of toCheck) {
+    try {
+      const inv = await galaxyGet<GalaxyInvocationResponse>(
+        `/invocations/${block.invocationId}`,
+        signal,
+      );
+
+      const summary = { ok: 0, running: 0, queued: 0, error: 0, other: 0 };
+      let totalJobs = 0;
+      let completedSteps = 0;
+      for (const invStep of inv.steps) {
+        let stepJobs = 0;
+        let stepOk = 0;
+        for (const job of invStep.jobs) {
+          stepJobs++;
+          totalJobs++;
+          if (job.state === "ok") {
+            summary.ok++;
+            stepOk++;
+          } else if (job.state === "running") summary.running++;
+          else if (job.state === "queued" || job.state === "new" || job.state === "waiting")
+            summary.queued++;
+          else if (job.state === "error" || job.state === "deleted") summary.error++;
+          else summary.other++;
         }
-
-        let autoAction: string | undefined;
-        let nextStatus: InvocationYaml["status"] = block.status;
-        let nextSummary = block.summary;
-
-        if (
-          summary.error === 0 &&
-          summary.running === 0 &&
-          summary.queued === 0 &&
-          summary.ok > 0
-        ) {
-          nextStatus = "completed";
-          nextSummary = `Workflow completed: ${summary.ok} jobs succeeded`;
-          autoAction = "completed";
-        } else if (summary.error > 0) {
-          nextStatus = "failed";
-          nextSummary = `Workflow failed: ${summary.error} job(s) errored, ${summary.ok} succeeded`;
-          autoAction = "failed";
-        }
-
-        // Always update the block — even if the rolled-up status didn't
-        // change, the per-poll counters (and last_polled_at) did, and the
-        // renderer wants those for the live progress bar.
-        const updated: InvocationYaml = {
-          ...block,
-          status: nextStatus,
-          summary: nextSummary,
-          totalSteps: inv.steps.length,
-          completedSteps,
-          totalJobs,
-          completedJobs: summary.ok,
-          failedJobs: summary.error,
-          lastPolledAt: new Date().toISOString(),
-        };
-        content = upsertInvocationBlock(content, updated);
-
-        results.push({
-          invocationId: block.invocationId,
-          notebookAnchor: block.notebookAnchor,
-          label: block.label,
-          invocationState: inv.state,
-          jobSummary: summary,
-          autoAction,
-        });
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        results.push({
-          invocationId: block.invocationId,
-          notebookAnchor: block.notebookAnchor,
-          label: block.label,
-          invocationState: "error_checking",
-          jobSummary: { ok: 0, running: 0, queued: 0, error: 0, other: 0 },
-          autoAction: `check_error: ${msg}`,
-        });
+        if (stepJobs > 0 && stepJobs === stepOk) completedSteps++;
       }
+
+      let autoAction: string | undefined;
+      let transition: InvocationPollUpdate["transition"];
+
+      if (summary.error === 0 && summary.running === 0 && summary.queued === 0 && summary.ok > 0) {
+        transition = {
+          status: "completed",
+          summary: `Workflow completed: ${summary.ok} jobs succeeded`,
+        };
+        autoAction = "completed";
+      } else if (summary.error > 0) {
+        transition = {
+          status: "failed",
+          summary: `Workflow failed: ${summary.error} job(s) errored, ${summary.ok} succeeded`,
+        };
+        autoAction = "failed";
+      }
+
+      // Always update the block — even if the rolled-up status didn't
+      // change, the per-poll counters (and last_polled_at) did, and the
+      // renderer wants those for the live progress bar. Status and summary
+      // ride along only on a transition, so a no-op poll can't overwrite an
+      // edit the agent made to the block while we were talking to Galaxy.
+      updates.push({
+        invocationId: block.invocationId,
+        totalSteps: inv.steps.length,
+        completedSteps,
+        totalJobs,
+        completedJobs: summary.ok,
+        failedJobs: summary.error,
+        lastPolledAt: new Date().toISOString(),
+        transition,
+      });
+
+      results.push({
+        invocationId: block.invocationId,
+        notebookAnchor: block.notebookAnchor,
+        label: block.label,
+        invocationState: inv.state,
+        jobSummary: summary,
+        autoAction,
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      results.push({
+        invocationId: block.invocationId,
+        notebookAnchor: block.notebookAnchor,
+        label: block.label,
+        invocationState: "error_checking",
+        jobSummary: { ok: 0, running: 0, queued: 0, error: 0, other: 0 },
+        autoAction: `check_error: ${msg}`,
+      });
     }
+  }
 
-    // Persist any status updates back to the file in one write.
-    await writeNotebook(notebookPath, content);
-    return { kind: "results", results };
-  });
-
-  if (lockResult.kind === "early") return lockResult.result;
-  const results = lockResult.results;
+  // Phase 3 — persist. The lock still keeps two Loom writers from losing each
+  // other's updates, but the guarantee now comes from re-reading inside it
+  // rather than from having held it across the poll: whoever gets the lock
+  // second folds their blocks into content that already contains the first
+  // writer's. A write that loses to an outside writer between our read and our
+  // rename fails the stamp check and is retried against fresh content rather
+  // than silently overwriting it.
+  if (updates.length > 0) {
+    const transitioned = await withNotebookLock(notebookPath, () =>
+      persistInvocationUpdates(notebookPath, updates),
+    );
+    // A transition we didn't actually record isn't news. The poller turns
+    // "completed"/"failed" straight into a user-facing toast, so leaving the
+    // flag on a block that was deleted mid-poll — or that another poller had
+    // already advanced — would announce a state change nothing wrote.
+    for (const entry of results) {
+      const announced = entry.autoAction === "completed" || entry.autoAction === "failed";
+      if (announced && !transitioned.has(entry.invocationId)) entry.autoAction = undefined;
+    }
+  }
 
   return {
     content: [
@@ -741,4 +753,54 @@ export async function checkInvocations(
     // travels in `content`; this is for the headless poller path.
     details: { checked: results.length, results } as Record<string, unknown>,
   };
+}
+
+// A write only loses the stamp check when someone else wrote in the microseconds
+// between our read and our rename; three attempts is far more than convergence
+// needs, and bounding it keeps a pathological writer from spinning us.
+const MAX_PERSIST_ATTEMPTS = 3;
+
+/**
+ * Read -> fold in the polled blocks -> write, retrying against fresh content if
+ * the notebook changed under us. Call with the notebook lock held. Returns the
+ * invocation ids whose status this call actually changed on disk.
+ *
+ * The stamp is taken *before* the read on purpose. Stamping afterwards would
+ * let a write that landed between the read and the stat look unchanged — the
+ * exact clobber this is here to stop — whereas stamping first can only ever
+ * cost us a spurious retry.
+ */
+async function persistInvocationUpdates(
+  notebookPath: string,
+  updates: InvocationPollUpdate[],
+): Promise<Set<string>> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < MAX_PERSIST_ATTEMPTS; attempt++) {
+    const stamp = await statNotebook(notebookPath);
+    // Read regardless of the stat, so a notebook that's actually gone or
+    // unreadable fails with its own ENOENT/EACCES instead of being dressed up
+    // as a race.
+    const fresh = await readNotebook(notebookPath);
+    // Readable but unstattable: without a stamp there's no compare-and-swap,
+    // and an unguarded whole-file write is the thing #391 is about. Treat it as
+    // a lost race rather than quietly downgrading to one.
+    if (!stamp) {
+      lastError = new NotebookChangedError(notebookPath);
+      continue;
+    }
+    const { content, applied, transitioned } = applyInvocationUpdates(fresh, updates);
+    // Every block was deleted or already has a newer poll on disk — nothing to
+    // write, so don't rewrite the file (and don't risk a race) for no change.
+    if (applied.length === 0) return new Set();
+    try {
+      await writeNotebook(notebookPath, content, stamp);
+      return new Set(transitioned);
+    } catch (error) {
+      if (!(error instanceof NotebookChangedError)) throw error;
+      lastError = error;
+    }
+  }
+  // Surface it: the poller's catch drops the tick (so no completion toast fires
+  // for a transition we failed to record) and the next tick re-polls.
+  throw lastError;
 }

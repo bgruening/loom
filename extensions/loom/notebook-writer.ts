@@ -7,6 +7,7 @@
  * Galaxy invocation polling tools read and write.
  */
 
+import { randomBytes } from "crypto";
 import * as fs from "fs/promises";
 import * as path from "path";
 
@@ -47,15 +48,84 @@ export function withNotebookLock<T>(filePath: string, work: () => Promise<T>): P
 }
 
 /**
- * Atomic notebook write: render to `<file>.tmp` then rename. The rename
+ * Cheap fingerprint of the notebook on disk, used as the expected-value half
+ * of a compare-and-swap write. Size alone catches every append; mtime catches
+ * same-length rewrites.
+ *
+ * A heuristic, not a content hash: a rewrite that preserves both the byte count
+ * and the observed mtime (coarse filesystem timestamps, or a tool that restores
+ * times) still compares equal. Good enough for the accidental-interleaving case
+ * this guards, and cheap enough to run on every write.
+ */
+export interface NotebookStamp {
+  mtimeMs: number;
+  size: number;
+}
+
+/** Thrown by a guarded `writeNotebook` when the file moved under the caller. */
+export class NotebookChangedError extends Error {
+  constructor(filePath: string) {
+    super(`Notebook changed on disk since it was read: ${filePath}`);
+    this.name = "NotebookChangedError";
+  }
+}
+
+/** Fingerprint the notebook, or null if it isn't there. */
+export async function statNotebook(filePath: string): Promise<NotebookStamp | null> {
+  try {
+    const st = await fs.stat(filePath);
+    return { mtimeMs: st.mtimeMs, size: st.size };
+  } catch {
+    return null;
+  }
+}
+
+// Per-write scratch name. A fixed `<file>.tmp` is shared by every writer, so
+// two of them (two Loom processes on one notebook, or one process that abandons
+// a guarded write while another is staging one) can overwrite or delete each
+// other's staging file and rename the wrong bytes into place. Random names cost
+// nothing and take that off the table; paired with the `wx` flag below they also
+// mean we never write through a path someone else got to first.
+function tmpPathFor(filePath: string): string {
+  return `${filePath}.tmp.${randomBytes(8).toString("hex")}`;
+}
+
+/**
+ * Atomic notebook write: render to a scratch sibling then rename. The rename
  * is atomic on POSIX, so the destination either has the old or the new
  * content — never partial. The file watcher in state.ts may still fire
  * on the rename, but it can no longer observe a half-written file.
+ *
+ * Pass `expected` (a stamp taken *before* the read this content was derived
+ * from) to make the write a compare-and-swap: if the file changed in the
+ * meantime — an agent `edit`/`bash` append, or another writer entirely — the
+ * write is abandoned with `NotebookChangedError` instead of overwriting a
+ * stranger's update (#391). Callers are expected to re-read and retry; without
+ * `expected` the write is unconditional, as before.
+ *
+ * The check sits between the staging write and the rename, which narrows the
+ * exposure to a single `rename` syscall but does not close it: stat-then-rename
+ * is not atomic, and a writer that lands in that gap is still overwritten.
+ * Closing it for real needs an OS-level lock (or routing every notebook write
+ * through one owner), which is a bigger change than #391.
  */
-export async function writeNotebook(filePath: string, content: string): Promise<void> {
-  const tmp = `${filePath}.tmp`;
-  // O_TRUNC | O_WRONLY | O_CREAT via fs.writeFile — but write to tmp first.
-  await fs.writeFile(tmp, content, "utf-8");
+export async function writeNotebook(
+  filePath: string,
+  content: string,
+  expected?: NotebookStamp,
+): Promise<void> {
+  const tmp = tmpPathFor(filePath);
+  // `wx` is O_CREAT | O_EXCL: create the scratch file or fail. Never follow an
+  // existing path — a symlink planted at a scratch name would otherwise let a
+  // write land on whatever it points at.
+  await fs.writeFile(tmp, content, { encoding: "utf-8", flag: "wx" });
+  if (expected) {
+    const current = await statNotebook(filePath);
+    if (!current || current.mtimeMs !== expected.mtimeMs || current.size !== expected.size) {
+      await fs.rm(tmp, { force: true });
+      throw new NotebookChangedError(filePath);
+    }
+  }
   await fs.rename(tmp, filePath);
 }
 
@@ -221,6 +291,90 @@ export function upsertInvocationBlock(content: string, inv: InvocationYaml): str
   const trimmed = content.replace(/\s+$/, "");
   const sep = trimmed.length > 0 ? "\n\n" : "";
   return trimmed + sep + newBlock.join("\n") + "\n";
+}
+
+/**
+ * What one Galaxy poll learned about an invocation — the fields the poller
+ * owns, and nothing else.
+ *
+ * Deliberately not a whole `InvocationYaml`: `label`, `notebook_anchor`,
+ * `submitted_at` and friends belong to whoever recorded the invocation, and
+ * writing back a copy captured before the Galaxy round trip would clobber an
+ * edit the agent made in the meantime — #391 again, one block down.
+ */
+export interface InvocationPollUpdate {
+  invocationId: string;
+  totalSteps: number;
+  completedSteps: number;
+  totalJobs: number;
+  completedJobs: number;
+  failedJobs: number;
+  lastPolledAt: string;
+  /** Present only when this poll decided the invocation reached a terminal state. */
+  transition?: { status: InvocationYaml["status"]; summary: string };
+}
+
+/**
+ * Fold a batch of freshly-polled invocations into notebook content that was
+ * read *after* the poll, so the result is built on current bytes rather than a
+ * pre-poll snapshot (#391). Each update is merged onto the block as it exists
+ * in `content`, so fields the poller doesn't own survive.
+ *
+ * Two updates are dropped rather than applied:
+ *   - the block is gone from `content` — someone deleted it while we were
+ *     talking to Galaxy, and `upsertInvocationBlock` would resurrect it at the
+ *     end of the file;
+ *   - the block on disk carries a newer `last_polled_at` than ours — a second
+ *     poller (another Loom process, or the agent calling check_all while the
+ *     background timer is mid-tick) already recorded a later reading, and our
+ *     counters would walk it backwards.
+ *
+ * A transition always lands, including one terminal state correcting another:
+ * completion is inferred from the jobs Galaxy has materialized so far, so a
+ * poll that catches a workflow mid-schedule can call it complete and a later
+ * one has to be able to say otherwise. Refusing that would pin `completed` next
+ * to a nonzero `failed_jobs` — the counters and the status must agree.
+ *
+ * Returns the ids written, and separately the ids whose status this batch
+ * actually changed. The caller needs the second set to know which transitions
+ * are its to announce: re-writing `completed` over `completed` is a refresh,
+ * not news, and shouldn't produce a second "your workflow finished" toast.
+ */
+export function applyInvocationUpdates(
+  content: string,
+  updates: InvocationPollUpdate[],
+): { content: string; applied: string[]; transitioned: string[] } {
+  let next = content;
+  const applied: string[] = [];
+  const transitioned: string[] = [];
+  for (const update of updates) {
+    const current = findInvocationBlocks(next).find((b) => b.invocationId === update.invocationId);
+    if (!current) continue;
+    if (isNewerPoll(current.lastPolledAt, update.lastPolledAt)) continue;
+    const merged: InvocationYaml = {
+      ...current,
+      totalSteps: update.totalSteps,
+      completedSteps: update.completedSteps,
+      totalJobs: update.totalJobs,
+      completedJobs: update.completedJobs,
+      failedJobs: update.failedJobs,
+      lastPolledAt: update.lastPolledAt,
+      ...(update.transition ?? {}),
+    };
+    next = upsertInvocationBlock(next, merged);
+    applied.push(update.invocationId);
+    if (merged.status !== current.status) transitioned.push(update.invocationId);
+  }
+  return { content: next, applied, transitioned };
+}
+
+/** True when `onDisk` is a strictly later poll timestamp than `ours`. */
+function isNewerPoll(onDisk: string | undefined, ours: string | undefined): boolean {
+  if (!onDisk || !ours) return false;
+  const a = Date.parse(onDisk);
+  const b = Date.parse(ours);
+  if (Number.isNaN(a) || Number.isNaN(b)) return false;
+  return a > b;
 }
 
 interface InvocationBlockRange {
