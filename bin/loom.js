@@ -13,6 +13,7 @@ import { spawn } from "child_process";
 import { getLoomVersion, detectInstall } from "./update-check.js";
 import { isUvxAvailable, uvxMissingNotice } from "./uvx-check.js";
 import { resolveHideThinking, isInteractiveTerminal } from "./thinking-pref.js";
+import { resolvePiExtensionDir } from "./pi-extension-path.js";
 import { pickChannel } from "../shared/version-compare.js";
 import {
   isCustomProvider,
@@ -39,8 +40,9 @@ const updateCheckScript = resolve(__dirname, "update-check.js");
 // pi-web-access provides web_search, fetch_content, and code_search tools
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
-const mcpAdapterPath = dirname(require.resolve("pi-mcp-adapter/index.ts"));
-const webAccessPath = dirname(require.resolve("pi-web-access/index.ts"));
+const resolveSpecifier = (specifier) => require.resolve(specifier);
+const mcpAdapterPath = resolvePiExtensionDir("pi-mcp-adapter", resolveSpecifier);
+const webAccessPath = resolvePiExtensionDir("pi-web-access", resolveSpecifier);
 const piEntryPointPath = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
 const piPackageDir = dirname(dirname(piEntryPointPath));
 const piArgsModulePath = join(piPackageDir, "dist/cli/args.js");
