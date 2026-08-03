@@ -175,8 +175,7 @@ function syncSessionJsonlSymlink(ctx: ExtensionContext): void {
 }
 
 type GreetingAction =
-  | { kind: "model"; message: string }
-  | { kind: "notify"; text: string; level: "info" | "warning" };
+  { kind: "model"; message: string } | { kind: "notify"; text: string; level: "info" | "warning" };
 
 /**
  * Decide the startup greeting from the active Galaxy credential status. Pure so

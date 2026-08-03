@@ -487,8 +487,7 @@ Writes a fenced \`loom-invocation\` YAML block at the end of the notebook. Polli
     },
     renderResult: (result) => {
       const d = result.details as
-        | { invocationId?: string; notebookAnchor?: string; error?: boolean }
-        | undefined;
+        { invocationId?: string; notebookAnchor?: string; error?: boolean } | undefined;
       if (d?.error) return new Text("❌ Failed to record invocation");
       return new Text(`🔗 Invocation ${d?.invocationId} → ${d?.notebookAnchor}`);
     },

@@ -58,8 +58,7 @@ export interface OAuthStatus {
 export function getOAuthStatus(provider: string): OAuthStatus {
   const data = readAuthFile();
   const cred = data[provider] as
-    | { type?: string; expires?: number; accountId?: string }
-    | undefined;
+    { type?: string; expires?: number; accountId?: string } | undefined;
   if (!cred || cred.type !== "oauth") return { signedIn: false };
   const expiresInSeconds =
     typeof cred.expires === "number" ? Math.floor((cred.expires - Date.now()) / 1000) : undefined;

@@ -2,7 +2,7 @@
 
 > [!TIP]
 > **📖 See the docs & live demos → [galaxyproject.github.io/loom](https://galaxyproject.github.io/loom/)**
-> — *Agentic Science with Galaxy*: an overview of Orbit, Loom, and Galaxy MCP, an animated walkthrough of real analyses, and getting-started guides.
+> — _Agentic Science with Galaxy_: an overview of Orbit, Loom, and Galaxy MCP, an animated walkthrough of real analyses, and getting-started guides.
 
 An AI research harness for [Galaxy](https://galaxyproject.org) bioinformatics, built on [Pi.dev](https://pi.dev).
 
