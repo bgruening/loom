@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { shell } from "electron";
-import { loginOpenAICodex } from "@earendil-works/pi-ai/oauth";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 /**
  * OAuth provider integration for the brain's auth.json. The brain (pi-coding-agent)
@@ -74,27 +74,42 @@ export function signOutOAuth(provider: string): void {
 
 /**
  * Drive the OpenAI Codex OAuth flow. Opens the auth URL in the user's default
- * browser; pi-ai's loginOpenAICodex spins up a local callback server on
- * 127.0.0.1:1455 and returns once the browser hands back the code.
+ * browser; the flow spins up a local callback server on 127.0.0.1:1455 and
+ * returns once the browser hands back the code.
+ *
+ * pi 0.81 folded the per-service `loginOpenAICodex()` helper into the provider
+ * itself: auth now hangs off `provider.auth.oauth` as a login/refresh/toAuth
+ * triple, and driving login is the app's job. So we ask a ModelRuntime for the
+ * provider rather than importing a service-specific function.
  *
  * Throws if the flow fails (port conflict, user cancellation, network error).
  */
 export async function signInOpenAICodex(): Promise<OAuthStatus> {
-  const creds = await loginOpenAICodex({
-    onAuth: ({ url }) => {
-      void shell.openExternal(url);
+  const runtime = await ModelRuntime.create({ authPath: getAuthPath() });
+  const oauth = runtime.getProvider("openai-codex")?.auth?.oauth;
+  if (!oauth) {
+    throw new Error("This build of pi does not expose an OpenAI Codex OAuth provider.");
+  }
+
+  const creds = await oauth.login({
+    notify: (event) => {
+      if (event.type === "auth_url") {
+        void shell.openExternal(event.url);
+        return;
+      }
+      if (event.type === "progress" || event.type === "info") {
+        console.log("[oauth]", event.message);
+      }
     },
     // Fallback paste path -- only triggered if the local callback server fails
     // to start (port already in use). Orbit doesn't surface a paste UI today,
     // so we reject with a guidance message instead of hanging.
-    onPrompt: async () => {
+    prompt: async () => {
       throw new Error(
         "OAuth callback server could not bind to 127.0.0.1:1455. " +
           "Free the port (e.g. quit Codex CLI) and try again.",
       );
     },
-    onProgress: (msg) => console.log("[oauth]", msg),
-    originator: "loom",
   });
 
   const data = readAuthFile();

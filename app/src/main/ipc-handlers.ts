@@ -20,7 +20,11 @@ import {
 } from "./galaxy-status.js";
 import { fetchGalaxyCurrentUser, type GalaxyUserStatus } from "./galaxy-user.js";
 import { normalizeGalaxyUrl, validateGalaxyUrl } from "./galaxy-url.js";
-import { getProviders, getModels } from "@earendil-works/pi-ai";
+// pi 0.80 moved pi-ai's global API off the package root to /compat. pi's
+// extension loader aliases the root back to compat, but this is Orbit's main
+// process -- not an extension -- so it gets no alias and must import /compat
+// directly or these are undefined at runtime.
+import { getProviders, getModels } from "@earendil-works/pi-ai/compat";
 import { isDeprecatedModelId } from "./model-catalog.js";
 import { checkLatestVersion } from "./version-check.js";
 import { resolveReleasePageUrl } from "./release-page.js";
