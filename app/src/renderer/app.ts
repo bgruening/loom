@@ -135,6 +135,11 @@ let streaming = false;
 let PRICING: Record<string, { in: number; out: number; cacheRead?: number; cacheWrite?: number }> =
   {
     // Anthropic
+    "claude-fable-5": { in: 10, out: 50, cacheRead: 1, cacheWrite: 12.5 },
+    "claude-opus-5": { in: 5, out: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+    // Sonnet 5 is at introductory pricing; the registry is the source of truth
+    // if that lapses.
+    "claude-sonnet-5": { in: 2, out: 10, cacheRead: 0.2, cacheWrite: 2.5 },
     "claude-opus-4-8": { in: 5, out: 25, cacheRead: 0.5, cacheWrite: 6.25 },
     "claude-opus-4-7": { in: 5, out: 25, cacheRead: 0.5, cacheWrite: 6.25 },
     "claude-opus-4-6": { in: 5, out: 25, cacheRead: 0.5, cacheWrite: 6.25 },
@@ -167,6 +172,9 @@ let PRICING: Record<string, { in: number; out: number; cacheRead?: number; cache
 // under-report on those paths. Documented; not special-cased.
 let CONTEXT_WINDOWS: Record<string, Record<string, number>> = {
   anthropic: {
+    "claude-fable-5": 1_000_000,
+    "claude-opus-5": 1_000_000,
+    "claude-sonnet-5": 1_000_000,
     "claude-opus-4-8": 1_000_000,
     "claude-opus-4-7": 1_000_000,
     "claude-opus-4-6": 1_000_000,
@@ -404,7 +412,7 @@ function shortModelLabel(model: string): string {
   // Strip date suffix (claude-opus-4-6-20250514 → claude-opus-4-6)
   const id = model.replace(/-\d{8}$/, "");
   // Anthropic
-  const cm = id.match(/^claude-(opus|sonnet|haiku)-(\d+(?:-\d+)?)/);
+  const cm = id.match(/^claude-(opus|sonnet|haiku|fable)-(\d+(?:-\d+)?)/);
   if (cm) {
     const family = cm[1].charAt(0).toUpperCase() + cm[1].slice(1);
     const ver = cm[2].replace(/-/g, ".");
@@ -1576,7 +1584,7 @@ function flushNextQueuedMessage(): void {
  * Handle slash commands. Returns true if handled (no need to send to agent).
  *
  * Supported:
- *   /model <name>   — switch LLM model (e.g. /model sonnet, /model claude-opus-4-6)
+ *   /model <name>   — switch LLM model (e.g. /model sonnet, /model claude-opus-5)
  *   /help           — list slash commands
  */
 function formatArgsPreview(args: Record<string, unknown> | undefined): string | undefined {
@@ -1667,7 +1675,7 @@ function handleSlashCommand(text: string): boolean {
       chat.addUserMessage(text);
       chat.addErrorMessage(
         "Usage: /model <name>. Examples: /model sonnet, /model haiku, /model opus, " +
-          "or /model claude-sonnet-4-6 for an exact id.",
+          "or /model claude-opus-5 for an exact id.",
       );
       return true;
     }
@@ -2975,20 +2983,19 @@ interface ModelChoice {
 }
 let MODELS_BY_PROVIDER: Record<string, ModelChoice[]> = {
   anthropic: [
-    { id: "claude-opus-4-8", label: "Opus 4.8 — $5/$25 (most capable)" },
-    { id: "claude-sonnet-4-6", label: "Sonnet 4.6 — $3/$15 (recommended)" },
+    { id: "claude-opus-5", label: "Opus 5 — $5/$25 (recommended)" },
+    { id: "claude-sonnet-5", label: "Sonnet 5 — $2/$10" },
     { id: "claude-haiku-4-5", label: "Haiku 4.5 — $1/$5 (cheapest)" },
+    { id: "claude-fable-5", label: "Fable 5 — $10/$50 (most capable)" },
+    { id: "claude-opus-4-8", label: "Opus 4.8 — $5/$25" },
+    { id: "claude-sonnet-4-6", label: "Sonnet 4.6 — $3/$15" },
     { id: "claude-opus-4-7", label: "Opus 4.7 — $5/$25" },
-    { id: "claude-opus-4-6", label: "Opus 4.6 — $5/$25" },
-    { id: "claude-sonnet-4-5", label: "Sonnet 4.5 — $3/$15" },
-    { id: "claude-opus-4-5", label: "Opus 4.5 — $5/$25" },
   ],
   openai: [
-    { id: "gpt-4o-mini", label: "GPT-4o mini — $0.15/$0.60 (cheapest)" },
-    { id: "gpt-4o", label: "GPT-4o — $2.50/$10" },
-    { id: "gpt-4-turbo", label: "GPT-4 Turbo — $10/$30" },
-    { id: "o1-mini", label: "o1-mini — $3/$12" },
-    { id: "o1", label: "o1 — $15/$60" },
+    { id: "gpt-5.4-mini", label: "GPT-5.4 mini — $0.75/$4.50 (cheapest)" },
+    { id: "gpt-5.4", label: "GPT-5.4 — $2.50/$15 (recommended)" },
+    { id: "gpt-5.2", label: "GPT-5.2 — $1.75/$14" },
+    { id: "gpt-5.5", label: "GPT-5.5 — $5/$30" },
   ],
   "openai-codex": [
     { id: "gpt-5.3-codex", label: "GPT-5.3 Codex" },
@@ -2996,7 +3003,9 @@ let MODELS_BY_PROVIDER: Record<string, ModelChoice[]> = {
     { id: "gpt-5.4-mini", label: "GPT-5.4 mini" },
   ],
   google: [
-    { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash — $0.15/$0.60 (cheapest)" },
+    { id: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash Lite — $0.25/$1.50 (cheapest)" },
+    { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro — $2/$12 (recommended)" },
+    { id: "gemini-3.5-flash", label: "Gemini 3.5 Flash — $1.50/$9" },
     { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro — $1.25/$10" },
   ],
   mistral: [
