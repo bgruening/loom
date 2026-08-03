@@ -11,10 +11,45 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
  * to that file. The brain handles refresh on its own via AuthStorage's locking.
  */
 
-const OAUTH_PROVIDERS = new Set<string>(["openai-codex"]);
+/**
+ * Which providers authenticate by sign-in is pi's business, not ours: since pi
+ * 0.81 each provider carries its own `auth.oauth`, so we read the list off the
+ * registry instead of hardcoding it and going stale the next time pi adds one.
+ *
+ * That read is async and several callers are sync, so prime the cache once at
+ * startup (primeOAuthProviders) and let the sync accessors serve from it. The
+ * seed keeps pre-prime calls honest for the provider we know ships enabled --
+ * without it a status check racing startup would report "not an OAuth provider"
+ * and the UI would offer an API-key field for an account that has none.
+ */
+const SEED_OAUTH_PROVIDERS = ["openai-codex"];
+let oauthProviders: Map<string, string> = new Map(SEED_OAUTH_PROVIDERS.map((id) => [id, ""]));
+
+/** Read the OAuth-capable providers off pi's registry. Call once at startup. */
+export async function primeOAuthProviders(): Promise<ReadonlyMap<string, string>> {
+  try {
+    const runtime = await ModelRuntime.create({ authPath: getAuthPath() });
+    const found = new Map<string, string>();
+    for (const provider of await runtime.getProviders()) {
+      const oauth = provider.auth?.oauth;
+      if (oauth?.login) found.set(provider.id, oauth.loginLabel || oauth.name || "");
+    }
+    // Never shrink below the seed -- an empty read means something is wrong with
+    // the registry, not that sign-in stopped existing.
+    if (found.size > 0) oauthProviders = found;
+  } catch (err) {
+    console.error("[oauth] could not read providers from the registry:", err);
+  }
+  return oauthProviders;
+}
 
 export function isOAuthProvider(provider: string | undefined): boolean {
-  return Boolean(provider && OAUTH_PROVIDERS.has(provider));
+  return Boolean(provider && oauthProviders.has(provider));
+}
+
+/** id -> button label, e.g. "openai-codex" -> "OpenAI (ChatGPT Plus/Pro)". */
+export function listOAuthProviders(): Record<string, string> {
+  return Object.fromEntries(oauthProviders);
 }
 
 function getAuthPath(): string {
@@ -73,22 +108,23 @@ export function signOutOAuth(provider: string): void {
 }
 
 /**
- * Drive the OpenAI Codex OAuth flow. Opens the auth URL in the user's default
- * browser; the flow spins up a local callback server on 127.0.0.1:1455 and
- * returns once the browser hands back the code.
+ * Drive a provider's OAuth flow and persist the result to auth.json. Opens the
+ * auth URL in the user's default browser; the provider's flow runs a local
+ * callback server (127.0.0.1:1455 for OpenAI Codex) and returns once the
+ * browser hands the code back.
  *
  * pi 0.81 folded the per-service `loginOpenAICodex()` helper into the provider
  * itself: auth now hangs off `provider.auth.oauth` as a login/refresh/toAuth
- * triple, and driving login is the app's job. So we ask a ModelRuntime for the
- * provider rather than importing a service-specific function.
+ * triple, and driving login is the app's job. Asking the runtime for the
+ * provider is what makes this work for any of them rather than one by name.
  *
  * Throws if the flow fails (port conflict, user cancellation, network error).
  */
-export async function signInOpenAICodex(): Promise<OAuthStatus> {
+export async function signInOAuth(provider: string): Promise<OAuthStatus> {
   const runtime = await ModelRuntime.create({ authPath: getAuthPath() });
-  const oauth = runtime.getProvider("openai-codex")?.auth?.oauth;
-  if (!oauth) {
-    throw new Error("This build of pi does not expose an OpenAI Codex OAuth provider.");
+  const oauth = runtime.getProvider(provider)?.auth?.oauth;
+  if (!oauth?.login) {
+    throw new Error(`${provider} does not offer OAuth sign-in in this build of pi.`);
   }
 
   const creds = await oauth.login({
@@ -97,23 +133,33 @@ export async function signInOpenAICodex(): Promise<OAuthStatus> {
         void shell.openExternal(event.url);
         return;
       }
+      if (event.type === "device_code") {
+        // Device-code providers want the user to type a code on another page.
+        // Orbit has no UI for that yet, so open the page and log the code
+        // rather than silently appearing to hang.
+        void shell.openExternal(event.verificationUri);
+        console.log("[oauth] enter code:", event.userCode, "at", event.verificationUri);
+        return;
+      }
       if (event.type === "progress" || event.type === "info") {
         console.log("[oauth]", event.message);
       }
     },
-    // Fallback paste path -- only triggered if the local callback server fails
-    // to start (port already in use). Orbit doesn't surface a paste UI today,
-    // so we reject with a guidance message instead of hanging.
+    // Fallback paste path -- triggered when a provider wants a code pasted back,
+    // or when the local callback server can't bind (port already in use). Orbit
+    // doesn't surface a paste UI today, so reject with guidance instead of
+    // hanging on a prompt nobody can answer.
     prompt: async () => {
       throw new Error(
-        "OAuth callback server could not bind to 127.0.0.1:1455. " +
-          "Free the port (e.g. quit Codex CLI) and try again.",
+        `${provider} needs a code pasted back to finish signing in, which Orbit ` +
+          `cannot prompt for yet. If you expected a browser redirect instead, ` +
+          `free the callback port (e.g. quit Codex CLI) and try again.`,
       );
     },
   });
 
   const data = readAuthFile();
-  data["openai-codex"] = {
+  data[provider] = {
     type: "oauth",
     access: creds.access,
     refresh: creds.refresh,
@@ -122,5 +168,5 @@ export async function signInOpenAICodex(): Promise<OAuthStatus> {
   };
   writeAuthFile(data);
 
-  return getOAuthStatus("openai-codex");
+  return getOAuthStatus(provider);
 }

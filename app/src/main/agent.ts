@@ -12,6 +12,7 @@ import { buildBrainEnv as buildBaseBrainEnv } from "../../../shared/brain-env.js
 import { noLocalShellSpawnExtras } from "./local-shell.js";
 import { TurnWatchdog } from "./turn-watchdog.js";
 import { formatWindowTitle } from "./window-title.js";
+import { isOAuthProvider } from "./oauth-handler.js";
 
 /**
  * How long the brain may stay completely silent mid-turn before Orbit treats the
@@ -31,8 +32,8 @@ const PROVIDER_ENV_MAP: Record<string, string> = {
   deepseek: "DEEPSEEK_API_KEY",
 };
 
-/** Providers that authenticate via OAuth (~/.pi/agent/auth.json), not env vars. */
-const OAUTH_PROVIDERS: ReadonlySet<string> = new Set(["openai-codex"]);
+// Providers that authenticate via OAuth (~/.pi/agent/auth.json), not env vars.
+// Sourced from pi's registry rather than a local list -- see oauth-handler.
 
 /** Build the secret env vars injected into the brain subprocess. */
 function buildSecretEnv(): Record<string, string> {
@@ -45,7 +46,7 @@ function buildSecretEnv(): Record<string, string> {
   // If the user switched away from an API-key provider the old key is still in
   // config.json (preserved on purpose so they can switch back); don't leak it
   // into the env under a misrouted variable name.
-  if (!OAUTH_PROVIDERS.has(provider)) {
+  if (!isOAuthProvider(provider)) {
     // Custom OpenAI-compatible endpoints route through pi's --api-key via
     // LOOM_ACTIVE_LLM_API_KEY; built-in providers use their own env var.
     const targetVar = isCustom

@@ -86,6 +86,8 @@ export interface OrbitAPI {
     key: string,
     baseUrl?: string,
   ): Promise<{ valid: boolean; error?: string; models?: string[] }>;
+  /** Provider id -> sign-in button label, sourced from pi's registry. */
+  oauthProviders(): Promise<Record<string, string>>;
   oauthStatus(
     provider: string,
   ): Promise<{ signedIn: boolean; expiresInSeconds?: number; accountId?: string }>;
@@ -187,6 +189,7 @@ const api: OrbitAPI = {
   setBypassPermissions: (enabled) => ipcRenderer.invoke("guardian:set-bypass", enabled),
   validateApiKey: (provider, key, baseUrl) =>
     ipcRenderer.invoke("apiKey:validate", provider, key, baseUrl),
+  oauthProviders: () => ipcRenderer.invoke("oauth:providers"),
   oauthStatus: (provider) => ipcRenderer.invoke("oauth:status", provider),
   oauthSignIn: (provider) => ipcRenderer.invoke("oauth:sign-in", provider),
   oauthSignOut: (provider) => ipcRenderer.invoke("oauth:sign-out", provider),
