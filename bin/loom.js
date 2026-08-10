@@ -49,8 +49,7 @@ const piPackageDir = dirname(dirname(piEntryPointPath));
 const piArgsModulePath = join(piPackageDir, "dist/cli/args.js");
 const piListModelsModulePath = join(piPackageDir, "dist/cli/list-models.js");
 const piConfigModulePath = join(piPackageDir, "dist/config.js");
-const piAuthStorageModulePath = join(piPackageDir, "dist/core/auth-storage.js");
-const piModelRegistryModulePath = join(piPackageDir, "dist/core/model-registry.js");
+const piModelRuntimeModulePath = join(piPackageDir, "dist/core/model-runtime.js");
 const userArgs = process.argv.slice(2);
 
 // Local-execution safety flags. Translate to env so the exec-guard (brain side)
@@ -135,11 +134,12 @@ async function handleInformationalCommand() {
   if (hasArg("--list-models")) {
     const { listModels } = await import(pathToFileURL(piListModelsModulePath).href);
     const { getModelsPath } = await import(pathToFileURL(piConfigModulePath).href);
-    const { AuthStorage } = await import(pathToFileURL(piAuthStorageModulePath).href);
-    const { ModelRegistry } = await import(pathToFileURL(piModelRegistryModulePath).href);
-    const authStorage = AuthStorage.inMemory();
-    const modelRegistry = new ModelRegistry(authStorage, getModelsPath());
-    await listModels(modelRegistry, getListModelsSearchPattern());
+    // pi 0.83 reshaped this: listModels now takes a ModelRuntime (built via an
+    // async factory that reads credentials from authPath itself) rather than a
+    // ModelRegistry wrapped around an AuthStorage.
+    const { ModelRuntime } = await import(pathToFileURL(piModelRuntimeModulePath).href);
+    const modelRuntime = await ModelRuntime.create({ modelsPath: getModelsPath() });
+    await listModels(modelRuntime, getListModelsSearchPattern());
     return true;
   }
 

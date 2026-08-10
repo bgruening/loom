@@ -113,8 +113,7 @@ export function skillsCacheDir(repo: ConfiguredSkillRepo): string {
 }
 
 export type FetchSkillResult =
-  | { ok: true; text: string; cached: boolean }
-  | { ok: false; status?: number; error: string };
+  { ok: true; text: string; cached: boolean } | { ok: false; status?: number; error: string };
 
 /**
  * Fetch one file from a skills repo, reading/writing the same on-disk cache the
