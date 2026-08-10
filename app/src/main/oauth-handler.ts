@@ -127,7 +127,13 @@ export async function signInOAuth(provider: string): Promise<OAuthStatus> {
     throw new Error(`${provider} does not offer OAuth sign-in in this build of pi.`);
   }
 
+  // pi 0.84 makes `signal` required on the provider login interaction. Orbit
+  // has no cancel affordance for sign-in yet, so hand it one that never fires
+  // rather than imply the flow is abortable.
+  const abort = new AbortController();
+
   const creds = await oauth.login({
+    signal: abort.signal,
     notify: (event) => {
       if (event.type === "auth_url") {
         void shell.openExternal(event.url);
