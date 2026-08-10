@@ -36,13 +36,13 @@
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "^0.0.52",
-    "@earendil-works/pi-coding-agent": "^0.83.0",
-    "@earendil-works/pi-tui": "^0.83.0",
+    "@earendil-works/pi-coding-agent": "^0.84.1",
+    "@earendil-works/pi-tui": "^0.84.1",
     "@sinclair/typebox": "^0.34.49",
     "better-sqlite3": "^12.9.0",
     "chokidar": "^5.0.0",
     "node-html-parser": "^7.1.0",
-    "pi-mcp-adapter": "^2.18.0",
+    "pi-mcp-adapter": "^2.21.2",
     "pi-web-access": "^0.17.1",
     "tus-js-client": "^3.1.0",
     "uuid": "^14.0.0",
@@ -71,7 +71,7 @@
     ]
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.83.0",
+    "@earendil-works/pi-ai": "^0.84.1",
     "@eslint/js": "^10.0.1",
     "@types/better-sqlite3": "^7.6.13",
     "dompurify": "^3.4.1",
