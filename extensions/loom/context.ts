@@ -380,6 +380,26 @@ connection, where a server-side fetch runs at datacenter bandwidth.
   genuinely local: a file the user created, or one that exists only on
   this machine with no URL Galaxy can reach itself.
 
+### Invoking a Galaxy workflow
+
+Call \`galaxy_get_workflow_input_template\` before \`galaxy_invoke_workflow\`.
+Take the \`inputs_template\` map out of what it returns — that field, not the
+whole wrapper — keep its keys, replace every placeholder (\`<value>\`,
+\`<dataset_id>\`, \`<collection_id>\`) with a real value, and pass that map as
+\`inputs\`:
+
+- Data **and** non-data slots both belong in \`inputs\`, keyed by step index:
+  a collection slot takes \`{"src":"hdca","id":"<collection_id>"}\`, an
+  integer/text/genome slot takes the bare scalar (\`5\`, \`"hg38"\`). Slots
+  the template marks \`optional\` may be left out.
+- Pass \`inputs_by="step_index|step_uuid"\` verbatim — the pipe-separated
+  form is one valid value, not a choice between two.
+- **Don't route workflow inputs through \`params\`.** It's the legacy
+  per-step tool-override map, typed \`dict[str, dict]\`, so a scalar value
+  fails with \`Input should be a valid dictionary in
+  ('body','parameters',<key>)\`. Re-keying by label, index, or uuid won't fix
+  that — the key was never the problem. Put the value in \`inputs\`.
+
 ### Executing a Galaxy step
 
 **Galaxy invocations run in the background by default — submit and hand
