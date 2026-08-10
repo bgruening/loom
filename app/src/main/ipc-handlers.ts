@@ -33,7 +33,8 @@ import type { FeedbackPayload } from "../../../shared/feedback-contract.js";
 import {
   getOAuthStatus,
   isOAuthProvider,
-  signInOpenAICodex,
+  listOAuthProviders,
+  signInOAuth,
   signOutOAuth,
 } from "./oauth-handler.js";
 import { isLocalShellAvailable } from "./local-shell.js";
@@ -526,12 +527,14 @@ export function registerIpcHandlers(agent: AgentManager): void {
     return getOAuthStatus(provider);
   });
 
+  ipc.handle("oauth:providers", () => listOAuthProviders());
+
   ipc.handle("oauth:sign-in", async (_e, provider: string) => {
-    if (provider !== "openai-codex") {
+    if (!isOAuthProvider(provider)) {
       return { ok: false as const, error: `Unknown OAuth provider: ${provider}` };
     }
     try {
-      const status = await signInOpenAICodex();
+      const status = await signInOAuth(provider);
       // Restart the brain so it picks up the new credential on next prompt.
       agent.stop();
       agent.start();

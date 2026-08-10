@@ -771,11 +771,25 @@ const welcomeBrowseCwd = document.getElementById("welcome-browse-cwd")!;
 const welcomeSave = document.getElementById("welcome-save")!;
 const welcomeError = document.getElementById("welcome-error")!;
 
-/** Provider IDs that authenticate via OAuth rather than an API key. */
-const OAUTH_PROVIDERS = new Set<string>(["openai-codex"]);
+/**
+ * Provider IDs that authenticate via OAuth rather than an API key, keyed to the
+ * sign-in label pi gives them ("OpenAI (ChatGPT Plus/Pro)"). Populated from the
+ * main process at startup; the seed keeps the first paint correct for the
+ * provider that ships enabled if that call hasn't landed yet.
+ */
+let OAUTH_PROVIDERS: Record<string, string> = { "openai-codex": "" };
 function isOAuthProvider(provider: string): boolean {
-  return OAUTH_PROVIDERS.has(provider);
+  return provider in OAUTH_PROVIDERS;
 }
+/** Button text for a provider's sign-in, e.g. "Sign in with GitHub Copilot". */
+function oauthSignInLabel(provider: string, signedIn: boolean): string {
+  if (signedIn) return "Sign in again";
+  const label = OAUTH_PROVIDERS[provider];
+  return label ? `Sign in with ${label}` : "Sign in";
+}
+void window.orbit.oauthProviders().then((p) => {
+  if (p && Object.keys(p).length > 0) OAUTH_PROVIDERS = p;
+});
 
 function formatOAuthStatus(s: {
   signedIn: boolean;
@@ -897,7 +911,7 @@ async function updateWelcomeAuthUi(): Promise<void> {
     const status = await window.orbit.oauthStatus(welcomeProvider.value);
     welcomeOauthStatus.textContent = formatOAuthStatus(status);
     welcomeOauthStatus.classList.toggle("signed-in", status.signedIn);
-    welcomeOauthSignIn.textContent = status.signedIn ? "Sign in again" : "Sign in with ChatGPT";
+    welcomeOauthSignIn.textContent = oauthSignInLabel(welcomeProvider.value, status.signedIn);
   }
 }
 
@@ -966,7 +980,7 @@ welcomeSave.addEventListener("click", async () => {
   if (oauth) {
     const status = await window.orbit.oauthStatus(welcomeProvider.value);
     if (!status.signedIn) {
-      welcomeError.textContent = "Sign in with ChatGPT before continuing.";
+      welcomeError.textContent = `${oauthSignInLabel(welcomeProvider.value, false)} before continuing.`;
       return;
     }
   }
@@ -3132,7 +3146,7 @@ async function updatePrefsAuthUi(): Promise<void> {
     const status = await window.orbit.oauthStatus(prefsProvider.value);
     prefsOauthStatus.textContent = formatOAuthStatus(status);
     prefsOauthStatus.classList.toggle("signed-in", status.signedIn);
-    prefsOauthSignIn.textContent = status.signedIn ? "Sign in again" : "Sign in with ChatGPT";
+    prefsOauthSignIn.textContent = oauthSignInLabel(prefsProvider.value, status.signedIn);
     prefsOauthSignOut.classList.toggle("hidden", !status.signedIn);
   }
 }
@@ -3163,7 +3177,7 @@ prefsOauthSignOut.addEventListener("click", async () => {
     await window.orbit.oauthSignOut(prefsProvider.value);
     prefsOauthStatus.textContent = "Not signed in";
     prefsOauthStatus.classList.remove("signed-in");
-    prefsOauthSignIn.textContent = "Sign in with ChatGPT";
+    prefsOauthSignIn.textContent = oauthSignInLabel(prefsProvider.value, false);
     prefsOauthSignOut.classList.add("hidden");
   } finally {
     prefsOauthSignOut.disabled = false;
