@@ -3,6 +3,22 @@ import path from "node:path";
 import os from "node:os";
 import { shell } from "electron";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
+
+/**
+ * pi hides its OAuth flow modules from bundlers on purpose: `auth/oauth/load.ts`
+ * imports them through a variable specifier so Rollup cannot follow the import
+ * into Node-only flow code. Vite therefore leaves `./openai-codex.js` in the
+ * main bundle verbatim, and at runtime that resolves against `.vite/build/`
+ * rather than pi's dist -- sign-in dies with "Cannot find module".
+ *
+ * pi's escape hatch for bundled hosts is registerBundledOAuthFlowLoaders, which
+ * ships prewired as registerBunOAuthFlows. The "Bun" in the name is about the
+ * standalone binary it was written for, not a Bun runtime requirement: its
+ * imports are static, so Vite bundles the flows and the variable-specifier path
+ * is never taken. Register at module load, before any flow can be reached.
+ */
+registerBunOAuthFlows();
 
 /**
  * OAuth provider integration for the brain's auth.json. The brain (pi-coding-agent)
