@@ -35,6 +35,13 @@ jobs:
         working-directory: app
         run: npm ci
 
+      # Runs after both installs so it can read app/package-lock.json. Cheap, and
+      # it catches a class of drift the typecheck cannot see: app/ resolving a pi
+      # package to a different version than the root tree, which duplicates the
+      # module and splits its state at runtime.
+      - name: Check version lockstep
+        run: npm run check:versions
+
       - name: Typecheck (root)
         run: npm run typecheck
 
