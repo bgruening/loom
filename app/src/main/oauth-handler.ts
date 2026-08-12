@@ -3,6 +3,22 @@ import path from "node:path";
 import os from "node:os";
 import { shell } from "electron";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
+
+/**
+ * pi hides its OAuth flow modules from bundlers on purpose: `auth/oauth/load.ts`
+ * imports them through a variable specifier so Rollup cannot follow the import
+ * into Node-only flow code. Vite therefore leaves `./openai-codex.js` in the
+ * main bundle verbatim, and at runtime that resolves against `.vite/build/`
+ * rather than pi's dist -- sign-in dies with "Cannot find module".
+ *
+ * pi's escape hatch for bundled hosts is registerBundledOAuthFlowLoaders, which
+ * ships prewired as registerBunOAuthFlows. The "Bun" in the name is about the
+ * standalone binary it was written for, not a Bun runtime requirement: its
+ * imports are static, so Vite bundles the flows and the variable-specifier path
+ * is never taken. Register at module load, before any flow can be reached.
+ */
+registerBunOAuthFlows();
 
 /**
  * OAuth provider integration for the brain's auth.json. The brain (pi-coding-agent)
@@ -10,6 +26,13 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
  * so all Orbit needs to do is run the OAuth flow and persist the resulting credentials
  * to that file. The brain handles refresh on its own via AuthStorage's locking.
  */
+
+/**
+ * How long sign-in may sit waiting on the browser redirect before Orbit gives up.
+ * Generous enough for a real login (fresh account, 2FA, password manager), short
+ * enough that a dead flow doesn't hold the callback port for the life of the app.
+ */
+const SIGN_IN_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
  * Which providers authenticate by sign-in is pi's business, not ours: since pi
@@ -151,15 +174,67 @@ export async function signInOAuth(provider: string): Promise<OAuthStatus> {
         console.log("[oauth]", event.message);
       }
     },
-    // Fallback paste path -- triggered when a provider wants a code pasted back,
-    // or when the local callback server can't bind (port already in use). Orbit
-    // doesn't surface a paste UI today, so reject with guidance instead of
-    // hanging on a prompt nobody can answer.
-    prompt: async () => {
+    // pi 0.84 drives real decisions through `prompt`, not just the paste
+    // fallback this used to assume, so rejecting outright fails every sign-in.
+    prompt: async (request) => {
+      // Codex now opens with a browser-vs-device-code chooser, so a blanket
+      // reject dies before the browser ever opens. Orbit can open a URL but has
+      // no chooser UI, so answer with the browser option -- the one flow it can
+      // actually complete.
+      if (request.type === "select") {
+        // Don't fall back to whatever is first: the other methods are device-code
+        // flows whose user code Orbit can only write to the console, which reads
+        // to the user as a hang.
+        const browser = request.options.find((o) => o.id === "browser");
+        if (!browser) {
+          throw new Error(
+            `${provider} only offers login methods Orbit cannot complete yet ` +
+              `(${request.options.map((o) => o.id).join(", ") || "none"}). Sign in with ` +
+              `the pi CLI and Orbit will pick up the credentials.`,
+          );
+        }
+        return browser.id;
+      }
+
+      // `manual_code` is raced against the local callback server, and the flow
+      // treats a rejection here as fatal: its .catch sets manualError and calls
+      // server.cancelWait(), and manualError is rethrown even when the callback
+      // already won. Throwing immediately would therefore cancel the very browser
+      // login we want. Wait instead and let the redirect win; pi aborts this
+      // prompt's signal once it does.
+      //
+      // But don't wait forever. pi swallows a callback-port bind failure -- its
+      // listen() error handler resolves a stub whose waitForCode() returns null --
+      // so the flow falls straight through to `await manualPromise`, and this
+      // prompt is the only thing still holding it. Never settling would hang
+      // sign-in with no error at all, and since the flow's `finally` never runs,
+      // the port stays bound and every retry hangs the same way. Time out instead
+      // so the flow unwinds, closes its server, and reports something actionable.
+      if (request.type === "manual_code") {
+        return new Promise<string>((_resolve, reject) => {
+          const cancel = (message: string) => {
+            clearTimeout(timer);
+            reject(new Error(message));
+          };
+          const timer = setTimeout(
+            () =>
+              cancel(
+                `${provider} sign-in timed out waiting for the browser redirect. If ` +
+                  `another app is holding the callback port (e.g. Codex CLI), quit it ` +
+                  `and try again.`,
+              ),
+            SIGN_IN_TIMEOUT_MS,
+          );
+          request.signal?.addEventListener("abort", () => cancel("manual code entry cancelled"), {
+            once: true,
+          });
+        });
+      }
+
+      // text/secret: a field Orbit genuinely cannot render yet.
       throw new Error(
-        `${provider} needs a code pasted back to finish signing in, which Orbit ` +
-          `cannot prompt for yet. If you expected a browser redirect instead, ` +
-          `free the callback port (e.g. quit Codex CLI) and try again.`,
+        `${provider} needs input ("${request.message}") that Orbit cannot prompt ` +
+          `for yet. Sign in with the pi CLI and Orbit will pick up the credentials.`,
       );
     },
   });
