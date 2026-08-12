@@ -30,7 +30,11 @@ import { registerExecGuard } from "./exec-guard";
 import { registerSandbox } from "./sandbox";
 import { isLocalExecDisabled } from "./local-exec";
 import { registerSecretRedaction } from "./secret-redaction";
-import { GALAXY_RECONNECT_NUDGE, transportNudgeDecision } from "./galaxy-transport-error";
+import {
+  classifyGalaxyFailure,
+  galaxyFailureNudge,
+  transportNudgeDecision,
+} from "./galaxy-transport-error";
 import * as fs from "fs";
 import {
   getState,
@@ -446,7 +450,11 @@ export default function galaxyAnalystExtension(pi: ExtensionAPI): void {
       const decision = transportNudgeDecision(transportNudgeArmed, event.toolName, resultText);
       transportNudgeArmed = decision.armed;
       if (decision.showNudge && ctx.hasUI) {
-        ctx.ui.notify(GALAXY_RECONNECT_NUDGE, "warning");
+        // Same arm/disarm cadence as before, but the advice now matches the
+        // failure: a timeout must not send the user to /mcp reconnect, which
+        // cannot fix it (#410).
+        const nudge = galaxyFailureNudge(classifyGalaxyFailure(event.toolName, resultText));
+        if (nudge) ctx.ui.notify(nudge, "warning");
       }
     } catch {
       /* stale/headless context -- a dropped reconnect hint is fine */

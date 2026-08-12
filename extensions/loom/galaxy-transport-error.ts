@@ -9,16 +9,53 @@
 // Authenticate via OAuth or run connect()..." error, which is an auth problem
 // that /mcp reconnect won't fix.
 
-const TRANSPORT_ERROR_PATTERNS: RegExp[] = [
+// A dropped transport: the server is gone and a new connection fixes it.
+const DROPPED_ERROR_PATTERNS: RegExp[] = [
   /not connected(?!\s+to\s+galaxy)/i, // bare SDK "Not connected"; exclude the verbose auth error
   /connection closed/i, // -32000
   /-32000/,
+];
+
+// A timeout: the server is alive and answering, just not within the request
+// budget. Reconnecting is useless here -- the new connection inherits the same
+// budget, so the next slow call times out identically. Splitting these out is
+// the whole point of this file's second half.
+const TIMEOUT_ERROR_PATTERNS: RegExp[] = [
   /request timed out/i, // -32001
   /-32001/,
 ];
 
+const TRANSPORT_ERROR_PATTERNS: RegExp[] = [...DROPPED_ERROR_PATTERNS, ...TIMEOUT_ERROR_PATTERNS];
+
 export const GALAXY_RECONNECT_NUDGE =
   "Galaxy MCP connection dropped mid-session. Run /mcp reconnect galaxy to restore it (no restart needed).";
+
+export const GALAXY_TIMEOUT_NUDGE =
+  "Galaxy MCP call timed out — the server is responding, just slower than the request budget. " +
+  "Reconnecting will not help. Raise `requestTimeoutMs` for the galaxy server in ~/.pi/agent/mcp.json, " +
+  "or ask for less in one call (narrower query, fewer datasets).";
+
+/** Which kind of failure this is, so callers can give advice that can work. */
+export type GalaxyFailureKind = "dropped" | "timeout" | null;
+
+export function classifyGalaxyFailure(
+  toolName: string | undefined,
+  text: string | undefined,
+): GalaxyFailureKind {
+  if (!toolName || !toolName.startsWith("galaxy_") || !text) return null;
+  // Timeout first: a -32001 body can also mention "not connected" downstream,
+  // and the timeout reading is the actionable one.
+  if (TIMEOUT_ERROR_PATTERNS.some((p) => p.test(text))) return "timeout";
+  if (DROPPED_ERROR_PATTERNS.some((p) => p.test(text))) return "dropped";
+  return null;
+}
+
+/** The nudge matching a classification, or null when there is nothing useful to say. */
+export function galaxyFailureNudge(kind: GalaxyFailureKind): string | null {
+  if (kind === "dropped") return GALAXY_RECONNECT_NUDGE;
+  if (kind === "timeout") return GALAXY_TIMEOUT_NUDGE;
+  return null;
+}
 
 export function isGalaxyTransportError(
   toolName: string | undefined,
