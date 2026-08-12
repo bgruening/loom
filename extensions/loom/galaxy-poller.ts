@@ -30,9 +30,20 @@
  */
 
 import { getNotebookPath } from "./state.js";
-import { findInvocationBlocks, readNotebook } from "./notebook-writer.js";
+import {
+  findInvocationBlocks,
+  readNotebook,
+  withNotebookLock,
+  writeNotebook,
+} from "./notebook-writer.js";
 import { checkInvocations } from "./tools.js";
-import { getGalaxyConfig } from "./galaxy-api.js";
+import { getGalaxyConfig, galaxyGetJobDetails } from "./galaxy-api.js";
+import {
+  applyJobPollUpdate,
+  findJobBlocks,
+  isTerminalJobState,
+  jobStatusFromGalaxyState,
+} from "./galaxy-job-block.js";
 
 // 15s — ~4 polls/min × a few in-flight invocations stays well under
 // usegalaxy.org's per-user rate budget while still feeling live.
@@ -66,10 +77,71 @@ async function hasInProgressInvocations(): Promise<boolean> {
   }
 }
 
+/**
+ * Advance in-flight `loom-job` blocks -- single Galaxy tool runs, which have no
+ * invocation to poll. One GET per in-flight job, and only for jobs that are
+ * still running, so an idle notebook costs nothing beyond the scan the
+ * invocation path already does.
+ */
+async function tickJobs(): Promise<void> {
+  const nbPath = getNotebookPath();
+  if (!nbPath) return;
+
+  let pending: ReturnType<typeof findJobBlocks>;
+  try {
+    pending = findJobBlocks(await readNotebook(nbPath)).filter((j) => j.status === "in_progress");
+  } catch {
+    return; // notebook missing or unreadable -- nothing to advance
+  }
+  if (pending.length === 0) return;
+  if (!getGalaxyConfig()) return;
+
+  for (const job of pending) {
+    let state: string | undefined;
+    try {
+      state = (await galaxyGetJobDetails(job.jobId)).state;
+    } catch (err) {
+      // One unreachable job must not stop the others, or kill the timer.
+      console.error(`[galaxy-poller] job ${job.jobId} poll failed:`, err);
+      continue;
+    }
+    if (!isTerminalJobState(state)) continue;
+
+    const status = jobStatusFromGalaxyState(state);
+    // Re-read inside the lock: the agent may have edited the notebook during
+    // the Galaxy round trip, and applyJobPollUpdate touches only poll-owned
+    // fields so a concurrent label/anchor edit survives.
+    await withNotebookLock(nbPath, async () => {
+      const content = await readNotebook(nbPath);
+      const updated = applyJobPollUpdate(content, {
+        jobId: job.jobId,
+        status,
+        galaxyState: state,
+        lastPolledAt: new Date().toISOString(),
+      });
+      if (updated !== content) await writeNotebook(nbPath, updated);
+    });
+
+    const label = job.label || job.toolId || job.jobId;
+    if (notify) {
+      notify(
+        status === "completed"
+          ? `✅ Galaxy: "${label}" finished — ask me to verify the outputs.`
+          : `❌ Galaxy: "${label}" failed (${state}) — ask me to investigate.`,
+        status === "completed" ? "info" : "warning",
+      );
+    }
+  }
+}
+
 async function tick(): Promise<void> {
   if (inFlight) return;
   inFlight = true;
   try {
+    // Tool runs are tracked separately from workflow invocations and are the
+    // only thing advancing in a session that never invoked a workflow (#413).
+    await tickJobs();
+
     // Cheap path when nothing's in-flight: read notebook, scan, return.
     if (!(await hasInProgressInvocations())) return;
     if (!getGalaxyConfig()) {
