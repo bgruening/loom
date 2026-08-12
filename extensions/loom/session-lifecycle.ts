@@ -247,10 +247,14 @@ export function planUvxWarning(
   return { kind: "notify", level: "warning", text: uvxMissingNotice() };
 }
 
-export function sendStartupGreeting(pi: ExtensionAPI, ctx: ExtensionContext): void {
+export function sendStartupGreeting(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  uvxAvailable: boolean = isUvxAvailable(),
+): void {
   // Surface the missing-runner warning before the greeting: the greeting tells
   // the model to call galaxy_connect(), which is exactly what will fail.
-  const uvxWarning = planUvxWarning(activeGalaxyStatus(), isUvxAvailable());
+  const uvxWarning = planUvxWarning(activeGalaxyStatus(), uvxAvailable);
   if (uvxWarning) {
     try {
       ctx.ui.notify(uvxWarning.text, uvxWarning.level);
