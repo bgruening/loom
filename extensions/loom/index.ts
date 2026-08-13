@@ -31,9 +31,9 @@ import { registerSandbox } from "./sandbox";
 import { isLocalExecDisabled } from "./local-exec";
 import { registerSecretRedaction } from "./secret-redaction";
 import {
-  classifyGalaxyFailure,
-  galaxyFailureNudge,
+  ALL_NUDGES_ARMED,
   transportNudgeDecision,
+  type TransportNudgeArmed,
 } from "./galaxy-transport-error";
 import * as fs from "fs";
 import {
@@ -368,10 +368,11 @@ export default function galaxyAnalystExtension(pi: ExtensionAPI): void {
   // ─────────────────────────────────────────────────────────────────────────────
   const toolStartTimes = new Map<string, number>();
 
-  // Armed = a reconnect nudge is allowed to fire. We fire once when the MCP
-  // transport drops, then disarm so a galaxy retry loop doesn't spam the user,
-  // and re-arm after any healthy galaxy result.
-  let transportNudgeArmed = true;
+  // Armed = that kind of nudge is allowed to fire. We fire once per outage,
+  // then disarm that kind so a galaxy retry loop doesn't spam the user, and
+  // re-arm after any healthy galaxy result. Per kind, so a timeout doesn't
+  // silence the reconnect advice for a drop that follows it.
+  let transportNudgeArmed: TransportNudgeArmed = { ...ALL_NUDGES_ARMED };
 
   pi.on("tool_execution_start", async (event, ctx) => {
     if (event.toolName?.startsWith("galaxy_")) {
@@ -437,10 +438,12 @@ export default function galaxyAnalystExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("tool_result", async (event, ctx) => {
-    // Surface an actionable hint when a galaxy_* call fails because the MCP
-    // transport died mid-session (bare "Not connected" / -32000 / -32001) --
-    // the user can recover with /mcp reconnect galaxy, no restart needed. This
-    // is the deterministic backstop for the connection-liveness steer in
+    // Surface an actionable hint when a galaxy_* call fails at the transport
+    // layer. Two different failures with two different fixes: a dropped pipe
+    // ("Not connected" / -32000) is recovered with /mcp reconnect galaxy, while
+    // a timeout (-32001) means the call outran its budget and wants a smaller
+    // request first (#410). This is the deterministic backstop for the
+    // connection-liveness steer in
     // buildGalaxyContextBlock: even a model that ignores the steer produces the
     // recovery incantation for the user. hasUI-guard + try/catch mirror the
     // galaxy poller notifier -- a headless/stale ctx must not throw here.
@@ -449,13 +452,7 @@ export default function galaxyAnalystExtension(pi: ExtensionAPI): void {
       const resultText = firstContent && "text" in firstContent ? firstContent.text : undefined;
       const decision = transportNudgeDecision(transportNudgeArmed, event.toolName, resultText);
       transportNudgeArmed = decision.armed;
-      if (decision.showNudge && ctx.hasUI) {
-        // Same arm/disarm cadence as before, but the advice now matches the
-        // failure: a timeout must not send the user to /mcp reconnect, which
-        // cannot fix it (#410).
-        const nudge = galaxyFailureNudge(classifyGalaxyFailure(event.toolName, resultText));
-        if (nudge) ctx.ui.notify(nudge, "warning");
-      }
+      if (decision.nudge && ctx.hasUI) ctx.ui.notify(decision.nudge, "warning");
     } catch {
       /* stale/headless context -- a dropped reconnect hint is fine */
     }
