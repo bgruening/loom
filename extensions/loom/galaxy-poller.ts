@@ -32,7 +32,9 @@
 import { getNotebookPath } from "./state.js";
 import {
   findInvocationBlocks,
+  NotebookChangedError,
   readNotebook,
+  statNotebook,
   withNotebookLock,
   writeNotebook,
 } from "./notebook-writer.js";
@@ -63,6 +65,66 @@ interface PollResultEntry {
   label?: string;
   jobSummary?: { ok?: number; error?: number };
   autoAction?: string;
+}
+
+/** How many times a job update re-reads and retries before giving up the tick. */
+const MAX_JOB_PERSIST_ATTEMPTS = 3;
+
+/**
+ * Persist one job's poll result, returning whether it actually landed.
+ *
+ * Same discipline as persistInvocationUpdates: stamp *before* the read (a stamp
+ * taken after would let a write that landed in between look unchanged), apply
+ * only poll-owned fields so a concurrent label edit survives, and hand the stamp
+ * to writeNotebook so an out-of-band edit fails the compare-and-swap instead of
+ * being silently overwritten (#391). The lock alone can't do this -- it only
+ * orders Loom's own writers, and the agent edits notebook.md directly.
+ */
+async function persistJobUpdate(
+  nbPath: string,
+  update: Parameters<typeof applyJobPollUpdate>[1],
+): Promise<boolean> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < MAX_JOB_PERSIST_ATTEMPTS; attempt++) {
+    const stamp = await statNotebook(nbPath);
+    // Read regardless of the stat so a genuinely missing notebook surfaces its
+    // own ENOENT rather than being dressed up as a lost race.
+    const fresh = await readNotebook(nbPath);
+    if (!stamp) {
+      lastError = new NotebookChangedError(nbPath);
+      continue;
+    }
+    const updated = applyJobPollUpdate(fresh, update);
+    // Block gone, or already carrying this result: nothing to write, nothing
+    // to announce.
+    if (updated === fresh) return false;
+    try {
+      await writeNotebook(nbPath, updated, stamp);
+      return true;
+    } catch (error) {
+      if (!(error instanceof NotebookChangedError)) throw error;
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+/** The toast for a job that stopped running, matched to why it stopped. */
+function jobFinishedToast(
+  status: ReturnType<typeof jobStatusFromGalaxyState>,
+  label: string,
+  state: string | undefined,
+): [string, "info" | "warning" | "error"] {
+  switch (status) {
+    case "completed":
+      return [`✅ Galaxy: "${label}" finished — ask me to verify the outputs.`, "info"];
+    case "cancelled":
+      return [`⏹️ Galaxy: "${label}" was cancelled (${state}) — it produced no outputs.`, "info"];
+    case "skipped":
+      return [`⏭️ Galaxy: "${label}" was skipped — its step's condition wasn't met.`, "info"];
+    default:
+      return [`❌ Galaxy: "${label}" failed (${state}) — ask me to investigate.`, "warning"];
+  }
 }
 
 async function hasInProgressInvocations(): Promise<boolean> {
@@ -108,29 +170,29 @@ async function tickJobs(): Promise<void> {
     if (!isTerminalJobState(state)) continue;
 
     const status = jobStatusFromGalaxyState(state);
-    // Re-read inside the lock: the agent may have edited the notebook during
-    // the Galaxy round trip, and applyJobPollUpdate touches only poll-owned
-    // fields so a concurrent label/anchor edit survives.
-    await withNotebookLock(nbPath, async () => {
-      const content = await readNotebook(nbPath);
-      const updated = applyJobPollUpdate(content, {
-        jobId: job.jobId,
-        status,
-        galaxyState: state,
-        lastPolledAt: new Date().toISOString(),
-      });
-      if (updated !== content) await writeNotebook(nbPath, updated);
-    });
+    let persisted: boolean;
+    try {
+      persisted = await withNotebookLock(nbPath, () =>
+        persistJobUpdate(nbPath, {
+          jobId: job.jobId,
+          status,
+          galaxyState: state,
+          lastPolledAt: new Date().toISOString(),
+        }),
+      );
+    } catch (err) {
+      // Lost the write. Say nothing and let the next tick re-poll: the block is
+      // still in_progress on disk, so announcing a transition we failed to
+      // record would leave the notebook and the user telling different stories.
+      console.error(`[galaxy-poller] job ${job.jobId} update failed:`, err);
+      continue;
+    }
+    // The block was deleted mid-poll, or another writer already advanced it.
+    // Either way this tick didn't transition anything, so there's no news.
+    if (!persisted) continue;
 
     const label = job.label || job.toolId || job.jobId;
-    if (notify) {
-      notify(
-        status === "completed"
-          ? `✅ Galaxy: "${label}" finished — ask me to verify the outputs.`
-          : `❌ Galaxy: "${label}" failed (${state}) — ask me to investigate.`,
-        status === "completed" ? "info" : "warning",
-      );
-    }
+    if (notify) notify(...jobFinishedToast(status, label, state));
   }
 }
 
