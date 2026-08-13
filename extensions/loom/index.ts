@@ -31,6 +31,7 @@ import { registerSandbox } from "./sandbox";
 import { isLocalExecDisabled } from "./local-exec";
 import { registerSecretRedaction } from "./secret-redaction";
 import { GALAXY_RECONNECT_NUDGE, transportNudgeDecision } from "./galaxy-transport-error";
+import { GALAXY_UVX_MISSING_NUDGE, isGalaxyLauncherError } from "./galaxy-launcher-error";
 import * as fs from "fs";
 import {
   getState,
@@ -368,6 +369,11 @@ export default function galaxyAnalystExtension(pi: ExtensionAPI): void {
   // transport drops, then disarm so a galaxy retry loop doesn't spam the user,
   // and re-arm after any healthy galaxy result.
   let transportNudgeArmed = true;
+  // Separate flag: a missing uvx is not transient, so unlike the transport
+  // nudge this one never re-arms. Saying it once per session is enough --
+  // repeating it every failed galaxy call would just be nagging about
+  // something the user cannot fix without leaving the app.
+  let uvxNudgeArmed = true;
 
   pi.on("tool_execution_start", async (event, ctx) => {
     if (event.toolName?.startsWith("galaxy_")) {
@@ -443,6 +449,19 @@ export default function galaxyAnalystExtension(pi: ExtensionAPI): void {
     try {
       const firstContent = event.content?.[0];
       const resultText = firstContent && "text" in firstContent ? firstContent.text : undefined;
+
+      // A launcher failure (`spawn uvx ENOENT`) must win over the reconnect
+      // nudge and suppress it: the server never started, so there is nothing to
+      // reconnect to, and sending the user to /mcp reconnect wastes their time.
+      // Fire once per outage on the same armed flag, so a retry loop can't spam.
+      if (isGalaxyLauncherError(event.toolName, resultText)) {
+        if (uvxNudgeArmed && ctx.hasUI) {
+          uvxNudgeArmed = false;
+          ctx.ui.notify(GALAXY_UVX_MISSING_NUDGE, "warning");
+        }
+        return;
+      }
+
       const decision = transportNudgeDecision(transportNudgeArmed, event.toolName, resultText);
       transportNudgeArmed = decision.armed;
       if (decision.showNudge && ctx.hasUI) {
