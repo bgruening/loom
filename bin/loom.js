@@ -323,6 +323,13 @@ if (!isInformationalCommand) {
       command: "uvx",
       args: [GALAXY_MCP_SPEC],
       directTools: true,
+      // The MCP SDK defaults to a 60s request timeout, which a public Galaxy
+      // under load routinely outruns -- job submission and dataset detail
+      // lookups both come back as -32001. That reads to the user as a dropped
+      // connection and used to earn a "/mcp reconnect galaxy" nudge that cannot
+      // help: a fresh connection gets the same 60s. Give slow-but-alive calls
+      // room to finish, while still failing rather than hanging forever.
+      requestTimeoutMs: 300_000,
       // Local-path upload over MCP times out on large files (-32001); the
       // loom-native galaxy_upload_local_file tool handles those instead. URL
       // upload (upload_file_from_url) and the rest stay exposed.
