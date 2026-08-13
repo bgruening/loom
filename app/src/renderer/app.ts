@@ -2498,7 +2498,11 @@ window.orbit.onAgentEvent((event) => {
           chat.hideThinking();
           chat.finishAssistantMessage();
           if (msg.errorMessage) {
-            chat.addErrorMessage(humanizeAgentError(msg.errorMessage).text);
+            chat.addErrorMessage(
+              humanizeAgentError(msg.errorMessage, {
+                contextWindow: contextWindowFor(currentProvider, currentModel),
+              }).text,
+            );
           }
           streaming = false;
           stopTurnTimer();
@@ -2577,7 +2581,11 @@ window.orbit.onAgentEvent((event) => {
     case "error": {
       const rawMsg = (event as { message?: string }).message || "Unknown error";
       chat.hideThinking();
-      chat.addErrorMessage(humanizeAgentError(rawMsg).text);
+      chat.addErrorMessage(
+        humanizeAgentError(rawMsg, {
+          contextWindow: contextWindowFor(currentProvider, currentModel),
+        }).text,
+      );
       streaming = false;
       stopTurnTimer();
       setStatusBadge("error");
