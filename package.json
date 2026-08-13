@@ -87,5 +87,12 @@
     "typescript": "^6.0.2",
     "typescript-eslint": "^8.59.1",
     "vitest": "^4.1.4"
+  },
+  "allowScripts": {
+    "better-sqlite3": true,
+    "esbuild": true,
+    "protobufjs": true,
+    "fsevents": true,
+    "@google/genai": true
   }
 }
