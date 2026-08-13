@@ -56,8 +56,8 @@ const NOT_OVERFLOW_PATTERNS = [/rate limit/i, /too many requests/i, /throttl/i];
 // models' entire window, so the turn fails identically on a one-sentence
 // session and on a fresh /new. Two beta reporters hit that on gpt-4 (8,192
 // tokens) and were told to compact a conversation that had barely begun
-// (issue #419). Below this floor there is no conversation to compact away, so
-// the overflow branch names the real problem instead of pointing at /compact.
+// (issue #419). Below this floor the conversation is never the dominant term,
+// so the overflow branch names the real problem instead of pointing at /compact.
 // Chosen conservatively: every model pi's registry lists below this floor has a
 // window of 8,192 tokens or less, while genuinely usable small models (the 32K
 // tier, e.g. grok-code-fast-1) stay on the /compact path, where compacting a
@@ -120,8 +120,9 @@ export function humanizeAgentError(
       return {
         text:
           `The selected model's context window (${windowSize.toLocaleString()} tokens) is too ` +
-          "small for Orbit -- the baseline prompt alone doesn't fit, so compacting or starting " +
-          "a new session won't help. Pick a model with a larger context window in Preferences.",
+          "small for Orbit -- its baseline prompt and tool definitions leave next to no room " +
+          "for a conversation, so compacting or starting a new session won't help. Pick a " +
+          "model with a larger context window in Preferences.",
         retriable: false,
       };
     }
