@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { isWsl } from "../shared/wsl.js";
+import { buildReportSysinfo } from "../app/src/main/report-sysinfo.js";
 import { toFeedbackSysinfo } from "../app/src/renderer/feedback-sysinfo.js";
 
 // Real kernel release strings: WSL2 ships a Microsoft-built kernel, WSL1 fakes
@@ -97,35 +98,63 @@ describe("buildBrainSysinfo (loom-cli)", () => {
   });
 });
 
-describe("toFeedbackSysinfo (orbit)", () => {
-  const envelope = {
-    appVersion: "0.5.1",
-    electronVersion: "38.0.0",
-    nodeVersion: "22.19.0",
-    chromeVersion: "140.0.0",
-    platform: "linux",
-    arch: "x64",
-    wsl: true,
-  };
-  const cfg = {
-    llm: { active: "anthropic", providers: { anthropic: { model: "claude-opus-5" } } },
-    galaxy: { active: "main" },
-  };
+const VERSIONS = {
+  appVersion: "0.5.1",
+  electronVersion: "38.0.0",
+  nodeVersion: "22.19.0",
+  chromeVersion: "140.0.0",
+};
 
-  it("carries wsl through from the main-process envelope", () => {
-    expect(toFeedbackSysinfo(envelope, cfg).wsl).toBe(true);
-    expect(toFeedbackSysinfo({ ...envelope, wsl: false }, cfg).wsl).toBe(false);
+const CFG = {
+  llm: { active: "anthropic", providers: { anthropic: { model: "claude-opus-5" } } },
+  galaxy: { active: "main" },
+};
+
+describe("buildReportSysinfo (orbit main)", () => {
+  it("flags WSL from the env", () => {
+    const info = buildReportSysinfo({
+      ...VERSIONS,
+      platform: "linux",
+      arch: "x64",
+      env: { WSL_DISTRO_NAME: "Ubuntu-22.04" },
+      release: WSL2_RELEASE,
+    });
+    expect(info.wsl).toBe(true);
   });
 
-  it("agrees with the brain builder on the same environment", () => {
-    vi.stubEnv("WSL_DISTRO_NAME", "Ubuntu-22.04");
-    withPlatform("linux", () => {
-      expect(toFeedbackSysinfo(envelope, cfg).wsl).toBe(buildBrainSysinfo().wsl);
+  it("flags WSL from the release string when the env is stripped", () => {
+    const info = buildReportSysinfo({
+      ...VERSIONS,
+      platform: "linux",
+      arch: "x64",
+      env: {},
+      release: WSL2_RELEASE,
     });
+    expect(info.wsl).toBe(true);
+  });
+
+  it("does not flag native Linux, and passes the rest of the envelope through", () => {
+    const info = buildReportSysinfo({
+      ...VERSIONS,
+      platform: "linux",
+      arch: "x64",
+      env: {},
+      release: NATIVE_RELEASE,
+    });
+    expect(info).toEqual({ ...VERSIONS, platform: "linux", arch: "x64", wsl: false });
+  });
+});
+
+describe("toFeedbackSysinfo (orbit)", () => {
+  const envelope = { ...VERSIONS, platform: "linux", arch: "x64", wsl: true };
+
+  it("carries wsl through from the main-process envelope", () => {
+    expect(toFeedbackSysinfo(envelope, CFG).wsl).toBe(true);
+    expect(toFeedbackSysinfo({ ...envelope, wsl: false }, CFG).wsl).toBe(false);
   });
 
   it("still maps the rest of the envelope", () => {
-    const info = toFeedbackSysinfo(envelope, cfg);
+    const info = toFeedbackSysinfo(envelope, CFG);
     expect(info).toMatchObject({
       appVersion: "0.5.1",
       platform: "linux",
@@ -136,6 +165,34 @@ describe("toFeedbackSysinfo (orbit)", () => {
       llmProvider: "anthropic",
       llmModel: "claude-opus-5",
       galaxyConfigured: true,
+    });
+  });
+});
+
+// The point of the shared helper: a WSL box must not report as WSL in one shell
+// and native Linux in the other. Drive the same environment through both real
+// builders rather than a hand-written envelope.
+describe("both shells agree", () => {
+  const wslEnv = { WSL_DISTRO_NAME: "Ubuntu-22.04" };
+
+  function orbitWsl(env: Record<string, string>, release: string, platform = "linux") {
+    const envelope = buildReportSysinfo({ ...VERSIONS, platform, arch: "x64", env, release });
+    return toFeedbackSysinfo(envelope, CFG).wsl;
+  }
+
+  it("both report WSL under a WSL-shaped environment", () => {
+    vi.stubEnv("WSL_DISTRO_NAME", wslEnv.WSL_DISTRO_NAME);
+    withPlatform("linux", () => {
+      expect(orbitWsl(wslEnv, WSL2_RELEASE)).toBe(true);
+      expect(buildBrainSysinfo().wsl).toBe(true);
+    });
+  });
+
+  it("neither reports WSL off Linux", () => {
+    vi.stubEnv("WSL_DISTRO_NAME", wslEnv.WSL_DISTRO_NAME);
+    withPlatform("darwin", () => {
+      expect(orbitWsl(wslEnv, "24.6.0", "darwin")).toBe(false);
+      expect(buildBrainSysinfo().wsl).toBe(false);
     });
   });
 });

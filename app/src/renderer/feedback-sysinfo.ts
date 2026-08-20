@@ -1,18 +1,7 @@
 import type { FeedbackSysinfo } from "../../../shared/feedback-contract.js";
-
-/**
- * What the `report:sysinfo` IPC handler hands back. Field names differ from the
- * wire shape (electronVersion vs electron), which is why this mapping exists.
- */
-export interface ReportSysinfoEnvelope {
-  appVersion: string;
-  electronVersion: string;
-  nodeVersion: string;
-  chromeVersion: string;
-  platform: string;
-  arch: string;
-  wsl?: boolean;
-}
+// Type-only, so this adds no main→renderer runtime coupling (same shape as
+// galaxy-tooltip.ts importing GalaxyUserStatus).
+import type { ReportSysinfoEnvelope } from "../main/report-sysinfo.js";
 
 /** The slice of LoomConfig the report needs. */
 export interface FeedbackConfigView {
@@ -34,7 +23,7 @@ export function toFeedbackSysinfo(
     appVersion: info.appVersion,
     platform: info.platform,
     arch: info.arch,
-    wsl: Boolean(info.wsl),
+    wsl: info.wsl,
     electron: info.electronVersion,
     chrome: info.chromeVersion,
     node: info.nodeVersion,

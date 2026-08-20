@@ -30,7 +30,7 @@ import { checkLatestVersion } from "./version-check.js";
 import { resolveReleasePageUrl } from "./release-page.js";
 import { postFeedback } from "./feedback.js";
 import type { FeedbackPayload } from "../../../shared/feedback-contract.js";
-import { isWsl } from "../../../shared/wsl.js";
+import { buildReportSysinfo } from "./report-sysinfo.js";
 import {
   getOAuthStatus,
   isOAuthProvider,
@@ -666,18 +666,19 @@ export function registerIpcHandlers(agent: AgentManager): void {
   });
 
   // Issue reporter: returns sysinfo for the renderer to bundle into the
-  // report body. No secrets — just versions + platform + arch. `wsl` uses the
-  // same shared detector as the CLI's buildBrainSysinfo so both shells agree;
-  // detection has to happen here because the renderer can't see env/os.release.
-  ipc.handle("report:sysinfo", () => ({
-    appVersion: app.getVersion(),
-    electronVersion: process.versions.electron,
-    nodeVersion: process.versions.node,
-    chromeVersion: process.versions.chrome,
-    platform: process.platform,
-    arch: process.arch,
-    wsl: isWsl({ platform: process.platform, env: process.env, release: os.release() }),
-  }));
+  // report body. No secrets — just versions + platform + arch + a WSL flag.
+  ipc.handle("report:sysinfo", () =>
+    buildReportSysinfo({
+      appVersion: app.getVersion(),
+      electronVersion: process.versions.electron,
+      nodeVersion: process.versions.node,
+      chromeVersion: process.versions.chrome,
+      platform: process.platform,
+      arch: process.arch,
+      env: process.env,
+      release: os.release(),
+    }),
+  );
 
   // Version checker: surfaces a "new release available" banner in the
   // renderer. No auto-install (unsigned macOS builds can't be patched by
