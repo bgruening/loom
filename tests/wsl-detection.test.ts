@@ -9,6 +9,14 @@ const WSL2_RELEASE = "5.15.167.4-microsoft-standard-WSL2";
 const WSL1_RELEASE = "4.4.0-19041-Microsoft";
 const NATIVE_RELEASE = "6.8.0-45-generic";
 
+// The brain builder reads os.release() directly; this lets a test drive the
+// release-only path (WSL env stripped) without a WSL machine.
+const osState = vi.hoisted(() => ({ release: "" }));
+vi.mock("os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("os")>();
+  return { ...actual, release: () => osState.release || actual.release() };
+});
+
 vi.mock("../extensions/loom/config.js", () => ({
   loadConfig: () => ({
     llm: { active: "anthropic", providers: { anthropic: { model: "claude-opus-5" } } },
@@ -30,7 +38,16 @@ function withPlatform(platform: string, fn: () => void): void {
   }
 }
 
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+  vi.unstubAllEnvs();
+  osState.release = "";
+});
+
+/** Blank both WSL env vars so detection has to fall through to the release. */
+function stripWslEnv(): void {
+  vi.stubEnv("WSL_DISTRO_NAME", "");
+  vi.stubEnv("WSL_INTEROP", "");
+}
 
 describe("isWsl", () => {
   it("detects WSL2 from WSL_DISTRO_NAME", () => {
@@ -86,6 +103,22 @@ describe("buildBrainSysinfo (loom-cli)", () => {
     vi.stubEnv("WSL_DISTRO_NAME", "Ubuntu-22.04");
     withPlatform("linux", () => {
       expect(buildBrainSysinfo().wsl).toBe(true);
+    });
+  });
+
+  it("reports wsl:true from the kernel release when the env is stripped", () => {
+    stripWslEnv();
+    osState.release = WSL2_RELEASE;
+    withPlatform("linux", () => {
+      expect(buildBrainSysinfo().wsl).toBe(true);
+    });
+  });
+
+  it("reports wsl:false on a native Linux kernel", () => {
+    stripWslEnv();
+    osState.release = NATIVE_RELEASE;
+    withPlatform("linux", () => {
+      expect(buildBrainSysinfo().wsl).toBe(false);
     });
   });
 
@@ -182,14 +215,25 @@ describe("both shells agree", () => {
 
   it("both report WSL under a WSL-shaped environment", () => {
     vi.stubEnv("WSL_DISTRO_NAME", wslEnv.WSL_DISTRO_NAME);
+    osState.release = WSL2_RELEASE;
     withPlatform("linux", () => {
       expect(orbitWsl(wslEnv, WSL2_RELEASE)).toBe(true);
       expect(buildBrainSysinfo().wsl).toBe(true);
     });
   });
 
+  it("both fall back to the kernel release when the env is stripped", () => {
+    stripWslEnv();
+    osState.release = WSL2_RELEASE;
+    withPlatform("linux", () => {
+      expect(orbitWsl({}, WSL2_RELEASE)).toBe(true);
+      expect(buildBrainSysinfo().wsl).toBe(true);
+    });
+  });
+
   it("neither reports WSL off Linux", () => {
     vi.stubEnv("WSL_DISTRO_NAME", wslEnv.WSL_DISTRO_NAME);
+    osState.release = WSL2_RELEASE;
     withPlatform("darwin", () => {
       expect(orbitWsl(wslEnv, "24.6.0", "darwin")).toBe(false);
       expect(buildBrainSysinfo().wsl).toBe(false);
