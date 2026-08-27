@@ -27,6 +27,17 @@ describe("evals scenarios: every scenario.json parses with required fields", () 
       expect(Array.isArray(s.inputs)).toBe(true);
       expect(s.assertions).toBeTruthy();
     });
+
+    it(`${dir} has compilable chatText patterns`, () => {
+      // evaluate() degrades a bad pattern into a failure row rather than
+      // throwing, so without this it would show up as every model failing.
+      const s = loadScenario(dir);
+      const patterns = [
+        ...(s.assertions.chatText?.mustMatch ?? []),
+        ...(s.assertions.chatText?.mustNotMatch ?? []),
+      ];
+      for (const p of patterns) expect(() => new RegExp(p), p).not.toThrow();
+    });
   }
 
   it("rnaseq routes galaxy/hybrid and names a known RNA-seq tool", () => {

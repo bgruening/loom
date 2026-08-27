@@ -204,3 +204,50 @@ describe("evals assertions: null plan fails all declared dimensions", () => {
     expect(dims).toContain("tools");
   });
 });
+
+describe("evals assertions: chatText regex matchers", () => {
+  it("matches a YAML value across quoting and spacing variants", () => {
+    const pattern = "container:\\s*[\"']?(?:docker://)?quay\\.io/biocontainers/";
+    for (const draft of [
+      "container: quay.io/biocontainers/pandas:1.5.2",
+      'container: "quay.io/biocontainers/pandas:1.5.2"',
+      "container:  docker://quay.io/biocontainers/pandas:1.5.2",
+    ]) {
+      const run = makeRun({
+        events: textEvents(draft),
+        assertions: { chatText: { mustMatch: [pattern] } },
+      });
+      expect(evaluate(run), draft).toHaveLength(0);
+    }
+  });
+
+  it("fails when nothing matches", () => {
+    const run = makeRun({
+      events: textEvents("container: python:3.12-slim"),
+      assertions: { chatText: { mustMatch: ["container:\\s*quay\\.io/biocontainers/"] } },
+    });
+    const f = evaluate(run);
+    expect(f).toHaveLength(1);
+    expect(f[0].assertion).toBe("chatText.mustMatch");
+  });
+
+  it("mustNotMatch fires only on a real match", () => {
+    const assertions: Assertions = { chatText: { mustNotMatch: ["^\\s*command:\\s*seqkit"] } };
+    expect(evaluate(makeRun({ events: textEvents("no command here"), assertions }))).toHaveLength(
+      0,
+    );
+    expect(
+      evaluate(makeRun({ events: textEvents("command: seqkit seq"), assertions })),
+    ).toHaveLength(1);
+  });
+
+  it("records an invalid pattern as a failure instead of throwing", () => {
+    const run = makeRun({
+      events: textEvents("anything"),
+      assertions: { chatText: { mustMatch: ["("] } },
+    });
+    const f = evaluate(run);
+    expect(f).toHaveLength(1);
+    expect(f[0].detail).toContain("invalid regex");
+  });
+});
