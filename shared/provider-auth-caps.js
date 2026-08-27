@@ -19,7 +19,12 @@ export function classifyProviderAuth(provider) {
   const oauth = provider && provider.auth && provider.auth.oauth;
   if (!oauth || !oauth.login) return null;
   return {
-    signInLabel: oauth.loginLabel || oauth.name || "",
+    // Two distinct things, deliberately not collapsed: pi's loginLabel is a
+    // finished button ("Sign in with OpenRouter"), while name is the account
+    // behind it ("Anthropic (Claude Pro/Max)"). Folding them into one field
+    // renders "Sign in with Sign in with OpenRouter".
+    signInLabel: oauth.loginLabel || "",
+    providerLabel: oauth.name || "",
     acceptsApiKey: Boolean(provider.auth.apiKey),
   };
 }
@@ -43,7 +48,7 @@ export function isOAuthOnly(caps) {
  * key" -- the safe default, since it offers a key field rather than hiding one.
  */
 export const SEED_PROVIDER_AUTH_CAPS = {
-  "openai-codex": { signInLabel: "", acceptsApiKey: false },
+  "openai-codex": { signInLabel: "", providerLabel: "", acceptsApiKey: false },
 };
 
 /** The seed's sign-in-only ids. Deliberately NOT "everything that can sign in". */

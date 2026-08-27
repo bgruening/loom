@@ -764,6 +764,7 @@ const JETSTREAM_MODELS = ["gpt-oss-120b", "llama-4-scout"];
 const welcomeApiKeyHintRow = document.getElementById("welcome-api-key-hint-row")!;
 const welcomeOauthRow = document.getElementById("welcome-oauth-row")!;
 const welcomeOauthHintRow = document.getElementById("welcome-oauth-hint-row")!;
+const welcomeOauthHintText = document.getElementById("welcome-oauth-hint-text")!;
 const welcomeOauthStatus = document.getElementById("welcome-oauth-status")!;
 const welcomeOauthSignIn = document.getElementById("welcome-oauth-signin") as HTMLButtonElement;
 const welcomeGalaxyUrl = document.getElementById("welcome-galaxy-url") as HTMLInputElement;
@@ -796,8 +797,31 @@ function isOAuthOnlyProvider(provider: string): boolean {
 /** Button text for a provider's sign-in, e.g. "Sign in with GitHub Copilot". */
 function oauthSignInLabel(provider: string, signedIn: boolean): string {
   if (signedIn) return "Sign in again";
-  const label = OAUTH_PROVIDERS[provider]?.signInLabel;
-  return label ? `Sign in with ${label}` : "Sign in";
+  const caps = OAUTH_PROVIDERS[provider];
+  if (caps?.signInLabel) return caps.signInLabel;
+  return caps?.providerLabel ? `Sign in with ${caps.providerLabel}` : "Sign in";
+}
+
+/** The account a sign-in gets you, for prose. Falls back to the bare id. */
+function oauthAccountLabel(provider: string): string {
+  return OAUTH_PROVIDERS[provider]?.providerLabel || provider;
+}
+
+/**
+ * These hint rows show for every sign-in-capable provider now, so the copy has
+ * to follow the provider -- the markup used to hardcode OpenAI's plan list, and
+ * an Anthropic user reading about ChatGPT was the other half of #429. Only
+ * providers whose requirements are worth spelling out get their own line; the
+ * rest are described by pi's own name for the account.
+ */
+const OAUTH_HINTS: Record<string, string> = {
+  "openai-codex":
+    "Opens your browser to OpenAI. Requires a ChatGPT Plus, Pro, Business, Edu, or Enterprise subscription.",
+};
+function oauthHintText(provider: string): string {
+  const specific = OAUTH_HINTS[provider];
+  const opener = specific || `Opens your browser to sign in with ${oauthAccountLabel(provider)}.`;
+  return `${opener} Token refresh is handled automatically.`;
 }
 // Never rejects: three UI paths await this (welcome overlay, welcome auth rows,
 // Preferences auth rows), so letting an IPC failure through would leave a fresh
@@ -930,6 +954,7 @@ async function updateWelcomeAuthUi(): Promise<void> {
   welcomeApiKeyHintRow.classList.toggle("hidden", oauthOnly);
   welcomeOauthRow.classList.toggle("hidden", !signIn);
   welcomeOauthHintRow.classList.toggle("hidden", !signIn);
+  if (signIn) welcomeOauthHintText.textContent = oauthHintText(welcomeProvider.value);
   if (signIn) {
     const status = await window.orbit.oauthStatus(welcomeProvider.value);
     welcomeOauthStatus.textContent = formatOAuthStatus(status);
@@ -3053,6 +3078,7 @@ const prefsApiKeyRow = document.getElementById("prefs-api-key-row")!;
 const prefsApiKeyHintRow = document.getElementById("prefs-api-key-hint-row")!;
 const prefsOauthRow = document.getElementById("prefs-oauth-row")!;
 const prefsOauthHintRow = document.getElementById("prefs-oauth-hint-row")!;
+const prefsOauthHintText = document.getElementById("prefs-oauth-hint-text")!;
 const prefsOauthStatus = document.getElementById("prefs-oauth-status")!;
 const prefsOauthSignIn = document.getElementById("prefs-oauth-signin") as HTMLButtonElement;
 const prefsOauthSignOut = document.getElementById("prefs-oauth-signout") as HTMLButtonElement;
@@ -3175,6 +3201,7 @@ async function updatePrefsAuthUi(): Promise<void> {
   prefsApiKeyHintRow.classList.toggle("hidden", oauthOnly);
   prefsOauthRow.classList.toggle("hidden", !signIn);
   prefsOauthHintRow.classList.toggle("hidden", !signIn);
+  if (signIn) prefsOauthHintText.textContent = oauthHintText(prefsProvider.value);
   if (signIn) {
     const status = await window.orbit.oauthStatus(prefsProvider.value);
     prefsOauthStatus.textContent = formatOAuthStatus(status);
@@ -3204,7 +3231,12 @@ prefsOauthSignIn.addEventListener("click", async () => {
 });
 
 prefsOauthSignOut.addEventListener("click", async () => {
-  if (!confirm("Sign out of ChatGPT? You'll need to sign in again to use Codex models.")) return;
+  // Signing out of a dual-auth provider still leaves the API-key path open, so
+  // don't tell those users they've lost access to the models.
+  const consequence = isOAuthOnlyProvider(prefsProvider.value)
+    ? "You'll need to sign in again to use its models."
+    : "You'll need to sign in again, or use an API key instead.";
+  if (!confirm(`Sign out of ${oauthAccountLabel(prefsProvider.value)}? ${consequence}`)) return;
   prefsOauthSignOut.disabled = true;
   try {
     await window.orbit.oauthSignOut(prefsProvider.value);

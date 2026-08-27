@@ -23,7 +23,11 @@ describe("classifyProviderAuth", () => {
       id: "openai-codex",
       auth: { oauth: { login: () => {}, name: "OpenAI (ChatGPT Plus/Pro)" } },
     });
-    expect(caps).toEqual({ signInLabel: "OpenAI (ChatGPT Plus/Pro)", acceptsApiKey: false });
+    expect(caps).toEqual({
+      signInLabel: "",
+      providerLabel: "OpenAI (ChatGPT Plus/Pro)",
+      acceptsApiKey: false,
+    });
   });
 
   it("keeps a dual-auth provider on the API-key path", () => {
@@ -35,7 +39,11 @@ describe("classifyProviderAuth", () => {
       },
     });
     // The regression was acceptsApiKey coming back false here.
-    expect(caps).toEqual({ signInLabel: "Anthropic (Claude Pro/Max)", acceptsApiKey: true });
+    expect(caps).toEqual({
+      signInLabel: "",
+      providerLabel: "Anthropic (Claude Pro/Max)",
+      acceptsApiKey: true,
+    });
   });
 
   it("returns null for a provider with no sign-in flow", () => {
@@ -47,15 +55,29 @@ describe("classifyProviderAuth", () => {
     expect(classifyProviderAuth({ id: "half", auth: { oauth: { name: "Half" } } })).toBeNull();
   });
 
-  it("prefers loginLabel over name, and tolerates neither", () => {
+  it("keeps pi's button text and provider name apart", () => {
+    // pi's loginLabel is already a whole button; folding it into the name field
+    // rendered "Sign in with Sign in with SuperGrok or X Premium".
     expect(
       classifyProviderAuth({
         id: "xai",
-        auth: { apiKey: {}, oauth: { login: () => {}, name: "xAI", loginLabel: "xAI (Grok)" } },
+        auth: {
+          apiKey: {},
+          oauth: {
+            login: () => {},
+            name: "xAI (Grok/X subscription)",
+            loginLabel: "Sign in with SuperGrok or X Premium",
+          },
+        },
       }),
-    ).toEqual({ signInLabel: "xAI (Grok)", acceptsApiKey: true });
+    ).toEqual({
+      signInLabel: "Sign in with SuperGrok or X Premium",
+      providerLabel: "xAI (Grok/X subscription)",
+      acceptsApiKey: true,
+    });
     expect(classifyProviderAuth({ id: "bare", auth: { oauth: { login: () => {} } } })).toEqual({
       signInLabel: "",
+      providerLabel: "",
       acceptsApiKey: false,
     });
   });
@@ -63,8 +85,10 @@ describe("classifyProviderAuth", () => {
 
 describe("isOAuthOnly", () => {
   it("separates sign-in-only from dual-auth", () => {
-    expect(isOAuthOnly({ signInLabel: "", acceptsApiKey: false })).toBe(true);
-    expect(isOAuthOnly({ signInLabel: "Anthropic", acceptsApiKey: true })).toBe(false);
+    expect(isOAuthOnly({ signInLabel: "", providerLabel: "", acceptsApiKey: false })).toBe(true);
+    expect(isOAuthOnly({ signInLabel: "", providerLabel: "Anthropic", acceptsApiKey: true })).toBe(
+      false,
+    );
   });
 
   it("treats an unclassified provider as key-taking", () => {

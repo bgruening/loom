@@ -1,6 +1,8 @@
 export interface ProviderAuthCaps {
-  /** Sign-in button label, e.g. "OpenAI (ChatGPT Plus/Pro)". "" when pi gives none. */
+  /** pi's finished button text, e.g. "Sign in with OpenRouter". "" when pi gives none. */
   signInLabel: string;
+  /** The account behind it, e.g. "Anthropic (Claude Pro/Max)". "" when pi gives none. */
+  providerLabel: string;
   /** pi defines an API-key auth path for this provider (dual-auth when it also signs in). */
   acceptsApiKey: boolean;
 }
