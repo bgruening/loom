@@ -65,7 +65,15 @@ let priming: Promise<ReadonlyMap<string, ProviderAuthCaps>> | null = null;
 export async function primeOAuthProviders(): Promise<ReadonlyMap<string, ProviderAuthCaps>> {
   priming ??= (async () => {
     try {
-      const runtime = await ModelRuntime.create({ authPath: getAuthPath() });
+      // Skip the create-time refresh: getProviders() is populated before it runs
+      // and all we read is each provider's static auth block, so the catalog and
+      // per-provider credential/availability pass it triggers is work nothing
+      // here looks at -- and the renderer now blocks on this call. pi's own
+      // auth-check runtime skips it for the same reason.
+      const runtime = await ModelRuntime.create({
+        authPath: getAuthPath(),
+        refreshOnCreate: false,
+      });
       const found = new Map<string, ProviderAuthCaps>();
       for (const provider of await runtime.getProviders()) {
         const caps = classifyProviderAuth(provider);
