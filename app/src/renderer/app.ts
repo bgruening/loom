@@ -20,6 +20,7 @@ import { caretVisualLineFlags, shouldRecallOnArrow } from "./input-history-nav.j
 import { shouldAcceptSlashCommandOnEnter } from "./slash-popup-nav.js";
 import { buildDiscoveredModelOptions, type ModelOption } from "./model-options.js";
 import { planModelDiscovery } from "./model-discovery-gate.js";
+import { snapshotProviderState, type ProviderState } from "./provider-state.js";
 import { LoomWidgetKey, decodeMarkdownWidget } from "../../../shared/loom-shell-contract.js";
 import { ALLOWED_SKILLS_PREFIX, isAllowedSkillUrl } from "../../../shared/loom-config.js";
 import {
@@ -3448,21 +3449,6 @@ prefsSkillsRefreshBtn.addEventListener("click", async () => {
 
 /** Sentinel mirrors UNCHANGED_SECRET in main/ipc-handlers.ts. */
 const UNCHANGED_SECRET = "__loom_unchanged_secret__";
-/** Per-provider in-memory state while Preferences is open. */
-interface ProviderState {
-  hadKey: boolean;
-  typedKey: string;
-  model: string;
-  baseUrl: string;
-  /**
-   * Base URL as it sits in config. Unlike `baseUrl` (the editable field) this
-   * is never overwritten by a snapshot, so it always says what main would
-   * actually contact for a discovery probe.
-   */
-  savedBaseUrl: string;
-  /** Ids last reported by a custom endpoint's /models, if it was asked. */
-  discoveredModels?: string[];
-}
 let prefsProviderStates: Record<string, ProviderState> = {};
 let prefsActiveProvider = "anthropic";
 let prefsGalaxyHadKey = false;
@@ -3484,15 +3470,10 @@ prefsGalaxyKey.addEventListener("input", updatePrefsGalaxyValidity);
 
 /** Snapshot the currently-visible provider fields into prefsProviderStates. */
 function snapshotCurrentProvider(): void {
-  const prev = prefsProviderStates[prefsActiveProvider];
-  prefsProviderStates[prefsActiveProvider] = {
-    hadKey: prev?.hadKey ?? false,
-    typedKey: prefsApiKey.value,
-    model: prefsModel.value,
-    baseUrl: prefsBaseUrl.value.trim(),
-    savedBaseUrl: prev?.savedBaseUrl ?? "",
-    discoveredModels: prev?.discoveredModels,
-  };
+  prefsProviderStates[prefsActiveProvider] = snapshotProviderState(
+    prefsProviderStates[prefsActiveProvider],
+    { typedKey: prefsApiKey.value, model: prefsModel.value, baseUrl: prefsBaseUrl.value },
+  );
 }
 
 /**
