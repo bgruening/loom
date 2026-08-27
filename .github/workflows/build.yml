@@ -23,6 +23,10 @@ jobs:
             package-lock.json
             app/package-lock.json
 
+      # The check sequence below (lockstep, both typechecks, tests, smoke) is
+      # mirrored by .github/workflows/pi-update.yml, which runs it to fill in
+      # the results table on the pull requests it opens. A check added here and
+      # not there makes that table quietly incomplete.
       - name: Install root deps
         run: npm ci
 
