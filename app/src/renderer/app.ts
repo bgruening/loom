@@ -954,8 +954,8 @@ async function updateWelcomeAuthUi(): Promise<void> {
   welcomeApiKeyHintRow.classList.toggle("hidden", oauthOnly);
   welcomeOauthRow.classList.toggle("hidden", !signIn);
   welcomeOauthHintRow.classList.toggle("hidden", !signIn);
-  if (signIn) welcomeOauthHintText.textContent = oauthHintText(welcomeProvider.value);
   if (signIn) {
+    welcomeOauthHintText.textContent = oauthHintText(welcomeProvider.value);
     const status = await window.orbit.oauthStatus(welcomeProvider.value);
     welcomeOauthStatus.textContent = formatOAuthStatus(status);
     welcomeOauthStatus.classList.toggle("signed-in", status.signedIn);
@@ -3201,8 +3201,8 @@ async function updatePrefsAuthUi(): Promise<void> {
   prefsApiKeyHintRow.classList.toggle("hidden", oauthOnly);
   prefsOauthRow.classList.toggle("hidden", !signIn);
   prefsOauthHintRow.classList.toggle("hidden", !signIn);
-  if (signIn) prefsOauthHintText.textContent = oauthHintText(prefsProvider.value);
   if (signIn) {
+    prefsOauthHintText.textContent = oauthHintText(prefsProvider.value);
     const status = await window.orbit.oauthStatus(prefsProvider.value);
     prefsOauthStatus.textContent = formatOAuthStatus(status);
     prefsOauthStatus.classList.toggle("signed-in", status.signedIn);
