@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { classifyProviderAuth } from "../app/src/main/oauth-handler.js";
+import {
+  classifyProviderAuth,
+  isOAuthOnly,
+  SEED_OAUTH_ONLY_PROVIDERS,
+  SEED_PROVIDER_AUTH_CAPS,
+} from "../shared/provider-auth-caps.js";
 
 /**
  * #429: Orbit read "this provider can sign in" as "this provider has no API
@@ -7,7 +12,10 @@ import { classifyProviderAuth } from "../app/src/main/oauth-handler.js";
  * brain's key injection -- so the brain judged Anthropic unusable and flipped
  * llm.active to a signed-in Codex account behind the user's back.
  *
- * The shapes below mirror pi-ai 0.84.1's registry entries.
+ * The shapes below mirror pi-ai 0.84.1's registry entries. This imports the
+ * shared module rather than app/src/main/oauth-handler.ts on purpose: that one
+ * pulls in Electron, which the root install (the tree `npm publish` runs the
+ * tests against) does not have.
  */
 describe("classifyProviderAuth", () => {
   it("treats a sign-in-only provider as OAuth-only", () => {
@@ -50,5 +58,28 @@ describe("classifyProviderAuth", () => {
       signInLabel: "",
       acceptsApiKey: false,
     });
+  });
+});
+
+describe("isOAuthOnly", () => {
+  it("separates sign-in-only from dual-auth", () => {
+    expect(isOAuthOnly({ signInLabel: "", acceptsApiKey: false })).toBe(true);
+    expect(isOAuthOnly({ signInLabel: "Anthropic", acceptsApiKey: true })).toBe(false);
+  });
+
+  it("treats an unclassified provider as key-taking", () => {
+    // The safe direction: offer a key field rather than hide one (#429).
+    expect(isOAuthOnly(undefined)).toBe(false);
+  });
+});
+
+describe("the pre-registry seed", () => {
+  it("covers only the provider that ships sign-in-only", () => {
+    expect(SEED_OAUTH_ONLY_PROVIDERS).toEqual(["openai-codex"]);
+  });
+
+  it("does not pre-declare a dual-auth provider as key-less", () => {
+    expect(SEED_PROVIDER_AUTH_CAPS.anthropic).toBeUndefined();
+    expect(isOAuthOnly(SEED_PROVIDER_AUTH_CAPS.anthropic)).toBe(false);
   });
 });

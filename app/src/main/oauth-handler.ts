@@ -4,6 +4,12 @@ import os from "node:os";
 import { shell } from "electron";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
+import {
+  classifyProviderAuth,
+  isOAuthOnly,
+  SEED_PROVIDER_AUTH_CAPS,
+} from "../../../shared/provider-auth-caps.js";
+import type { ProviderAuthCaps } from "../../../shared/provider-auth-caps.js";
 
 /**
  * pi hides its OAuth flow modules from bundlers on purpose: `auth/oauth/load.ts`
@@ -39,51 +45,20 @@ const SIGN_IN_TIMEOUT_MS = 5 * 60 * 1000;
  * 0.81 each provider carries its own `auth.oauth`, so we read the list off the
  * registry instead of hardcoding it and going stale the next time pi adds one.
  *
- * What we must NOT read off it is "therefore this provider has no API key".
- * pi models the two independently: `openai-codex` carries `auth.oauth` alone,
- * while anthropic, xai, openrouter, kimi-coding, github-copilot and radius
- * carry `auth.apiKey` AND `auth.oauth`. Collapsing sign-in-capable into
- * OAuth-only is what broke #429 -- Orbit stopped showing, storing, reporting
- * and injecting the Anthropic API key the moment pi taught Anthropic to
- * sign in, and the brain then judged the provider unusable.
+ * The rule for reading that registry entry lives in shared/provider-auth-caps.js.
+ * The renderer and the CLI have to answer "is this sign-in-only?" identically,
+ * and #429 was three copies of the rule disagreeing. Keeping it out of this file
+ * also keeps it testable -- everything here drags in Electron and pi.
  *
- * That read is async and several callers are sync, so prime the cache once at
+ * The read is async and several callers are sync, so prime the cache once at
  * startup (primeOAuthProviders) and let the sync accessors serve from it. The
  * seed keeps pre-prime calls honest for the provider we know ships enabled;
  * every other provider reads as "takes an API key" until the registry lands,
  * which is the safe default -- it offers a key field rather than hiding one.
  */
-export interface ProviderAuthCaps {
-  /** Sign-in button label, e.g. "OpenAI (ChatGPT Plus/Pro)". "" when pi gives none. */
-  signInLabel: string;
-  /** pi defines an API-key auth path for this provider (dual-auth when it also signs in). */
-  acceptsApiKey: boolean;
-}
-
-/**
- * Classify one provider's auth surface. Returns null when the provider offers
- * no sign-in at all. Pure and exported so the OAuth-only predicate -- the thing
- * #429 got wrong -- is testable without an Electron or pi runtime.
- */
-export function classifyProviderAuth(provider: {
-  id: string;
-  auth?: {
-    apiKey?: unknown;
-    oauth?: { login?: unknown; name?: string; loginLabel?: string };
-  };
-}): ProviderAuthCaps | null {
-  const oauth = provider.auth?.oauth;
-  if (!oauth?.login) return null;
-  return {
-    signInLabel: oauth.loginLabel || oauth.name || "",
-    acceptsApiKey: Boolean(provider.auth?.apiKey),
-  };
-}
-
-const SEED_OAUTH_PROVIDERS: Array<[string, ProviderAuthCaps]> = [
-  ["openai-codex", { signInLabel: "", acceptsApiKey: false }],
-];
-let oauthProviders: Map<string, ProviderAuthCaps> = new Map(SEED_OAUTH_PROVIDERS);
+let oauthProviders: Map<string, ProviderAuthCaps> = new Map(
+  Object.entries(SEED_PROVIDER_AUTH_CAPS),
+);
 let priming: Promise<ReadonlyMap<string, ProviderAuthCaps>> | null = null;
 
 /** Read the sign-in-capable providers off pi's registry. Call once at startup. */
@@ -110,10 +85,11 @@ export async function primeOAuthProviders(): Promise<ReadonlyMap<string, Provide
 /**
  * Resolve once the registry read has landed. The renderer pulls the provider map
  * exactly once at startup, so serving it a pre-prime snapshot would strand that
- * window on the seed for the whole session.
+ * window on the seed for the whole session. Same promise as priming -- separate
+ * name because the callers' intent differs.
  */
 export function whenOAuthProvidersReady(): Promise<ReadonlyMap<string, ProviderAuthCaps>> {
-  return priming ?? primeOAuthProviders();
+  return primeOAuthProviders();
 }
 
 /** Does this provider offer a sign-in flow? True for dual-auth providers too. */
@@ -127,9 +103,7 @@ export function providerOffersSignIn(provider: string | undefined): boolean {
  * key injection into the brain. Dual-auth providers must answer false.
  */
 export function isOAuthOnlyProvider(provider: string | undefined): boolean {
-  if (!provider) return false;
-  const caps = oauthProviders.get(provider);
-  return Boolean(caps && !caps.acceptsApiKey);
+  return Boolean(provider && isOAuthOnly(oauthProviders.get(provider)));
 }
 
 /** id -> auth capabilities, for the renderer's one-shot fetch. */
