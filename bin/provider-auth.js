@@ -17,9 +17,29 @@
 export function hasStoredCredential(auth, provider) {
   const cred = auth?.[provider];
   if (!cred || typeof cred !== "object" || Array.isArray(cred)) return false;
-  // pi writes { type: "oauth" | "api_key", ... }. Tolerate a missing type for
-  // older auth.json shapes, but don't let arbitrary truthy junk count as a login.
-  return cred.type === undefined || cred.type === "oauth" || cred.type === "api_key";
+  // Mirrors pi's own idea of a valid credential: OAuthCredential requires
+  // access + refresh + expires (a partial entry has nothing to refresh with),
+  // and ReadOnlyAuthStorage.load() hard-throws on anything that isn't one of
+  // these two shapes. Tolerating a looser shape -- a missing `type`, say --
+  // doesn't buy compatibility with older files, it just calls something a login
+  // when nothing downstream can authenticate with it.
+  if (cred.type === "api_key") {
+    const validKey = cred.key === undefined || typeof cred.key === "string";
+    const validEnv =
+      cred.env === undefined ||
+      (typeof cred.env === "object" &&
+        cred.env !== null &&
+        !Array.isArray(cred.env) &&
+        Object.values(cred.env).every((v) => typeof v === "string"));
+    return validKey && validEnv;
+  }
+  return (
+    cred.type === "oauth" &&
+    typeof cred.access === "string" &&
+    typeof cred.refresh === "string" &&
+    typeof cred.expires === "number" &&
+    Number.isFinite(cred.expires)
+  );
 }
 
 /**

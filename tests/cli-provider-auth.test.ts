@@ -8,14 +8,31 @@ import {
 const OAUTH_ONLY = new Set(["openai-codex"]);
 const ENV_MAP = { anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY" };
 
+/** The oauth shape pi writes -- and the only one its AuthStorage will load back. */
+const oauthCred = () => ({ type: "oauth", access: "at", refresh: "rt", expires: 9e12 });
+
 describe("hasStoredCredential", () => {
   it("accepts pi's credential shapes", () => {
-    expect(hasStoredCredential({ anthropic: { type: "oauth", access: "t" } }, "anthropic")).toBe(
-      true,
-    );
+    expect(hasStoredCredential({ anthropic: oauthCred() }, "anthropic")).toBe(true);
     expect(hasStoredCredential({ groq: { type: "api_key", key: "k" } }, "groq")).toBe(true);
-    // Older auth.json entries predate the type tag.
-    expect(hasStoredCredential({ x: { access: "t" } }, "x")).toBe(true);
+    // pi allows an api_key entry whose key resolves from env instead.
+    expect(
+      hasStoredCredential({ groq: { type: "api_key", env: { GROQ_API_KEY: "k" } } }, "groq"),
+    ).toBe(true);
+  });
+
+  it("rejects the shapes pi's AuthStorage throws on", () => {
+    // DefaultAuthStorage.load() hard-throws "Invalid auth.json credential for
+    // provider" on each of these, so calling them a login just relocates the
+    // failure into the brain's startup.
+    expect(hasStoredCredential({ x: { access: "t" } }, "x")).toBe(false);
+    expect(hasStoredCredential({ x: { type: "oauth", access: "t" } }, "x")).toBe(false);
+    expect(hasStoredCredential({ x: { type: "oauth", access: "t", refresh: "r" } }, "x")).toBe(
+      false,
+    );
+    expect(hasStoredCredential({ x: { ...oauthCred(), expires: "soon" } }, "x")).toBe(false);
+    expect(hasStoredCredential({ x: { type: "api_key", key: 42 } }, "x")).toBe(false);
+    expect(hasStoredCredential({ x: { type: "api_key", env: { A: 1 } } }, "x")).toBe(false);
   });
 
   it("rejects absent or non-credential values", () => {
@@ -49,7 +66,7 @@ describe("isProviderUsable", () => {
   });
 
   it("accepts a stored login for any provider, not just sign-in-only ones", () => {
-    const auth = { anthropic: { type: "oauth", access: "t" } };
+    const auth = { anthropic: oauthCred() };
     expect(isProviderUsable("anthropic", undefined, auth, opts())).toBe(true);
   });
 
@@ -66,7 +83,7 @@ describe("isProviderUsable", () => {
       isProviderUsable("openai-codex", { apiKey: "sk" }, {}, opts({ OPENAI_API_KEY: "sk" })),
     ).toBe(false);
     expect(
-      isProviderUsable("openai-codex", undefined, { "openai-codex": { type: "oauth" } }, opts()),
+      isProviderUsable("openai-codex", undefined, { "openai-codex": oauthCred() }, opts()),
     ).toBe(true);
   });
 
@@ -78,13 +95,13 @@ describe("isProviderUsable", () => {
 
 describe("pickSignedInFallback", () => {
   it("finds a signed-in sign-in-only provider", () => {
-    const auth = { "openai-codex": { type: "oauth", access: "t" } };
+    const auth = { "openai-codex": oauthCred() };
     expect(pickSignedInFallback(auth, OAUTH_ONLY, "anthropic")).toBe("openai-codex");
   });
 
   it("returns null when nothing is signed in, or when it's already active", () => {
     expect(pickSignedInFallback({}, OAUTH_ONLY, "anthropic")).toBeNull();
-    const auth = { "openai-codex": { type: "oauth" } };
+    const auth = { "openai-codex": oauthCred() };
     expect(pickSignedInFallback(auth, OAUTH_ONLY, "openai-codex")).toBeNull();
   });
 });
