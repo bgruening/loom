@@ -347,11 +347,58 @@ so far.
 > before/after (the skill content changes container choice for the two models
 > that can author at all) is what survives; the per-cell counts don't.
 
+### Re-run on the retuned assertions
+
+The `(main)` columns were re-run after the retune landed, same seven models,
+n=3, against galaxy-skills `main` -- #32 is still open, and `skills_fetch`
+follows the repo's configured branch, so a local run can only reproduce the
+`(main)` half of the table.
+
+| model            | container (main) | re-run  | select-params (main) | re-run  |
+| ---------------- | ---------------- | ------- | -------------------- | ------- |
+| Qwen3-32B        | 2/3              | **3/3** | 1/3                  | **0/3** |
+| MiniMax-M2.7     | 0/3              | **1/3** | 0/3                  | 0/3     |
+| Llama-4-Maverick | 0/3              | 0/3     | 0/3                  | 0/3     |
+| gemma-4-31B      | 0/3              | 0/3     | 0/3                  | 0/3     |
+| Llama-3.3-70B    | 0/3              | 0/3     | 0/3                  | 0/3     |
+| Llama-3.1-8B     | 0/3              | 0/3     | 0/3                  | 0/3     |
+| gpt-oss-120b     | 0/3              | 0/3     | 0/3                  | 0/3     |
+
+Both effects the caveat predicted show up, in opposite directions, which is the
+useful part. On `container` the widened regex recovers runs that were red for
+punctuation rather than for the image family (Qwen 2/3 -> 3/3, MiniMax
+0/3 -> 1/3). On `select-params` the line-anchored needles withdraw a credit the
+substrings were giving away: Qwen's old 1/3 came from prose, and under the new
+assertions it is 0/3. Reading the transcripts, Qwen drafts a real tool and
+matches `type: select` and a populated `options:` block every time -- it fails
+only `type: integer`, because it models the minimum length as `type: text` with
+`value: "20"` on all three runs. That is the narrow, real gap the per-model note
+below describes, now isolated to one assertion instead of inferred.
+
+Two things this run does **not** settle. The `#32` columns are still scored
+under the old assertions, so they remain un-re-run -- including MiniMax's
+select-params 3/3, which is the cell most worth confirming. And the reason
+given above for dropping the `container: python:` ban is still an argument
+rather than a measurement: the anti-correlation it describes is a property of a
+model that has _learned_ the lesson, which is the `#32` condition, so a `main`
+run cannot exercise it. Across the twelve `main` transcripts with any output,
+the old ban would not have fired falsely on a single passing run. The positive
+regex is the better check on its own merits; the anti-correlation claim should
+be treated as untested until someone re-runs `#32`.
+
+The re-run also gave `run.noModelOutput` its first real workout: it fired on 25
+of the 42 runs. Only two of the seven models put any usable text on the wire at
+all, which means most of this matrix is measuring plumbing rather than UDT
+authoring, and the leaderboard should be read that way.
+
 Per-model notes on the rest:
 
 - **Llama-4-Maverick and gpt-oss-120b never call `skills_fetch`.** They fail
   the progressive-disclosure assertion before content is even in play, so
-  their 0/3 says nothing about UDT authoring.
+  their 0/3 says nothing about UDT authoring. Maverick's failure is a
+  tool-calling format breakdown rather than a refusal: every run emits the
+  literal string `<|python_start|>skills_fetch(` repeated until it stops, 116
+  characters of special tokens leaking through as chat text.
 - **gpt-oss-120b is additionally broken on this proxy**, now for a second
   reason: LiteLLM rejects `reasoning_effort` for it (400) on top of the
   `reasoning_content` problem recorded above. It dies in ~1.7s.
