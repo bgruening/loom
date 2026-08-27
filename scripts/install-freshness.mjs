@@ -10,7 +10,7 @@
 //
 // Scoped to the pi packages, same reasoning as the lockstep check: a stale
 // prettier is harmless, a stale pi is a wall of failures in unrelated tests.
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -63,9 +63,14 @@ export function formatStaleReport(stale) {
     "",
     "  npm ci && (cd app && npm ci)",
     "",
-    "If you are in a worktree, run that in the ROOT checkout --",
-    "a worktree's node_modules is a symlink to it, so one stale install",
-    "affects every branch you have open.",
+    "In a worktree, node_modules is a symlink to the root checkout, so run that",
+    "there -- one stale install affects every branch you have open at once.",
+    "",
+    "That cuts both ways: if it is THIS branch that changed a dependency, the",
+    "root's lockfile cannot satisfy it. Install against this branch in the root",
+    "checkout, or give the worktree its own node_modules.",
+    "",
+    "To run the tests anyway, set LOOM_SKIP_INSTALL_CHECK=1.",
     "",
   );
   return lines.join("\n");
@@ -88,12 +93,37 @@ function readTree(root, tree, subdir) {
 
 // Only run the filesystem check when invoked directly, so the pure helpers
 // above stay importable from tests.
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const root = dirname(dirname(fileURLToPath(import.meta.url)));
-  const trees = [readTree(root, "root", null), readTree(root, "app", "app")].filter(Boolean);
-  const stale = findStaleInstalls(trees);
-  if (stale.length > 0) {
-    console.error(formatStaleReport(stale));
-    process.exit(1);
+//
+// Both sides get realpath'd first. Node resolves symlinks for the ESM entry
+// behind import.meta.url but only path-resolves argv[1], so comparing them raw
+// makes this whole block a silent no-op whenever the checkout is reached
+// through a symlink -- a symlinked home or work directory, or /tmp on macOS.
+// Failing open there is the worst outcome available: no check, and no line of
+// output saying the check did not happen.
+function isDirectInvocation() {
+  if (!process.argv[1]) return false;
+  try {
+    return fileURLToPath(import.meta.url) === realpathSync(process.argv[1]);
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectInvocation()) {
+  // An escape hatch, because one worktree case has no in-band fix: a branch
+  // that changes the lockfile cannot be satisfied by the root checkout's
+  // shared node_modules, and reinstalling there only moves the breakage onto
+  // whatever branch the root has checked out. Loud rather than silent, so a
+  // skip left set in a shell never gets mistaken for a pass.
+  if (process.env.LOOM_SKIP_INSTALL_CHECK) {
+    console.error("install freshness check skipped (LOOM_SKIP_INSTALL_CHECK is set)");
+  } else {
+    const root = dirname(dirname(fileURLToPath(import.meta.url)));
+    const trees = [readTree(root, "root", null), readTree(root, "app", "app")].filter(Boolean);
+    const stale = findStaleInstalls(trees);
+    if (stale.length > 0) {
+      console.error(formatStaleReport(stale));
+      process.exit(1);
+    }
   }
 }

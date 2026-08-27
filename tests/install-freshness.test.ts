@@ -1,4 +1,9 @@
 import { describe, it, expect } from "vitest";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { findStaleInstalls, formatStaleReport } from "../scripts/install-freshness.mjs";
 
 // Shape of the two inputs: what the lockfile says a tree should resolve, and
@@ -77,5 +82,59 @@ describe("formatStaleReport", () => {
 
   it("explains the worktree symlink, which is how this usually happens", () => {
     expect(formatStaleReport(stale).toLowerCase()).toContain("worktree");
+  });
+
+  // The symlink means a worktree cannot hold branch-specific dependencies, so
+  // "reinstall in the root" is only half the advice -- a branch that bumps a
+  // dependency needs saying out loud, or the message sends you in a circle.
+  it("says what to do when the branch itself changed a dependency", () => {
+    const out = formatStaleReport(stale).toLowerCase();
+    expect(out).toContain("this branch");
+    expect(out).toContain("own node_modules");
+  });
+});
+
+// The direct-invocation guard compares import.meta.url against argv[1]. Node
+// realpath-resolves the first and not the second, so reaching the repo through
+// any symlink used to make the whole check a silent no-op -- no report, no exit
+// code, and nothing on stderr saying it had been skipped. Drive the real script
+// through a symlinked path and assert it still runs.
+describe("direct-invocation guard", () => {
+  const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+  const script = (root: string) => join(root, "scripts", "install-freshness.mjs");
+
+  // LOOM_SKIP_INSTALL_CHECK makes the run cheap and, more usefully, gives the
+  // guard an observable side effect that does not depend on whether this
+  // particular checkout happens to be installed cleanly.
+  function run(path: string) {
+    return spawnSync(process.execPath, [path], {
+      encoding: "utf8",
+      env: { ...process.env, LOOM_SKIP_INSTALL_CHECK: "1" },
+    });
+  }
+
+  it("runs when invoked through the real path", () => {
+    expect(run(script(REPO_ROOT)).stderr).toContain("skipped");
+  });
+
+  // Windows needs elevation or developer mode to create a directory symlink.
+  it.skipIf(process.platform === "win32")("still runs through a symlinked checkout", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "loom-freshness-"));
+    try {
+      const link = join(tmp, "link");
+      symlinkSync(REPO_ROOT, link, "dir");
+      expect(run(script(link)).stderr).toContain("skipped");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the escape hatch", () => {
+  it("is advertised in the report, since one worktree case has no in-band fix", () => {
+    const stale = [
+      { tree: "root", name: "@earendil-works/pi-ai", locked: "0.84.1", installed: "0.78.1" },
+    ];
+    expect(formatStaleReport(stale)).toContain("LOOM_SKIP_INSTALL_CHECK");
   });
 });
