@@ -3219,6 +3219,10 @@ wireApiKeyValidation(
 );
 prefsJetstreamPreset.addEventListener("click", () => {
   prefsBaseUrl.value = JETSTREAM_BASE_URL;
+  // Announce the new URL before painting: the input handler resyncs the picker
+  // to whatever the field now says, so the preset's own list has to be written
+  // after it rather than be wiped by it.
+  prefsBaseUrl.dispatchEvent(new Event("input"));
   prefsModel.innerHTML = "";
   for (const id of JETSTREAM_MODELS) {
     const opt = document.createElement("option");
@@ -3226,19 +3230,38 @@ prefsJetstreamPreset.addEventListener("click", () => {
     opt.textContent = id;
     prefsModel.appendChild(opt);
   }
-  // Trigger validation/discovery if a key is already entered.
-  prefsBaseUrl.dispatchEvent(new Event("input"));
 });
-// An edited endpoint retires a probe of the saved one: the reply would
-// otherwise land after the edit and list a different host's models under the
-// URL now on screen. Anything already fetched belongs to the saved URL too,
-// so it stops being this provider's list the moment the field diverges.
+/**
+ * Whether the base URL field currently differs from the one in config. Kept as
+ * state rather than recomputed on the spot because what matters is the
+ * *transition*: an edit that leaves the effective URL where it was must not
+ * disturb a probe that is already about that URL.
+ */
+let prefsBaseUrlDiverged = false;
+
+// The saved URL is what main probes; the field is what the user is reading.
+// Once those disagree, an in-flight reply and anything already fetched both
+// describe some other endpoint -- and the dropdown has to lose them too, not
+// just the cache, or the user picks a stale id and saves it paired with a URL
+// that never listed it. Coming back to the saved URL re-probes, since
+// otherwise a typo and its undo leave the picker empty with nothing to explain
+// why.
 prefsBaseUrl.addEventListener("input", () => {
-  retireModelDiscovery();
   const state = prefsProviderStates[prefsActiveProvider];
-  if (state && prefsBaseUrl.value.trim() !== state.savedBaseUrl.trim()) {
+  const diverged = prefsBaseUrl.value.trim() !== (state?.savedBaseUrl.trim() ?? "");
+  if (diverged === prefsBaseUrlDiverged) return;
+  prefsBaseUrlDiverged = diverged;
+  retireModelDiscovery();
+  if (!diverged) {
+    void refreshDiscoveredModels(prefsActiveProvider, false);
+    return;
+  }
+  setModelStatus("", "");
+  // Only rebuild the picker when discovery is what filled it. A static or
+  // preset list wasn't tied to the saved URL in the first place.
+  if (state?.discoveredModels?.length) {
     state.discoveredModels = undefined;
-    setModelStatus("", "");
+    populateModels(prefsActiveProvider, prefsModel.value || state.model || undefined);
   }
 });
 // Clear the "✓ Key stored" indicator as soon as the user starts typing.
@@ -3576,6 +3599,7 @@ function loadProviderFields(provider: string): void {
   setModelStatus("", "");
   prefsApiKey.value = state.typedKey;
   prefsBaseUrl.value = state.baseUrl;
+  prefsBaseUrlDiverged = state.baseUrl.trim() !== state.savedBaseUrl.trim();
   prefsApiKey.placeholder = state.hadKey ? "leave blank to keep existing key" : "";
   if (state.hadKey && !state.typedKey) {
     prefsApiKeyStatus.className = "api-key-status stored";
