@@ -40,7 +40,20 @@ export async function discoverProviderModels(
   }
   const key = deps.resolveKey(entry);
   if (!key) {
-    return { ok: false, error: "No stored API key — enter one to fetch models." };
+    // "No key stored" and "a key is stored but unreadable" look identical from
+    // here, and they are not the same to the user. The renderer's hadKey comes
+    // from maskConfig, which counts any apiKeyEncrypted as a key -- but
+    // safeStorage is off in dev and under LOOM_DISABLE_SAFE_STORAGE, and
+    // decryption fails outright once the Keychain ACL stops matching the
+    // running binary. Telling someone with a saved key that they have none
+    // sends them to re-enter a key they already have.
+    return {
+      ok: false,
+      error:
+        entry.apiKey || entry.apiKeyEncrypted
+          ? "Stored API key could not be read — re-enter it to fetch models."
+          : "No stored API key — enter one to fetch models.",
+    };
   }
   try {
     const res = await deps.probe(baseUrl, key);

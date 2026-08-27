@@ -16,6 +16,9 @@ const CONFIG: LoomConfig = {
   },
 };
 
+/** Same custom endpoint, but with nothing in either key field. */
+const NO_KEY = { model: "openai/gpt-4o", baseUrl: "https://openrouter.ai/api/v1/" };
+
 const okProbe = (models: string[]) => vi.fn(async () => ({ valid: true as const, models }));
 
 describe("discoverProviderModels", () => {
@@ -74,12 +77,28 @@ describe("discoverProviderModels", () => {
   it("fails without probing when no key is stored", async () => {
     const probe = okProbe(["a/one"]);
     const res = await discoverProviderModels("openai-compatible", {
+      config: { llm: { active: "openai-compatible", providers: { "openai-compatible": NO_KEY } } },
+      resolveKey: () => null,
+      probe,
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error).toMatch(/no stored api key/i);
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  // hadKey (and so the auto-probe on opening Preferences) is true for any
+  // stored key, but safeStorage can't read an encrypted one in dev, under
+  // LOOM_DISABLE_SAFE_STORAGE, or after a Keychain ACL mismatch. Saying "no
+  // key" there would send the user to re-enter a key they already have.
+  it("distinguishes an unreadable stored key from no key at all", async () => {
+    const probe = okProbe(["a/one"]);
+    const res = await discoverProviderModels("openai-compatible", {
       config: CONFIG,
       resolveKey: () => null,
       probe,
     });
     expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.error).toMatch(/key/i);
+    if (!res.ok) expect(res.error).toMatch(/could not be read/i);
     expect(probe).not.toHaveBeenCalled();
   });
 
