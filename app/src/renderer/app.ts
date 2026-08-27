@@ -29,6 +29,8 @@ import {
   capFeedbackPayload,
 } from "../../../shared/feedback-contract.js";
 import type { FeedbackPayload, FeedbackSysinfo } from "../../../shared/feedback-contract.js";
+import { toFeedbackSysinfo } from "./feedback-sysinfo.js";
+import type { FeedbackConfigView } from "./feedback-sysinfo.js";
 import changelogRaw from "../../../CHANGELOG.md?raw";
 import { parseChangelog, decideWhatsNew, releaseUrlFor } from "../../../shared/whats-new.js";
 import { isOAuthOnly, SEED_PROVIDER_AUTH_CAPS } from "../../../shared/provider-auth-caps.js";
@@ -4038,22 +4040,8 @@ async function buildFeedbackPayload(): Promise<FeedbackPayload> {
   if (reportIncludeSysinfo.checked) {
     try {
       const info = await window.orbit.getReportSysinfo();
-      const cfg = (await window.orbit.getConfig()) as {
-        llm?: { active?: string; providers?: Record<string, { model?: string }> };
-        galaxy?: { active: string | null };
-      };
-      const active = cfg.llm?.active;
-      sysinfo = {
-        appVersion: info.appVersion,
-        platform: info.platform,
-        arch: info.arch,
-        electron: info.electronVersion,
-        chrome: info.chromeVersion,
-        node: info.nodeVersion,
-        llmProvider: active,
-        llmModel: active ? cfg.llm?.providers?.[active]?.model : undefined,
-        galaxyConfigured: Boolean(cfg.galaxy?.active),
-      };
+      const cfg = (await window.orbit.getConfig()) as FeedbackConfigView;
+      sysinfo = toFeedbackSysinfo(info, cfg);
     } catch {
       /* skip sysinfo on failure */
     }

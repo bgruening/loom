@@ -218,6 +218,9 @@ async function fetchMode(): Promise<"remote" | "desktop"> {
       chromeVersion: "",
       platform: "web",
       arch: "",
+      // The browser shell has no host to inspect; platform:"web" already says
+      // this isn't a real Linux box.
+      wsl: false,
     }),
   openIssueReport: () => Promise.resolve({ opened: false }),
   submitFeedback: () =>
