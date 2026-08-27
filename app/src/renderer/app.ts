@@ -28,6 +28,8 @@ import {
 import type { FeedbackPayload, FeedbackSysinfo } from "../../../shared/feedback-contract.js";
 import changelogRaw from "../../../CHANGELOG.md?raw";
 import { parseChangelog, decideWhatsNew, releaseUrlFor } from "../../../shared/whats-new.js";
+import { isOAuthOnly, SEED_PROVIDER_AUTH_CAPS } from "../../../shared/provider-auth-caps.js";
+import type { ProviderAuthCaps } from "../../../shared/provider-auth-caps.js";
 import { openReleaseWithFallback, clearReleaseFallback } from "./update-banner.js";
 
 declare global {
@@ -762,6 +764,7 @@ const JETSTREAM_MODELS = ["gpt-oss-120b", "llama-4-scout"];
 const welcomeApiKeyHintRow = document.getElementById("welcome-api-key-hint-row")!;
 const welcomeOauthRow = document.getElementById("welcome-oauth-row")!;
 const welcomeOauthHintRow = document.getElementById("welcome-oauth-hint-row")!;
+const welcomeOauthHintText = document.getElementById("welcome-oauth-hint-text")!;
 const welcomeOauthStatus = document.getElementById("welcome-oauth-status")!;
 const welcomeOauthSignIn = document.getElementById("welcome-oauth-signin") as HTMLButtonElement;
 const welcomeGalaxyUrl = document.getElementById("welcome-galaxy-url") as HTMLInputElement;
@@ -772,24 +775,66 @@ const welcomeSave = document.getElementById("welcome-save")!;
 const welcomeError = document.getElementById("welcome-error")!;
 
 /**
- * Provider IDs that authenticate via OAuth rather than an API key, keyed to the
- * sign-in label pi gives them ("OpenAI (ChatGPT Plus/Pro)"). Populated from the
- * main process at startup; the seed keeps the first paint correct for the
- * provider that ships enabled if that call hasn't landed yet.
+ * Provider IDs that offer a sign-in flow, keyed to their auth capabilities.
+ * Populated from the main process at startup; the shared seed keeps the first
+ * paint correct for the provider that ships enabled if that call hasn't landed
+ * yet. The sign-in-only predicate is imported rather than reimplemented here --
+ * #429 was the renderer and the main process disagreeing about it.
  */
-let OAUTH_PROVIDERS: Record<string, string> = { "openai-codex": "" };
-function isOAuthProvider(provider: string): boolean {
+let OAUTH_PROVIDERS: Record<string, ProviderAuthCaps> = { ...SEED_PROVIDER_AUTH_CAPS };
+/** Does this provider offer a sign-in flow? True for dual-auth providers too. */
+function providerOffersSignIn(provider: string): boolean {
   return provider in OAUTH_PROVIDERS;
+}
+/**
+ * Sign-in is the ONLY way in for this provider, so there is no API key to ask
+ * for. Dual-auth providers (anthropic, xai, ...) answer false and keep their
+ * key field -- conflating the two is what hid Anthropic's key in #429.
+ */
+function isOAuthOnlyProvider(provider: string): boolean {
+  return isOAuthOnly(OAUTH_PROVIDERS[provider]);
 }
 /** Button text for a provider's sign-in, e.g. "Sign in with GitHub Copilot". */
 function oauthSignInLabel(provider: string, signedIn: boolean): string {
   if (signedIn) return "Sign in again";
-  const label = OAUTH_PROVIDERS[provider];
-  return label ? `Sign in with ${label}` : "Sign in";
+  const caps = OAUTH_PROVIDERS[provider];
+  if (caps?.signInLabel) return caps.signInLabel;
+  return caps?.providerLabel ? `Sign in with ${caps.providerLabel}` : "Sign in";
 }
-void window.orbit.oauthProviders().then((p) => {
-  if (p && Object.keys(p).length > 0) OAUTH_PROVIDERS = p;
-});
+
+/** The account a sign-in gets you, for prose. Falls back to the bare id. */
+function oauthAccountLabel(provider: string): string {
+  return OAUTH_PROVIDERS[provider]?.providerLabel || provider;
+}
+
+/**
+ * These hint rows show for every sign-in-capable provider now, so the copy has
+ * to follow the provider -- the markup used to hardcode OpenAI's plan list, and
+ * an Anthropic user reading about ChatGPT was the other half of #429. Only
+ * providers whose requirements are worth spelling out get their own line; the
+ * rest are described by pi's own name for the account.
+ */
+const OAUTH_HINTS: Record<string, string> = {
+  "openai-codex":
+    "Opens your browser to OpenAI. Requires a ChatGPT Plus, Pro, Business, Edu, or Enterprise subscription.",
+};
+function oauthHintText(provider: string): string {
+  const specific = OAUTH_HINTS[provider];
+  const opener = specific || `Opens your browser to sign in with ${oauthAccountLabel(provider)}.`;
+  return `${opener} Token refresh is handled automatically.`;
+}
+// Never rejects: three UI paths await this (welcome overlay, welcome auth rows,
+// Preferences auth rows), so letting an IPC failure through would leave a fresh
+// install with no welcome screen at all. Falling back to the seed is the whole
+// point of having one.
+const oauthProvidersReady = window.orbit
+  .oauthProviders()
+  .then((p) => {
+    if (p && Object.keys(p).length > 0) OAUTH_PROVIDERS = p;
+  })
+  .catch((err) => {
+    console.error("[oauth] could not read the provider map; using the seed:", err);
+  });
 
 function formatOAuthStatus(s: {
   signedIn: boolean;
@@ -900,14 +945,17 @@ welcomeJetstreamPreset.addEventListener("click", () => {
 });
 
 async function updateWelcomeAuthUi(): Promise<void> {
-  const oauth = isOAuthProvider(welcomeProvider.value);
+  await oauthProvidersReady;
+  const signIn = providerOffersSignIn(welcomeProvider.value);
+  const oauthOnly = isOAuthOnlyProvider(welcomeProvider.value);
   const custom = welcomeProvider.value === "openai-compatible";
   welcomeBaseUrlRow.classList.toggle("hidden", !custom);
-  welcomeApiKeyRow.classList.toggle("hidden", oauth);
-  welcomeApiKeyHintRow.classList.toggle("hidden", oauth);
-  welcomeOauthRow.classList.toggle("hidden", !oauth);
-  welcomeOauthHintRow.classList.toggle("hidden", !oauth);
-  if (oauth) {
+  welcomeApiKeyRow.classList.toggle("hidden", oauthOnly);
+  welcomeApiKeyHintRow.classList.toggle("hidden", oauthOnly);
+  welcomeOauthRow.classList.toggle("hidden", !signIn);
+  welcomeOauthHintRow.classList.toggle("hidden", !signIn);
+  if (signIn) {
+    welcomeOauthHintText.textContent = oauthHintText(welcomeProvider.value);
     const status = await window.orbit.oauthStatus(welcomeProvider.value);
     welcomeOauthStatus.textContent = formatOAuthStatus(status);
     welcomeOauthStatus.classList.toggle("signed-in", status.signedIn);
@@ -956,8 +1004,7 @@ welcomeSave.addEventListener("click", async () => {
     // hiding it on a rejection stranded the user in front of a brain that never
     // started, with no way back to the key prompt.
     const res = (await window.orbit.provideLlmKey?.(welcomeProvider.value, key)) as
-      | { ok?: boolean; error?: string }
-      | undefined;
+      { ok?: boolean; error?: string } | undefined;
     if (res && res.ok === false) {
       welcomeError.textContent = res.error || "Could not start the agent with that key";
       return;
@@ -966,10 +1013,18 @@ welcomeSave.addEventListener("click", async () => {
     await refreshGalaxyStatus();
     return;
   }
-  const oauth = isOAuthProvider(welcomeProvider.value);
+  const signIn = providerOffersSignIn(welcomeProvider.value);
+  const oauthOnly = isOAuthOnlyProvider(welcomeProvider.value);
   const apiKey = welcomeApiKey.value.trim();
-  if (!oauth && !apiKey) {
-    welcomeError.textContent = "API key is required";
+  const signedIn = signIn
+    ? (await window.orbit.oauthStatus(welcomeProvider.value)).signedIn
+    : false;
+  // Dual-auth providers are satisfied by either credential, so only insist on a
+  // key when there is no sign-in to fall back on.
+  if (!oauthOnly && !apiKey && !signedIn) {
+    welcomeError.textContent = signIn
+      ? "Enter an API key, or sign in above."
+      : "API key is required";
     return;
   }
   const custom = welcomeProvider.value === "openai-compatible";
@@ -977,12 +1032,9 @@ welcomeSave.addEventListener("click", async () => {
     welcomeError.textContent = "Enter a base URL (or use the Jetstream preset).";
     return;
   }
-  if (oauth) {
-    const status = await window.orbit.oauthStatus(welcomeProvider.value);
-    if (!status.signedIn) {
-      welcomeError.textContent = `${oauthSignInLabel(welcomeProvider.value, false)} before continuing.`;
-      return;
-    }
+  if (oauthOnly && !signedIn) {
+    welcomeError.textContent = `${oauthSignInLabel(welcomeProvider.value, false)} before continuing.`;
+    return;
   }
 
   // Galaxy: both-or-neither. The Preferences modal enforces the same
@@ -996,11 +1048,13 @@ welcomeSave.addEventListener("click", async () => {
     return;
   }
 
-  // OAuth providers persist their credential in ~/.pi/agent/auth.json (written
-  // by the sign-in flow above), not in config.json. Skip writing apiKey for
-  // those so a leftover plaintext field doesn't shadow the real auth path.
+  // OAuth-only providers persist their credential in ~/.pi/agent/auth.json
+  // (written by the sign-in flow above), not in config.json. Skip writing apiKey
+  // for those so a leftover plaintext field doesn't shadow the real auth path.
+  // Skip it for an empty value too: "" means CLEAR to the reconciler, which would
+  // wipe a stored key for a dual-auth provider the user chose to sign into.
   const providerEntry: Record<string, unknown> = { model: welcomeModel.value || undefined };
-  if (!oauth) providerEntry.apiKey = apiKey;
+  if (!oauthOnly && apiKey) providerEntry.apiKey = apiKey;
   if (welcomeBaseUrl.value.trim()) providerEntry.baseUrl = welcomeBaseUrl.value.trim();
   const cfg: Record<string, unknown> = {
     llm: {
@@ -1074,7 +1128,8 @@ async function checkFirstRun(): Promise<void> {
   const active = cfg.llm?.active;
   // Treat an OAuth-only setup (no API key, but provider has a stored token)
   // as fully configured -- skip the welcome screen.
-  if (active && isOAuthProvider(active)) {
+  await oauthProvidersReady;
+  if (active && providerOffersSignIn(active)) {
     const status = await window.orbit.oauthStatus(active);
     if (status.signedIn) return;
   }
@@ -3023,6 +3078,7 @@ const prefsApiKeyRow = document.getElementById("prefs-api-key-row")!;
 const prefsApiKeyHintRow = document.getElementById("prefs-api-key-hint-row")!;
 const prefsOauthRow = document.getElementById("prefs-oauth-row")!;
 const prefsOauthHintRow = document.getElementById("prefs-oauth-hint-row")!;
+const prefsOauthHintText = document.getElementById("prefs-oauth-hint-text")!;
 const prefsOauthStatus = document.getElementById("prefs-oauth-status")!;
 const prefsOauthSignIn = document.getElementById("prefs-oauth-signin") as HTMLButtonElement;
 const prefsOauthSignOut = document.getElementById("prefs-oauth-signout") as HTMLButtonElement;
@@ -3135,14 +3191,18 @@ prefsApiKey.addEventListener("input", () => {
 });
 
 async function updatePrefsAuthUi(): Promise<void> {
-  const oauth = isOAuthProvider(prefsProvider.value);
+  await oauthProvidersReady;
+  const signIn = providerOffersSignIn(prefsProvider.value);
+  const oauthOnly = isOAuthOnlyProvider(prefsProvider.value);
   const custom = prefsProvider.value === "openai-compatible";
   prefsBaseUrlRow.classList.toggle("hidden", !custom);
-  prefsApiKeyRow.classList.toggle("hidden", oauth);
-  prefsApiKeyHintRow.classList.toggle("hidden", oauth);
-  prefsOauthRow.classList.toggle("hidden", !oauth);
-  prefsOauthHintRow.classList.toggle("hidden", !oauth);
-  if (oauth) {
+  // Dual-auth providers get BOTH: a key field and a sign-in button.
+  prefsApiKeyRow.classList.toggle("hidden", oauthOnly);
+  prefsApiKeyHintRow.classList.toggle("hidden", oauthOnly);
+  prefsOauthRow.classList.toggle("hidden", !signIn);
+  prefsOauthHintRow.classList.toggle("hidden", !signIn);
+  if (signIn) {
+    prefsOauthHintText.textContent = oauthHintText(prefsProvider.value);
     const status = await window.orbit.oauthStatus(prefsProvider.value);
     prefsOauthStatus.textContent = formatOAuthStatus(status);
     prefsOauthStatus.classList.toggle("signed-in", status.signedIn);
@@ -3171,7 +3231,12 @@ prefsOauthSignIn.addEventListener("click", async () => {
 });
 
 prefsOauthSignOut.addEventListener("click", async () => {
-  if (!confirm("Sign out of ChatGPT? You'll need to sign in again to use Codex models.")) return;
+  // Signing out of a dual-auth provider still leaves the API-key path open, so
+  // don't tell those users they've lost access to the models.
+  const consequence = isOAuthOnlyProvider(prefsProvider.value)
+    ? "You'll need to sign in again to use its models."
+    : "You'll need to sign in again, or use an API key instead.";
+  if (!confirm(`Sign out of ${oauthAccountLabel(prefsProvider.value)}? ${consequence}`)) return;
   prefsOauthSignOut.disabled = true;
   try {
     await window.orbit.oauthSignOut(prefsProvider.value);
@@ -3468,17 +3533,18 @@ async function savePreferences(): Promise<void> {
   const activeProvider = prefsProvider.value;
   const selectedModel = prefsProviderStates[activeProvider]?.model || prefsModel.value || undefined;
 
-  // Build the full providers map from in-memory state. OAuth providers persist
-  // credentials in ~/.pi/agent/auth.json -- don't ship an apiKey field (sentinel
-  // or "") for them, or the reconciler would try to preserve/clear a
-  // config.json key that was never there.
+  // Build the full providers map from in-memory state. OAuth-ONLY providers
+  // persist credentials in ~/.pi/agent/auth.json -- don't ship an apiKey field
+  // (sentinel or "") for them, or the reconciler would try to preserve/clear a
+  // config.json key that was never there. Dual-auth providers do keep a
+  // config.json key, so they go down the normal sentinel path (#429).
   const providers: Record<string, { apiKey?: string; model?: string; baseUrl?: string }> = {};
   for (const [name, state] of Object.entries(prefsProviderStates)) {
     const entry: { apiKey?: string; model?: string; baseUrl?: string } = {
       model: state.model || undefined,
     };
     if (state.baseUrl) entry.baseUrl = state.baseUrl;
-    if (!isOAuthProvider(name)) {
+    if (!isOAuthOnlyProvider(name)) {
       entry.apiKey = state.typedKey.trim()
         ? state.typedKey.trim()
         : state.hadKey
@@ -3493,7 +3559,7 @@ async function savePreferences(): Promise<void> {
     model: selectedModel,
   };
   if (prefsBaseUrl.value.trim()) activeEntry.baseUrl = prefsBaseUrl.value.trim();
-  if (!isOAuthProvider(activeProvider)) activeEntry.apiKey = llmApiKey;
+  if (!isOAuthOnlyProvider(activeProvider)) activeEntry.apiKey = llmApiKey;
   providers[activeProvider] = activeEntry;
 
   const config: Record<string, unknown> = {
