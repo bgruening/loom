@@ -9,7 +9,7 @@ const SAVED = {
   alreadyDiscovered: false,
 };
 
-describe("planModelDiscovery — opening Preferences / switching provider", () => {
+describe("planModelDiscovery -- opening Preferences / switching provider", () => {
   it("probes for a saved custom endpoint with a stored key", () => {
     expect(planModelDiscovery({ ...SAVED, manual: false })).toEqual({ action: "probe" });
   });
@@ -48,7 +48,7 @@ describe("planModelDiscovery — opening Preferences / switching provider", () =
   });
 });
 
-describe("planModelDiscovery — the Fetch models button", () => {
+describe("planModelDiscovery -- the Fetch models button", () => {
   it("re-probes even when a list was already fetched this session", () => {
     expect(planModelDiscovery({ ...SAVED, manual: true, alreadyDiscovered: true })).toEqual({
       action: "probe",

@@ -20,8 +20,11 @@ export interface DiscoverModelsDeps {
  *
  * The renderer never sees a stored key (config:get is masked), so it cannot
  * make this call itself -- it only passes the provider *name*, which indexes
- * into config. Both the URL we contact and the key we send come from disk, so
- * this can only re-probe an endpoint the user already configured.
+ * into config. That keeps the credential out of the renderer, but it does not
+ * pin the probe to an endpoint the user chose: a renderer can call config:save
+ * to repoint baseUrl while the UNCHANGED_SECRET sentinel preserves the key.
+ * See the models:discover handler in main/ipc-handlers.ts for why that hole
+ * belongs to config:save rather than here.
  */
 export async function discoverProviderModels(
   provider: string,
