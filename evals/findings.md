@@ -276,15 +276,31 @@ mirror axes of Galaxy's own `custom_tool` eval
 ### The harness was scoring zeros for the wrong reason
 
 Before any of this could run, `writePiModelsConfig` had to be fixed. It wrote
-the _name_ of the API-key env var into pi's `models.json`, but pi's provider
-`apiKey` is the literal credential -- so the proxy received `PROXY_API_KEY` as
-the bearer token and 401'd. Every tier-2 run died in ~1.3s with no events, and
-the assertions reported plain "chat text did not include ...", which is
-indistinguishable from a model that simply answered badly. Any tier-2 matrix
-number produced between that pi drift and this fix is meaningless.
+the _bare name_ of the API-key env var into pi's `models.json`. pi parses that
+field as a template: `$PROXY_API_KEY` or `${PROXY_API_KEY}` interpolates from
+the environment at request time, a leading `!` runs a shell command, and
+anything else -- including a bare env var name -- is the literal credential. So
+the proxy received `PROXY_API_KEY` as the bearer token and 401'd. Every tier-2
+run died in ~1.3s with no events, and the assertions reported plain "chat text
+did not include ...", which is indistinguishable from a model that simply
+answered badly. Any tier-2 matrix number produced between that pi drift and
+this fix is meaningless.
 
-Worth remembering as an eval-design lesson: a credential failure and a
-capability failure looked identical in the report.
+The fix is the `$` prefix, which also keeps the key off disk -- worth caring
+about because the runner points the agent under test at a fake `HOME`, so a
+resolved key written into `models.json` would sit somewhere a scenario with
+`read` or `bash` could fetch it and echo it into chat text the reporter prints.
+Confirmed against a local stand-in proxy: a bare name sends
+`Authorization: Bearer PROXY_API_KEY`, the `$`-prefixed form sends the real key.
+
+Two lessons worth keeping. A credential failure and a capability failure looked
+identical in the report -- `evaluate` now emits a `run.noModelOutput` failure
+when a tier-2 run produces no assistant text at all, so the next drift of this
+shape names itself. And the same bare-name assumption is written into
+`shared/custom-provider.js`'s docblock for the Orbit custom-provider path; that
+one is masked in practice because `bin/loom.js` passes `--api-key` at runtime,
+which takes precedence, but the comment is wrong about pi and the file is one
+character from not needing the flag.
 
 ### Results, n=3, before and after galaxy-skills#32
 
@@ -306,10 +322,30 @@ that a bare language image ships no third-party libraries).
 **The skill change does measurable work, on exactly the failure it targets.**
 On `main`, MiniMax emitted `container: python:` for a pandas tool on 3 of 3
 runs -- the bare-image mistake that can't `import pandas`, and the one
-galaxyproject/galaxy#22981 was chasing. On the #32 branch that banned
-substring does not appear in a single run, from any model. Qwen's one
-`container: python:` run also disappears. This is the clearest before/after
-the suite has produced so far.
+galaxyproject/galaxy#22981 was chasing. On the #32 branch that string does not
+appear in a single run, from any model. Qwen's one `container: python:` run
+also disappears. This is the clearest before/after the suite has produced
+so far.
+
+> **These numbers are frozen to the assertions that produced them.** Both
+> scenarios' content assertions were retuned right after this run, so the
+> columns are not comparable to anything scored later and shouldn't be carried
+> forward as a baseline. `udt-authoring-container` dropped the
+> `mustNotInclude: ["container: python:"]` ban entirely -- an absence check over
+> chat text is anti-correlated with the understanding being measured, since a
+> model that learned the lesson is likely to write the mistake in order to warn
+> against it -- and widened the positive check to a regex covering YAML quoting,
+> `docker://` prefixes and the `depot.galaxyproject.org` mirror. That cuts both
+> ways for the table above: some `container` cells may have been red for
+> punctuation, and the "does not appear in a single run" observation is a fact
+> about the transcripts, not evidence of understanding, because a model that
+> stopped explaining itself produces the same absence.
+> `udt-authoring-select-params` line-anchored its needles, so the old columns
+> could credit a run that named `type: select` and "the options: dna, rna,
+> protein" in prose without declaring a single typed input -- MiniMax's 3/3 in
+> particular is worth re-running before it's believed. The direction of the
+> before/after (the skill content changes container choice for the two models
+> that can author at all) is what survives; the per-cell counts don't.
 
 Per-model notes on the rest:
 
@@ -320,7 +356,10 @@ Per-model notes on the rest:
   reason: LiteLLM rejects `reasoning_effort` for it (400) on top of the
   `reasoning_content` problem recorded above. It dies in ~1.7s.
 - **Llama-3.3-70B hits the 120s timeout on all six runs** without emitting
-  YAML -- consistent with what `udt-authoring-threads` saw.
+  YAML -- consistent with what `udt-authoring-threads` saw. Note this is also
+  the case that used to defeat `stripThinkingTags`: SIGTERM lands mid-thought,
+  there's no closing `</think>`, and the non-greedy pair regex stripped nothing,
+  so the raw chain-of-thought was graded as the answer. Fixed since this run.
 - **Llama-3.1-8B and gemma-4-31B** fetch the skill but never produce a
   `class: GalaxyUserTool` block.
 - **Qwen3-32B on select-params** is the interesting near-miss: it drafts the
