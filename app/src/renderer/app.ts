@@ -799,9 +799,18 @@ function oauthSignInLabel(provider: string, signedIn: boolean): string {
   const label = OAUTH_PROVIDERS[provider]?.signInLabel;
   return label ? `Sign in with ${label}` : "Sign in";
 }
-const oauthProvidersReady = window.orbit.oauthProviders().then((p) => {
-  if (p && Object.keys(p).length > 0) OAUTH_PROVIDERS = p;
-});
+// Never rejects: three UI paths await this (welcome overlay, welcome auth rows,
+// Preferences auth rows), so letting an IPC failure through would leave a fresh
+// install with no welcome screen at all. Falling back to the seed is the whole
+// point of having one.
+const oauthProvidersReady = window.orbit
+  .oauthProviders()
+  .then((p) => {
+    if (p && Object.keys(p).length > 0) OAUTH_PROVIDERS = p;
+  })
+  .catch((err) => {
+    console.error("[oauth] could not read the provider map; using the seed:", err);
+  });
 
 function formatOAuthStatus(s: {
   signedIn: boolean;

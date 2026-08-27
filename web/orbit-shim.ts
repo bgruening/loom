@@ -199,6 +199,10 @@ async function fetchMode(): Promise<"remote" | "desktop"> {
     Promise.resolve({ ok: false, error: "session restore is unavailable in remote mode" }),
   listAllModels: () =>
     Promise.resolve({ ok: false, error: "model catalog is unavailable in remote mode" }),
+  // Empty map, not undefined: app.ts calls this at module load and three UI
+  // paths await the result, so a missing stub is a TypeError that takes the
+  // whole renderer down. Empty leaves the shared seed in place.
+  oauthProviders: () => Promise.resolve({}),
   oauthStatus: () => Promise.resolve({ signedIn: false }),
   oauthSignIn: () => Promise.resolve({ ok: false, error: "OAuth is unavailable in remote mode" }),
   oauthSignOut: () => Promise.resolve({ ok: true }),
