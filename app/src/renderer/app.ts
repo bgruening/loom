@@ -1153,7 +1153,12 @@ async function populateDynamicModelData(): Promise<void> {
     const newPricing: typeof PRICING = {};
     const newWindows: typeof CONTEXT_WINDOWS = {};
     for (const [provider, entries] of Object.entries(res.providers)) {
-      newModels[provider] = entries.map((e) => ({ id: e.id, label: e.label }));
+      // Flagged models stay out of the picker but keep their window below --
+      // an already-stranded user needs the number to be told why their model
+      // can't run (#418/#419).
+      newModels[provider] = entries
+        .filter((e) => !e.tooSmall)
+        .map((e) => ({ id: e.id, label: e.label }));
       for (const e of entries) {
         newPricing[e.id] = {
           in: e.pricing.input,
@@ -1167,7 +1172,12 @@ async function populateDynamicModelData(): Promise<void> {
         }
       }
     }
-    if (Object.keys(newModels).length === 0) return; // never replace with empty
+    // Never replace with empty. A provider whose every model was flagged also
+    // drops out here rather than showing an empty picker.
+    for (const [provider, list] of Object.entries(newModels)) {
+      if (!list.length) delete newModels[provider];
+    }
+    if (Object.keys(newModels).length === 0) return;
     // Merge rather than replace so hardcoded providers not returned by the
     // IPC (e.g. deepseek before main process restarts) survive.
     MODELS_BY_PROVIDER = { ...MODELS_BY_PROVIDER, ...newModels };
