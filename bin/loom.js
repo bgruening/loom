@@ -415,21 +415,56 @@ if (!isInformationalCommand) {
 // Pre-flight: ensure at least one LLM provider is configured
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Where to go to fix a missing credential, phrased for the shell we're running
+ * under. The CLI wording ("Launch via Orbit and sign in from Preferences") is
+ * actively wrong inside Orbit -- it points at the app the user is already
+ * looking at, which is the half of #429 that survived the first fix. Route every
+ * exit below through here so a new one can't quietly regress to CLI-only advice.
+ */
+function credentialFixHint(provider, { canUseApiKey }) {
+  if (isRpcMode) {
+    return canUseApiKey
+      ? `Open Preferences, re-enter the API key for "${provider}" or sign in to it,
+then start a new session.`
+      : `Open Preferences, sign in to "${provider}", then start a new session.`;
+  }
+  if (!canUseApiKey) {
+    return `Launch via Orbit (\`cd app && npm start\`) and sign in from Preferences,
+or unset "llm.active" in ~/.loom/config.json.`;
+  }
+  const envVar = PROVIDER_ENV_MAP[provider] || "AI_GATEWAY_API_KEY";
+  return `Do one of the following:
+
+  * Export the key for this shell:
+      export ${envVar}=...
+
+  * Launch via Orbit (\`cd app && npm start\`), which decrypts the stored key
+    and injects ${envVar} into the brain.
+
+  * Unset "llm.active" in ~/.loom/config.json.`;
+}
+
 function checkLLMProvider() {
   const skipFlags = ["--version", "--help", "-h", "--api-key", "--list-models"];
   if (userArgs.some((a) => skipFlags.some((f) => a.startsWith(f)))) return;
   if (hasArg("--provider")) return;
 
-  // OAuth providers authenticate via ~/.pi/agent/auth.json, not config keys.
-  // Short-circuit on a present credential for the active provider; stale
-  // plaintext / encrypted fields on the entry are ignored entirely so they
-  // can't mask a missing OAuth login or falsely trigger the encrypted-key
-  // exit below.
+  // pi reads ~/.pi/agent/auth.json natively, so a stored login authenticates the
+  // active provider on its own. This has to come before every key path below:
+  // a dual-auth provider the user IS signed in to would otherwise hit the
+  // encrypted-key exit and die over a key it never needed (#429), which also
+  // contradicts what isProviderUsable() tells the reconciler.
+  if (activeLlmProvider && hasStoredCredential(readAuthJson(), activeLlmProvider)) return;
+
+  // Sign-in-only providers have no key path at all, so with no stored login
+  // there is nothing left to try. Stale plaintext / encrypted fields on the
+  // entry are ignored entirely so they can't mask the missing sign-in or
+  // falsely trigger the encrypted-key exit below.
   if (activeLlmProvider && OAUTH_ONLY_PROVIDERS.has(activeLlmProvider)) {
-    if (hasStoredCredential(readAuthJson(), activeLlmProvider)) return;
-    console.error(`loom: provider "${activeLlmProvider}" requires an OAuth sign-in.
-Launch via Orbit (\`cd app && npm start\`) and sign in from Preferences,
-or unset the active provider in ~/.loom/config.json.
+    console.error(`loom: provider "${activeLlmProvider}" requires a sign-in.
+
+${credentialFixHint(activeLlmProvider, { canUseApiKey: false })}
 `);
     process.exit(1);
   }
@@ -466,45 +501,22 @@ or unset the active provider in ~/.loom/config.json.
   ];
   if (providerEnvVars.some((v) => process.env[v])) return;
 
-  // Config has an encrypted key but this CLI can't decrypt it — Electron's
-  // safeStorage lives in the Orbit main process. Point the user at the two
-  // working paths instead of falling through to the generic error.
+  // Config has an encrypted key but this process can't decrypt it -- Electron's
+  // safeStorage lives in the Orbit main process. Say so instead of falling
+  // through to the generic error.
   if (activeLlmConfig?.apiKeyEncrypted) {
-    const envVar = PROVIDER_ENV_MAP[activeLlmProvider] || "AI_GATEWAY_API_KEY";
-    // Under a shell the advice below is backwards -- we ARE inside Orbit, and it
-    // was Orbit that failed to hand us the decrypted key. Say so instead of
-    // telling the user to launch the app they're already looking at.
-    console.error(
-      isRpcMode
-        ? `loom: the stored API key for provider "${activeLlmProvider}" could not be
-decrypted, so no credential reached the agent.
+    console.error(`loom: the API key stored for provider "${activeLlmProvider}" could not be
+decrypted here, so no credential reached the agent. (apiKeyEncrypted in
+~/.loom/config.json only decrypts inside Orbit.)
 
-Open Preferences and re-enter the key for "${activeLlmProvider}", or pick a
-provider you're signed in to.
-`
-        : `loom: your ~/.loom/config.json has an encrypted API key
-(apiKeyEncrypted) for provider "${activeLlmProvider}", but the standalone
-CLI cannot decrypt it -- that only works inside Orbit.
-
-Do one of the following:
-
-  * Launch via Orbit (\`cd app && npm start\`), which decrypts and injects
-    ${envVar} into the brain.
-
-  * Export the key for this shell:
-      export ${envVar}=...
-`,
-    );
+${credentialFixHint(activeLlmProvider, { canUseApiKey: true })}
+`);
     process.exit(1);
   }
 
-  const authPath = join(agentDir, "auth.json");
-  if (existsSync(authPath)) {
-    try {
-      const auth = JSON.parse(readFileSync(authPath, "utf-8"));
-      if (Object.keys(auth).length > 0) return;
-    } catch {}
-  }
+  // Any stored pi login at all -- the user may have signed in via `--provider`
+  // without ever setting llm.active.
+  if (Object.keys(readAuthJson()).length > 0) return;
 
   const modelsPath = join(agentDir, "models.json");
   if (existsSync(modelsPath)) {
@@ -513,6 +525,15 @@ Do one of the following:
       const providers = models.providers || {};
       if (Object.values(providers).some((p) => p.apiKey)) return;
     } catch {}
+  }
+
+  if (isRpcMode) {
+    console.error(`loom: no LLM provider is configured, so the agent has no credential.
+
+Open Preferences, pick a provider and add its API key (or sign in to it),
+then start a new session.
+`);
+    process.exit(1);
   }
 
   console.error(`loom requires an LLM provider to function.
