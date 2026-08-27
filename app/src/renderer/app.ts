@@ -3560,12 +3560,19 @@ async function refreshDiscoveredModels(provider: string, manual: boolean): Promi
       if (owns()) setModelStatus("invalid", `\u2717 ${res.error}`);
       return;
     }
-    if (res.models.length === 0) {
-      if (owns()) setModelStatus("invalid", "\u2717 The endpoint listed no models.");
-      return;
-    }
     // Re-read: a provider switch replaces the state object mid-flight.
     const target = prefsProviderStates[provider];
+    if (res.models.length === 0) {
+      // A successful probe that lists nothing still describes the endpoint, so
+      // an earlier fetch's ids can't stay in the picker under a label saying
+      // there are none.
+      if (target) target.discoveredModels = undefined;
+      if (owns()) {
+        populateModels(provider, prefsModel.value || target?.model || undefined);
+        setModelStatus("invalid", "\u2717 The endpoint listed no models.");
+      }
+      return;
+    }
     if (target) target.discoveredModels = res.models;
     if (owns()) {
       populateModels(provider, prefsModel.value || target?.model || undefined, res.models);
