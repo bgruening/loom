@@ -44,6 +44,24 @@ function hasKnownContextWindow(window: unknown): window is number {
  *     an empty result would make the provider vanish from the picker with no
  *     explanation -- the worst outcome available here.
  */
+/**
+ * Mark, rather than remove, the models that are too small to run a session.
+ *
+ * Removing them at the source also removed their `contextWindow`, and the
+ * renderer needs that number for a user who is *already* on such a model: it
+ * is what lets the overflow error say "this model's window is too small"
+ * instead of advising `/compact` on a conversation that has barely started
+ * (#419). So the picker exclusion is expressed as a flag the renderer honors,
+ * and the window keeps flowing. Same escape hatches as the filter below.
+ */
+export function flagUnusableContextWindows<T extends { id: string; contextWindow?: number }>(
+  provider: string,
+  models: readonly T[],
+): Array<T & { tooSmall?: boolean }> {
+  const usableIds = new Set(filterUnusableContextWindows(provider, models).map((m) => m.id));
+  return models.map((m) => ({ ...m, tooSmall: usableIds.has(m.id) ? undefined : true }));
+}
+
 export function filterUnusableContextWindows<T extends { contextWindow?: number }>(
   provider: string,
   models: readonly T[],

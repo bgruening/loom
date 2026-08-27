@@ -26,7 +26,7 @@ import { normalizeGalaxyUrl, validateGalaxyUrl } from "./galaxy-url.js";
 // directly or these are undefined at runtime.
 import { getProviders, getModels } from "@earendil-works/pi-ai/compat";
 import { isDeprecatedModelId } from "./model-catalog.js";
-import { filterUnusableContextWindows } from "./model-context-window.js";
+import { flagUnusableContextWindows } from "./model-context-window.js";
 import { checkLatestVersion } from "./version-check.js";
 import { resolveReleasePageUrl } from "./release-page.js";
 import { postFeedback } from "./feedback.js";
@@ -776,23 +776,28 @@ export function registerIpcHandlers(agent: AgentManager): void {
       "deepseek",
     ]);
     type Pricing = { input: number; output: number; cacheRead?: number; cacheWrite?: number };
-    type Entry = { id: string; label: string; pricing: Pricing; contextWindow?: number };
+    type Entry = {
+      id: string;
+      label: string;
+      pricing: Pricing;
+      contextWindow?: number;
+      tooSmall?: boolean;
+    };
     const out: Record<string, Entry[]> = {};
     try {
       for (const provider of getProviders()) {
         if (!USER_FACING_PROVIDERS.has(provider)) continue;
         // Drop generations the provider's live API has retired -- pi's registry
         // still lists them but they 404 on use, so they shouldn't reach the picker (#221).
-        // Then drop models whose context window is too small to hold Orbit's
-        // baseline prompt: those don't 404, they accept the request and fail on
-        // the user's very first message (#418). Same treatment as #221 -- keep
-        // them out of the picker rather than showing them disabled.
-        const models = filterUnusableContextWindows(
-          provider,
-          getModels(provider).filter((m) => !isDeprecatedModelId(provider, m.id)),
-        );
+        const models = getModels(provider).filter((m) => !isDeprecatedModelId(provider, m.id));
         if (!models.length) continue;
-        out[provider] = models.map((m) => {
+        // Models too small to hold Orbit's baseline prompt don't 404 -- they
+        // accept the request and fail on the user's very first message (#418).
+        // They're flagged rather than dropped: the renderer keeps them out of
+        // the picker, but still learns their contextWindow, which is what lets
+        // the overflow message tell an already-stranded user that their window
+        // is the problem instead of advising /compact (#419).
+        out[provider] = flagUnusableContextWindows(provider, models).map((m) => {
           const cleanName = m.name.replace(/^Claude\s+/i, "");
           const priceTag = `$${m.cost.input}/$${m.cost.output}`;
           return {
@@ -807,6 +812,8 @@ export function registerIpcHandlers(agent: AgentManager): void {
             // Model's max context window (tokens). Powers the renderer's
             // context-fill indicator. May be undefined for some providers.
             contextWindow: typeof m.contextWindow === "number" ? m.contextWindow : undefined,
+            // Known to the renderer, but not offered in the picker (#418).
+            tooSmall: m.tooSmall,
           };
         });
       }

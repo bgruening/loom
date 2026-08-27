@@ -150,6 +150,7 @@ export interface OrbitAPI {
             label: string;
             pricing: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
             contextWindow?: number;
+            tooSmall?: boolean;
           }>
         >;
       }

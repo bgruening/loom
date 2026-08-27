@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   MIN_USABLE_CONTEXT_WINDOW,
   filterUnusableContextWindows,
+  flagUnusableContextWindows,
 } from "../app/src/main/model-context-window.js";
 
 type M = { id: string; contextWindow?: number };
@@ -103,5 +104,57 @@ describe("filterUnusableContextWindows", () => {
   it("keeps the floor above the broken tier and below mainstream models", () => {
     expect(MIN_USABLE_CONTEXT_WINDOW).toBeGreaterThan(32_768);
     expect(MIN_USABLE_CONTEXT_WINDOW).toBeLessThanOrEqual(64_000);
+  });
+});
+
+describe("flagUnusableContextWindows -- keeps the window, hides the option", () => {
+  // The regression this exists to prevent: #418 originally dropped small models
+  // at the source, which also dropped their contextWindow. That silently
+  // disabled #419's "your model's window is too small" message for the exact
+  // users it was written for -- the renderer's hardcoded openai table has no
+  // bare `gpt-4` entry, and windowFromTable's prefix match can't reach one,
+  // so the lookup returned null and the humanizer fell back to /compact.
+  it("still publishes a too-small model's context window", () => {
+    const flagged = flagUnusableContextWindows("openai", [
+      { id: "gpt-4", contextWindow: 8192 },
+      { id: "gpt-4o", contextWindow: 128_000 },
+    ]);
+
+    const gpt4 = flagged.find((m) => m.id === "gpt-4");
+    expect(gpt4?.tooSmall).toBe(true);
+    expect(gpt4?.contextWindow).toBe(8192);
+  });
+
+  it("leaves usable models unflagged so the picker offers them", () => {
+    const flagged = flagUnusableContextWindows("openai", [
+      { id: "gpt-4", contextWindow: 8192 },
+      { id: "gpt-4o", contextWindow: 128_000 },
+    ]);
+
+    expect(flagged.find((m) => m.id === "gpt-4o")?.tooSmall).toBeUndefined();
+  });
+
+  it("returns every model it was given, flagged or not", () => {
+    const models = [
+      { id: "a", contextWindow: 1000 },
+      { id: "b", contextWindow: 2000 },
+      { id: "c", contextWindow: 400_000 },
+    ];
+    expect(flagUnusableContextWindows("openai", models).map((m) => m.id)).toEqual(["a", "b", "c"]);
+  });
+
+  // Mirrors the filter's escape hatch: if everything would be flagged the
+  // provider would vanish from the picker with no explanation, so nothing is.
+  it("flags nothing when every model is below the floor", () => {
+    const flagged = flagUnusableContextWindows("openai", [
+      { id: "a", contextWindow: 1000 },
+      { id: "b", contextWindow: 2000 },
+    ]);
+    expect(flagged.every((m) => m.tooSmall === undefined)).toBe(true);
+  });
+
+  it("flags nothing for local providers, whose registry window isn't authoritative", () => {
+    const flagged = flagUnusableContextWindows("ollama", [{ id: "llama3", contextWindow: 8192 }]);
+    expect(flagged[0].tooSmall).toBeUndefined();
   });
 });
