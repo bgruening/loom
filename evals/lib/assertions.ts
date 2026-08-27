@@ -24,6 +24,22 @@ export function evaluate(run: ScenarioRun): ScenarioFailure[] {
   const failures: ScenarioFailure[] = [];
   const a = run.scenario.assertions;
 
+  // A tier-2 run where the model said nothing at all is an infrastructure
+  // result -- auth, proxy, a provider returning empty content -- and the
+  // content assertions that follow can only report it as "chat text did not
+  // include ...", which reads exactly like a model that answered badly. That
+  // ambiguity is what let a broken proxy credential masquerade as a capability
+  // ceiling across the whole matrix. Name it instead.
+  if (run.model && collectChatText(run.events).trim() === "") {
+    failures.push({
+      assertion: "run.noModelOutput",
+      detail:
+        `model produced no assistant text (${run.events.length} events, exit ${run.exitCode}, ` +
+        `${run.durationMs}ms) -- check credentials/proxy before reading this as a capability failure`,
+      dimension: "other",
+    });
+  }
+
   if (a.exitCode !== undefined && run.exitCode !== a.exitCode) {
     failures.push({
       assertion: "exitCode",
@@ -205,7 +221,13 @@ function collectChatText(events: AnyEvent[]): string {
 }
 
 function stripThinking(text: string): string {
-  return text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+  // The second pass covers a run killed at the timeout mid-thought: with no
+  // closing tag the non-greedy pair regex matches nothing and the entire
+  // chain-of-thought gets graded as though it were the answer.
+  return text
+    .replace(/<think>[\s\S]*?<\/think>/g, "")
+    .replace(/<think>[\s\S]*$/, "")
+    .trim();
 }
 
 function getChatText(events: AnyEvent[], stripThinkingTags: boolean): string {

@@ -251,3 +251,62 @@ describe("evals assertions: chatText regex matchers", () => {
     expect(f[0].detail).toContain("invalid regex");
   });
 });
+
+describe("evals assertions: infra vs capability", () => {
+  const model: ModelEntry = { id: "tacc:qwen3-32b", provider: "tacc", model: "Qwen3-32B" };
+
+  it("names a tier-2 run that produced no assistant text", () => {
+    const run = makeRun({
+      events: [{ type: "agent_start" }],
+      model,
+      assertions: { chatText: { mustInclude: ["ALPHATAU"] } },
+    });
+    const f = evaluate(run);
+    expect(f.map((x) => x.assertion)).toContain("run.noModelOutput");
+    expect(f[0].detail).toContain("check credentials/proxy");
+  });
+
+  it("stays quiet when the model did answer", () => {
+    const run = makeRun({
+      events: textEvents("ALPHATAU"),
+      model,
+      assertions: { chatText: { mustInclude: ["ALPHATAU"] } },
+    });
+    expect(evaluate(run)).toHaveLength(0);
+  });
+
+  it("stays quiet on tier-1 scenarios, which have no model", () => {
+    const run = makeRun({ events: [], assertions: { exitCode: 0 } });
+    expect(evaluate(run)).toHaveLength(0);
+  });
+});
+
+describe("evals assertions: stripThinkingTags", () => {
+  const model: ModelEntry = {
+    id: "tacc:qwen3-32b",
+    provider: "tacc",
+    model: "Qwen3-32B",
+    stripThinkingTags: true,
+  };
+
+  it("strips a closed think block", () => {
+    const run = makeRun({
+      events: textEvents("<think>maybe container: python:3.12</think>the answer"),
+      model,
+      assertions: { chatText: { mustNotInclude: ["python:3.12"], mustInclude: ["the answer"] } },
+    });
+    expect(evaluate(run)).toHaveLength(0);
+  });
+
+  it("strips an unterminated block from a run killed at the timeout", () => {
+    // Llama-3.3-70B does exactly this: SIGTERM lands mid-thought, so there is
+    // no closing tag and the raw reasoning used to be graded as the answer.
+    const run = makeRun({
+      events: textEvents("<think>let me try container: quay.io/biocontainers/pandas"),
+      model,
+      assertions: { chatText: { mustInclude: ["quay.io/biocontainers"] } },
+    });
+    const f = evaluate(run);
+    expect(f.map((x) => x.assertion)).toContain("chatText.mustInclude");
+  });
+});
