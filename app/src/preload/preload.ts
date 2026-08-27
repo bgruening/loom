@@ -91,7 +91,9 @@ export interface OrbitAPI {
     baseUrl?: string,
   ): Promise<{ valid: boolean; error?: string; models?: string[] }>;
   /** Provider id -> auth capabilities, sourced from pi's registry. */
-  oauthProviders(): Promise<Record<string, { signInLabel: string; acceptsApiKey: boolean }>>;
+  oauthProviders(): Promise<
+    Record<string, import("../../../shared/provider-auth-caps.js").ProviderAuthCaps>
+  >;
   oauthStatus(
     provider: string,
   ): Promise<{ signedIn: boolean; expiresInSeconds?: number; accountId?: string }>;

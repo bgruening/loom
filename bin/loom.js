@@ -11,6 +11,7 @@ import { getLoomVersion, detectInstall } from "./update-check.js";
 import { isUvxAvailable, uvxMissingNotice } from "./uvx-check.js";
 import { resolveHideThinking, isInteractiveTerminal } from "./thinking-pref.js";
 import { hasStoredCredential, isProviderUsable, pickSignedInFallback } from "./provider-auth.js";
+import { SEED_OAUTH_ONLY_PROVIDERS } from "../shared/provider-auth-caps.js";
 import { resolvePiExtensionDir } from "./pi-extension-path.js";
 import { pickChannel } from "../shared/version-compare.js";
 import {
@@ -175,7 +176,9 @@ const PROVIDER_ENV_MAP = {
 // API-key path at all. Deliberately NOT "every provider that offers sign-in":
 // anthropic, xai, openrouter and friends carry both, and treating them as
 // sign-in-only is exactly the conflation that caused #429 on the Orbit side.
-const OAUTH_ONLY_PROVIDERS = new Set(["openai-codex"]);
+// The CLI has no pi registry to read, so it answers from the same seed Orbit
+// falls back to before its own registry read lands.
+const OAUTH_ONLY_PROVIDERS = new Set(SEED_OAUTH_ONLY_PROVIDERS);
 
 function readAuthJson() {
   const authPath = join(agentDir, "auth.json");

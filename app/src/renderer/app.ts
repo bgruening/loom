@@ -28,6 +28,8 @@ import {
 import type { FeedbackPayload, FeedbackSysinfo } from "../../../shared/feedback-contract.js";
 import changelogRaw from "../../../CHANGELOG.md?raw";
 import { parseChangelog, decideWhatsNew, releaseUrlFor } from "../../../shared/whats-new.js";
+import { isOAuthOnly, SEED_PROVIDER_AUTH_CAPS } from "../../../shared/provider-auth-caps.js";
+import type { ProviderAuthCaps } from "../../../shared/provider-auth-caps.js";
 import { openReleaseWithFallback, clearReleaseFallback } from "./update-banner.js";
 
 declare global {
@@ -772,18 +774,13 @@ const welcomeSave = document.getElementById("welcome-save")!;
 const welcomeError = document.getElementById("welcome-error")!;
 
 /**
- * Provider IDs that authenticate via OAuth rather than an API key, keyed to the
- * sign-in label pi gives them ("OpenAI (ChatGPT Plus/Pro)"). Populated from the
- * main process at startup; the seed keeps the first paint correct for the
- * provider that ships enabled if that call hasn't landed yet.
+ * Provider IDs that offer a sign-in flow, keyed to their auth capabilities.
+ * Populated from the main process at startup; the shared seed keeps the first
+ * paint correct for the provider that ships enabled if that call hasn't landed
+ * yet. The sign-in-only predicate is imported rather than reimplemented here --
+ * #429 was the renderer and the main process disagreeing about it.
  */
-interface ProviderAuthCaps {
-  signInLabel: string;
-  acceptsApiKey: boolean;
-}
-let OAUTH_PROVIDERS: Record<string, ProviderAuthCaps> = {
-  "openai-codex": { signInLabel: "", acceptsApiKey: false },
-};
+let OAUTH_PROVIDERS: Record<string, ProviderAuthCaps> = { ...SEED_PROVIDER_AUTH_CAPS };
 /** Does this provider offer a sign-in flow? True for dual-auth providers too. */
 function providerOffersSignIn(provider: string): boolean {
   return provider in OAUTH_PROVIDERS;
@@ -794,8 +791,7 @@ function providerOffersSignIn(provider: string): boolean {
  * key field -- conflating the two is what hid Anthropic's key in #429.
  */
 function isOAuthOnlyProvider(provider: string): boolean {
-  const caps = OAUTH_PROVIDERS[provider];
-  return Boolean(caps && !caps.acceptsApiKey);
+  return isOAuthOnly(OAUTH_PROVIDERS[provider]);
 }
 /** Button text for a provider's sign-in, e.g. "Sign in with GitHub Copilot". */
 function oauthSignInLabel(provider: string, signedIn: boolean): string {
