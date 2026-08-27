@@ -1,35 +1,43 @@
-# Dependabot covers the root-only runtime dependencies that have broken us
-# before. It deliberately does NOT touch the pi packages: those must move in
-# lockstep across the root and app/ trees, and Dependabot cannot express that.
+# Dependabot owns everything EXCEPT the pi packages.
 #
-# Grouping is per-directory unless you set `group-by: dependency-name`, which
-# is per-dependency instead -- neither gives one PR spanning both trees AND all
-# three pi packages. A partial pi bump fails check-version-lockstep by design
-# (the root tree would resolve one pi-ai while app/ resolves another), so
-# letting Dependabot near pi would just mint red PRs on every release.
-# .github/workflows/pi-update.yml handles pi as a single coordinated bump.
+# pi is ignored here and handled by .github/workflows/pi-update.yml instead.
+# The root and app/ trees install separately and must land on one pi version:
+# when they drift, both copies resolve independently and pi's module-level
+# state splits in two, which is what check-version-lockstep.mjs guards. Grouping
+# is per-directory by default, and `group-by: dependency-name` switches it to
+# one pull request per dependency spanning every directory -- never both at
+# once, so there is no way to say "all three pi package names, across both
+# trees, at one coordinated version". Under `group-by` the pi-ai PR would land
+# on its own and split pi-ai from pi-coding-agent; without it, the root PR would
+# land without app/. Either way a partial bump fails the lockstep gate by
+# design, so pointing Dependabot at pi would mint a red PR on every pi release.
+#
+# Note this is an `ignore` and not an `allow` list, on purpose. Both keys filter
+# security updates as well as version updates, so an allowlist would quietly
+# drop vulnerability remediation for every dependency it left out. Ignoring only
+# the pi family keeps security updates working for the whole rest of the tree.
+# The cost is that pi itself gets no security PR -- the weekly workflow picks up
+# pi releases instead, so a fix that ships as a release is covered, but one that
+# needs a pin bump on an unchanged version is not.
 version: 2
 updates:
   - package-ecosystem: npm
-    directory: "/"
+    directories:
+      - "/"
+      - "/app"
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 4
     labels:
       - dependencies
-    # Allowlist, not a denylist: anything not named here is ignored, so a new
-    # dependency cannot quietly opt itself into automated bumps.
-    allow:
-      - dependency-name: pi-mcp-adapter
-      - dependency-name: "@anthropic-ai/sandbox-runtime"
-      - dependency-name: "@modelcontextprotocol/*"
+    ignore:
+      - dependency-name: "@earendil-works/*"
+    # One grouped PR per tree per week rather than a PR per package.
     groups:
-      runtime-deps:
+      npm-deps:
         patterns:
-          - pi-mcp-adapter
-          - "@anthropic-ai/sandbox-runtime"
-          - "@modelcontextprotocol/*"
+          - "*"
     commit-message:
       prefix: "deps"
 
