@@ -26,6 +26,7 @@ import {
   type InvocationPollUpdate,
 } from "./notebook-writer";
 import { isTerminalJobState, upsertJobBlock, type JobYaml } from "./galaxy-job-block";
+import { listNotebookAnchors, resolveNotebookAnchor, UnknownAnchorError } from "./notebook-anchors";
 import { getGalaxyConfig, galaxyGet, type GalaxyInvocationResponse } from "./galaxy-api";
 import { listEnabledSkillRepos, findSkillRepo } from "./skills";
 import { fetchSkillFile, githubRawBase } from "./skills-discovery";
@@ -69,6 +70,21 @@ function stripGtnHtml(html: string): string {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   return text;
+}
+
+/**
+ * Resolve a caller-supplied anchor against the notebook, or refuse.
+ *
+ * The record tools wrote whatever they were handed, so an anchor the notebook
+ * has never heard of produced a block bound to nothing: the run still shows up
+ * and still polls, but every consumer that looks a step up by anchor -- the
+ * evidence gate first among them -- reads "no opinion" instead of "broken".
+ * Rejecting costs the model one retry and hands it the list to retry with.
+ */
+function requireAnchor(content: string, input: string): string {
+  const resolved = resolveNotebookAnchor(content, input);
+  if (resolved === null) throw new UnknownAnchorError(input, listNotebookAnchors(content));
+  return resolved;
 }
 
 export function registerPlanTools(pi: ExtensionAPI): void {
@@ -458,7 +474,10 @@ Writes a fenced \`loom-invocation\` YAML block at the end of the notebook. Polli
         description: "Galaxy invocation ID returned from galaxy_invoke_workflow",
       }),
       notebookAnchor: Type.String({
-        description: "Stable anchor where this invocation lives, e.g. 'plan-1-step-3'",
+        description:
+          "Anchor of the plan step this run belongs to, e.g. 'plan-a-step-3'. It must " +
+          "already exist in notebook.md, either as a {#anchor} on the step or as a " +
+          "heading; an anchor nothing resolves to is rejected.",
       }),
       label: Type.String({
         description: "Human-readable description for status display, e.g. 'BWA alignment'",
@@ -479,19 +498,25 @@ Writes a fenced \`loom-invocation\` YAML block at the end of the notebook. Polli
       const galaxyServerUrl = cfg?.url || "";
 
       try {
-        const inv: InvocationYaml = {
-          invocationId: params.invocationId,
-          galaxyServerUrl,
-          notebookAnchor: params.notebookAnchor,
-          label: params.label,
-          submittedAt: new Date().toISOString(),
-          status: "in_progress",
-        };
+        const submittedAt = new Date().toISOString();
+        let inv: InvocationYaml | undefined;
         await withNotebookLock(notebookPath, async () => {
           const content = await readNotebook(notebookPath);
-          const updated = upsertInvocationBlock(content, inv);
-          await writeNotebook(notebookPath, updated);
+          // Resolve the anchor against the bytes we're about to rewrite, not a
+          // copy read earlier: the step could have been renamed in between, and
+          // a block bound to a step that isn't there any more is exactly the
+          // silent-nothing this check exists to stop.
+          inv = {
+            invocationId: params.invocationId,
+            galaxyServerUrl,
+            notebookAnchor: requireAnchor(content, params.notebookAnchor),
+            label: params.label,
+            submittedAt,
+            status: "in_progress",
+          };
+          await writeNotebook(notebookPath, upsertInvocationBlock(content, inv));
         });
+        if (!inv) throw new Error("Invocation was not recorded.");
 
         return {
           content: [
@@ -546,7 +571,10 @@ Writes a fenced \`loom-job\` YAML block; the poller updates it in place.`,
     parameters: Type.Object({
       jobId: Type.String({ description: "Galaxy job ID returned from galaxy_run_tool" }),
       notebookAnchor: Type.String({
-        description: "Stable anchor where this run lives, e.g. 'plan-1-step-3'",
+        description:
+          "Anchor of the plan step this run belongs to, e.g. 'plan-a-step-3'. It must " +
+          "already exist in notebook.md, either as a {#anchor} on the step or as a " +
+          "heading; an anchor nothing resolves to is rejected.",
       }),
       label: Type.String({
         description: "Human-readable description for status display, e.g. 'BWA alignment'",
@@ -568,19 +596,22 @@ Writes a fenced \`loom-job\` YAML block; the poller updates it in place.`,
 
       const cfg = getGalaxyConfig();
       try {
-        const job: JobYaml = {
-          jobId: params.jobId,
-          galaxyServerUrl: cfg?.url || "",
-          notebookAnchor: params.notebookAnchor,
-          label: params.label,
-          toolId: params.toolId,
-          submittedAt: new Date().toISOString(),
-          status: "in_progress",
-        };
+        const submittedAt = new Date().toISOString();
+        let job: JobYaml | undefined;
         await withNotebookLock(notebookPath, async () => {
           const content = await readNotebook(notebookPath);
+          job = {
+            jobId: params.jobId,
+            galaxyServerUrl: cfg?.url || "",
+            notebookAnchor: requireAnchor(content, params.notebookAnchor),
+            label: params.label,
+            toolId: params.toolId,
+            submittedAt,
+            status: "in_progress",
+          };
           await writeNotebook(notebookPath, upsertJobBlock(content, job));
         });
+        if (!job) throw new Error("Job was not recorded.");
 
         return {
           content: [
