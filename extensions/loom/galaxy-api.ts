@@ -67,6 +67,25 @@ export function getGalaxyConfig(): GalaxyConfig | null {
 // Authenticated fetch
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * An HTTP error from Galaxy, carrying the status code.
+ *
+ * The message is byte-identical to the plain Error this replaced, so callers
+ * that match on the text keep working; what's new is that a caller can tell
+ * "Galaxy says this id is not a thing" from "Galaxy didn't answer". Those two
+ * deserve opposite handling -- the first is a mistake to report, the second is
+ * a reason to try again later.
+ */
+export class GalaxyApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, body: string, statusText: string) {
+    super(`Galaxy API ${status}: ${body || statusText}`);
+    this.name = "GalaxyApiError";
+    this.status = status;
+  }
+}
+
 export async function galaxyGet<T = unknown>(path: string, signal?: AbortSignal): Promise<T> {
   const config = getGalaxyConfig();
   if (!config) throw new Error("Galaxy credentials not configured (GALAXY_URL, GALAXY_API_KEY)");
@@ -79,7 +98,7 @@ export async function galaxyGet<T = unknown>(path: string, signal?: AbortSignal)
 
   if (!resp.ok) {
     const body = await resp.text().catch(() => "");
-    throw new Error(`Galaxy API ${resp.status}: ${body || resp.statusText}`);
+    throw new GalaxyApiError(resp.status, body, resp.statusText);
   }
 
   return resp.json() as Promise<T>;
@@ -107,7 +126,7 @@ async function galaxyMutate<T>(
 
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");
-    throw new Error(`Galaxy API ${resp.status}: ${text || resp.statusText}`);
+    throw new GalaxyApiError(resp.status, text, resp.statusText);
   }
 
   return resp.json() as Promise<T>;
@@ -139,6 +158,60 @@ export async function galaxyGetJobDetails(
   signal?: AbortSignal,
 ): Promise<GalaxyJobDetailsResponse> {
   return galaxyGet<GalaxyJobDetailsResponse>(`/jobs/${encodeURIComponent(jobId)}`, signal);
+}
+
+/**
+ * What one round trip decided about a run id: Galaxy has it, Galaxy says it
+ * doesn't, or we never got an answer. The third is not the second.
+ */
+export type GalaxyRunVerification =
+  | { outcome: "found" }
+  | { outcome: "absent"; detail: string }
+  | { outcome: "unreachable"; detail: string };
+
+/**
+ * Statuses that mean "no such run" rather than "ask again later".
+ *
+ * 404 is the obvious one. 400 is there because Galaxy decodes ids before it
+ * looks anything up, and `decode_id` raises MalformedId -- a 400 -- for a value
+ * that isn't a valid encoded id at all. That is the shape a hallucinated or
+ * truncated id actually arrives in, so treating 400 as "ask again later" would
+ * let exactly the ids this check exists to catch through as unverified.
+ */
+const ABSENT_STATUSES: ReadonlySet<number> = new Set([400, 404]);
+
+/**
+ * Ask Galaxy whether a run id exists, without caring what it says beyond that.
+ *
+ * Deliberately fails open on anything that isn't a definite no: a 500, a dead
+ * network, or missing credentials must not cost the user a record of a run they
+ * really did submit. The caller marks those `server_verified: false` and lets
+ * the poller settle it.
+ */
+export async function verifyGalaxyRun(
+  kind: "invocation" | "job",
+  id: string,
+  signal?: AbortSignal,
+): Promise<GalaxyRunVerification> {
+  if (!getGalaxyConfig()) {
+    return { outcome: "unreachable", detail: "Galaxy credentials are not configured" };
+  }
+  const path =
+    kind === "invocation"
+      ? `/invocations/${encodeURIComponent(id)}`
+      : `/jobs/${encodeURIComponent(id)}`;
+  try {
+    await galaxyGet(path, signal);
+    return { outcome: "found" };
+  } catch (error) {
+    if (error instanceof GalaxyApiError && ABSENT_STATUSES.has(error.status)) {
+      return { outcome: "absent", detail: error.message };
+    }
+    return {
+      outcome: "unreachable",
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 export interface GalaxyHistorySummary {

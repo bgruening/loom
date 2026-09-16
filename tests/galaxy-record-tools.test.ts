@@ -47,6 +47,24 @@ function run(
     .then((r) => JSON.parse(r.content[0].text));
 }
 
+/** A fake Galaxy answer; `verifyGalaxyRun` only cares whether it is ok. */
+function response(status: number, body = "{}"): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: `status ${status}`,
+    text: async () => body,
+    json: async () => JSON.parse(body),
+  } as unknown as Response;
+}
+
+/** Stub every Galaxy round trip with one status. Returns the fetch mock. */
+function stubGalaxy(status: number, body = "{}") {
+  const fetchMock = vi.fn(async () => response(status, body));
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
 const NOTEBOOK = `# Project notebook
 
 ## Plan A: chrM Variant Calling [galaxy]
@@ -72,11 +90,14 @@ describe("record tools: anchor validation", () => {
     // (parseInvocationBlock requires it), so every Galaxy test sets these.
     process.env.GALAXY_URL = "https://usegalaxy.org";
     process.env.GALAXY_API_KEY = "test-key";
+    // Galaxy confirms every id unless a test says otherwise.
+    stubGalaxy(200);
   });
 
   afterEach(() => {
     resetState();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     if (origUrl !== undefined) process.env.GALAXY_URL = origUrl;
     else delete process.env.GALAXY_URL;
     if (origKey !== undefined) process.env.GALAXY_API_KEY = origKey;
@@ -187,5 +208,152 @@ describe("record tools: anchor validation", () => {
 
     expect(res.success).toBe(false);
     expect(findInvocationBlocks(readFileSync(nbPath, "utf-8"))).toHaveLength(1);
+  });
+});
+
+describe("record tools: server verification", () => {
+  let dir: string;
+  let nbPath: string;
+  const origUrl = process.env.GALAXY_URL;
+  const origKey = process.env.GALAXY_API_KEY;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "loom-record-verify-"));
+    nbPath = join(dir, "notebook.md");
+    writeFileSync(nbPath, NOTEBOOK, "utf-8");
+    setNotebookPath(nbPath);
+    process.env.GALAXY_URL = "https://usegalaxy.org";
+    process.env.GALAXY_API_KEY = "test-key";
+  });
+
+  afterEach(() => {
+    resetState();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    if (origUrl !== undefined) process.env.GALAXY_URL = origUrl;
+    else delete process.env.GALAXY_URL;
+    if (origKey !== undefined) process.env.GALAXY_API_KEY = origKey;
+    else delete process.env.GALAXY_API_KEY;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("refuses an invocation id Galaxy has never heard of, and writes nothing", async () => {
+    stubGalaxy(404, "No invocation found");
+    const { invocation } = recordTools();
+    const res = await run(invocation, {
+      invocationId: "inv-does-not-exist",
+      notebookAnchor: "plan-a-step-1",
+      label: "BWA alignment",
+    });
+
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("inv-does-not-exist");
+    expect(res.error).toContain("404");
+    expect(readFileSync(nbPath, "utf-8")).toBe(NOTEBOOK);
+  });
+
+  it("refuses a malformed job id (Galaxy answers 400), and writes nothing", async () => {
+    stubGalaxy(400, "Malformed id");
+    const { job } = recordTools();
+    const res = await run(job, {
+      jobId: "dataset-id-by-mistake",
+      notebookAnchor: "plan-a-step-1",
+      label: "FastQC",
+    });
+
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("dataset-id-by-mistake");
+    expect(readFileSync(nbPath, "utf-8")).toBe(NOTEBOOK);
+  });
+
+  it("marks a confirmed invocation server_verified: true", async () => {
+    stubGalaxy(200);
+    const { invocation } = recordTools();
+    const res = await run(invocation, {
+      invocationId: "inv-1",
+      notebookAnchor: "plan-a-step-1",
+      label: "BWA alignment",
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.serverVerified).toBe(true);
+    const notebook = readFileSync(nbPath, "utf-8");
+    expect(notebook).toContain("server_verified: true");
+    expect(findInvocationBlocks(notebook)[0].serverVerified).toBe(true);
+  });
+
+  it("records an invocation Galaxy could not answer for, marked unverified", async () => {
+    // A 502 says nothing about the id. Losing a real submission to a transient
+    // network is worse than a line the poller will confirm on its next tick.
+    stubGalaxy(502, "bad gateway");
+    const { invocation } = recordTools();
+    const res = await run(invocation, {
+      invocationId: "inv-1",
+      notebookAnchor: "plan-a-step-1",
+      label: "BWA alignment",
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.serverVerified).toBe(false);
+    expect(res.message).toContain("could not confirm");
+    expect(res.message).toContain("502");
+    const blocks = findInvocationBlocks(readFileSync(nbPath, "utf-8"));
+    expect(blocks[0].serverVerified).toBe(false);
+  });
+
+  it("records a job Galaxy could not answer for, marked unverified", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("fetch failed");
+      }),
+    );
+    const { job } = recordTools();
+    const res = await run(job, {
+      jobId: "job-1",
+      notebookAnchor: "plan-a-step-1",
+      label: "FastQC",
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.serverVerified).toBe(false);
+    const blocks = findJobBlocks(readFileSync(nbPath, "utf-8"));
+    expect(blocks[0].serverVerified).toBe(false);
+    expect(blocks[0].status).toBe("in_progress");
+  });
+
+  it("does not record an unverified block for a call the user cancelled", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        controller.abort();
+        throw new Error("The operation was aborted");
+      }),
+    );
+    const { invocation } = recordTools();
+    const res = await run(
+      invocation,
+      { invocationId: "inv-1", notebookAnchor: "plan-a-step-1", label: "BWA" },
+      controller.signal,
+    );
+
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("Cancelled");
+    expect(readFileSync(nbPath, "utf-8")).toBe(NOTEBOOK);
+  });
+
+  it("still rejects a bad anchor when Galaxy confirms the id", async () => {
+    stubGalaxy(200);
+    const { invocation } = recordTools();
+    const res = await run(invocation, {
+      invocationId: "inv-1",
+      notebookAnchor: "not-a-step",
+      label: "BWA",
+    });
+
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("not-a-step");
+    expect(readFileSync(nbPath, "utf-8")).toBe(NOTEBOOK);
   });
 });

@@ -203,6 +203,16 @@ export interface InvocationYaml {
   submittedAt: string;
   status: "in_progress" | "completed" | "failed";
   summary?: string;
+  /**
+   * Whether Galaxy confirmed this invocation id exists at record time.
+   *
+   * `false` means the record tool asked and didn't get an answer (Galaxy
+   * unreachable, credentials gone) — the run is written down anyway, because
+   * losing a real submission to a transient network is worse than an
+   * unconfirmed line, and the first successful poll upgrades it. Absent means
+   * the block predates the field and nothing has claimed either way.
+   */
+  serverVerified?: boolean;
   // Progress counters — populated by galaxy_invocation_check_*. Persisted
   // back to the YAML so the Orbit renderer can draw a live progress bar
   // without each side polling Galaxy independently. Optional so older
@@ -233,6 +243,7 @@ export function renderInvocationYaml(inv: InvocationYaml): string {
     `status: ${inv.status}`,
     `summary: ${escapeYaml(inv.summary ?? "")}`,
   ];
+  if (inv.serverVerified !== undefined) lines.push(`server_verified: ${inv.serverVerified}`);
   if (inv.totalSteps !== undefined) lines.push(`total_steps: ${inv.totalSteps}`);
   if (inv.completedSteps !== undefined) lines.push(`completed_steps: ${inv.completedSteps}`);
   if (inv.totalJobs !== undefined) lines.push(`total_jobs: ${inv.totalJobs}`);
@@ -310,6 +321,12 @@ export interface InvocationPollUpdate {
   completedJobs: number;
   failedJobs: number;
   lastPolledAt: string;
+  /**
+   * True when this update came from a Galaxy round trip that answered — which
+   * is proof the id exists, and the only thing that clears a block recorded
+   * `server_verified: false`.
+   */
+  serverVerified?: boolean;
   /** Present only when this poll decided the invocation reached a terminal state. */
   transition?: { status: InvocationYaml["status"]; summary: string };
 }
@@ -366,6 +383,13 @@ export function applyInvocationUpdates(
       completedJobs: update.completedJobs,
       failedJobs: update.failedJobs,
       lastPolledAt: update.lastPolledAt,
+      // A poll Galaxy answered is proof the id exists, so it clears a block the
+      // record tool could only write unverified. A block with no flag at all
+      // predates the field; leave it alone rather than churn every old block in
+      // the notebook on the next tick.
+      ...(update.serverVerified && current.serverVerified === false
+        ? { serverVerified: true }
+        : {}),
       ...(update.transition ?? {}),
     };
     next = upsertInvocationBlock(next, merged);
@@ -432,6 +456,17 @@ function findInvocationBlockRanges(content: string): InvocationBlockRange[] {
   return result;
 }
 
+/**
+ * A YAML boolean, or undefined for anything else — including a hand-edited
+ * value we can't read. Absent and unreadable both mean "nobody has claimed
+ * this", which is the honest default for a flag about a server round trip.
+ */
+function parseBooleanField(raw: string | undefined): boolean | undefined {
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  return undefined;
+}
+
 function parseInvocationBlock(blockLines: string[]): InvocationYaml | null {
   const fields: Record<string, string> = {};
   for (const line of blockLines) {
@@ -463,6 +498,7 @@ function parseInvocationBlock(blockLines: string[]): InvocationYaml | null {
     submittedAt: fields.submitted_at,
     status,
     summary: fields.summary || undefined,
+    serverVerified: parseBooleanField(fields.server_verified),
     totalSteps: numField("total_steps"),
     completedSteps: numField("completed_steps"),
     totalJobs: numField("total_jobs"),

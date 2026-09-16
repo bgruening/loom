@@ -18,6 +18,8 @@ interface Invocation {
   submittedAt: string;
   status: "in_progress" | "completed" | "failed";
   summary?: string;
+  /** False when the brain recorded this run without Galaxy confirming the id. */
+  serverVerified?: boolean;
   totalSteps?: number;
   completedSteps?: number;
   totalJobs?: number;
@@ -81,6 +83,12 @@ export function parseInvocationBlocks(content: string): Invocation[] {
           submittedAt: fields.submitted_at,
           status,
           summary: fields.summary || undefined,
+          serverVerified:
+            fields.server_verified === "true"
+              ? true
+              : fields.server_verified === "false"
+                ? false
+                : undefined,
           totalSteps: num("total_steps"),
           completedSteps: num("completed_steps"),
           totalJobs: num("total_jobs"),
@@ -124,6 +132,9 @@ function renderRow(inv: Invocation): string {
     host = inv.galaxyServerUrl;
   }
   const submitted = inv.submittedAt.replace("T", " ").replace(/\.\d+Z$/, "Z");
+  // A block Galaxy never confirmed is still a block: say so rather than drawing
+  // it identically to a run we know exists.
+  const unconfirmed = inv.serverVerified === false ? " · unconfirmed" : "";
 
   return `
     <div class="galaxy-invocation-row ${inv.status}">
@@ -135,7 +146,7 @@ function renderRow(inv: Invocation): string {
         <div class="galaxy-invocation-bar-fill" style="width: ${pct}%"></div>
       </div>
       <div class="galaxy-invocation-meta">
-        ${escapeHtml(inv.status)} · ${escapeHtml(host)} · submitted ${escapeHtml(submitted)}
+        ${escapeHtml(inv.status)} · ${escapeHtml(host)} · submitted ${escapeHtml(submitted)}${escapeHtml(unconfirmed)}
       </div>
     </div>
   `;

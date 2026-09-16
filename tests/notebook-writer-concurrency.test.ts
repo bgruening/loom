@@ -184,6 +184,27 @@ describe("applyInvocationUpdates", () => {
     };
   }
 
+  it("clears server_verified: false once a poll gets an answer out of Galaxy", () => {
+    const content = `# Notes\n\n${renderInvocationYaml({ ...base, serverVerified: false })}`;
+    const { content: next } = applyInvocationUpdates(content, [poll({ serverVerified: true })]);
+    expect(findInvocationBlocks(next)[0].serverVerified).toBe(true);
+  });
+
+  it("leaves a block that never carried the flag unstamped", () => {
+    // Every pre-existing block in every notebook is in this state; stamping
+    // them on the next tick would churn the user's file for nothing.
+    const content = `# Notes\n\n${renderInvocationYaml(base)}`;
+    const { content: next } = applyInvocationUpdates(content, [poll({ serverVerified: true })]);
+    expect(next).not.toContain("server_verified");
+    expect(findInvocationBlocks(next)[0].serverVerified).toBeUndefined();
+  });
+
+  it("does not flip a verified block back to unverified", () => {
+    const content = `# Notes\n\n${renderInvocationYaml({ ...base, serverVerified: true })}`;
+    const { content: next } = applyInvocationUpdates(content, [poll()]);
+    expect(findInvocationBlocks(next)[0].serverVerified).toBe(true);
+  });
+
   it("applies an update in place against the supplied content", () => {
     const content = `# Notes\n\n${renderInvocationYaml(base)}`;
     const {
