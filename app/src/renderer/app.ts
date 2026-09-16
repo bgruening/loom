@@ -783,6 +783,8 @@ const welcomeModel = document.getElementById("welcome-model") as HTMLSelectEleme
 const welcomeApiKey = document.getElementById("welcome-api-key") as HTMLInputElement;
 const welcomeApiKeyStatus = document.getElementById("welcome-api-key-status")!;
 const welcomeApiKeyRow = document.getElementById("welcome-api-key-row")!;
+const welcomeApiShapeRow = document.getElementById("welcome-api-shape-row")!;
+const welcomeApiShape = document.getElementById("welcome-api-shape") as HTMLSelectElement;
 const welcomeBaseUrlRow = document.getElementById("welcome-base-url-row")!;
 const welcomeBaseUrl = document.getElementById("welcome-base-url") as HTMLInputElement;
 const welcomeJetstreamPreset = document.getElementById(
@@ -900,6 +902,26 @@ function renderModelOptions(el: HTMLSelectElement, options: ModelOption[]): void
 // Wire a provider-dropdown / API-key-input / status-label triple to do
 // debounced live validation (see main/ipc-handlers.ts validateApiKey).
 // Same helper used from both the Welcome screen and Preferences.
+/**
+ * What a base URL should look like for each wire format. The two genuinely
+ * differ: the OpenAI client appends `/chat/completions`, so the version segment
+ * belongs in the URL, while the Anthropic client appends `/v1/messages` itself
+ * and a `/v1` here produces `/v1/v1/messages`. Someone pasting a gateway URL
+ * has no way to know that, so the field says it.
+ */
+const BASE_URL_PLACEHOLDER: Record<string, string> = {
+  "openai-completions": "https://host/v1",
+  "anthropic-messages": "https://host  (no /v1 -- the client adds it)",
+};
+
+const DEFAULT_API_SHAPE = "openai-completions";
+
+/** Re-point the base-URL placeholder at whatever shape is now selected. */
+function applyApiShapeHint(shapeEl: HTMLSelectElement, baseUrlEl: HTMLInputElement): void {
+  baseUrlEl.placeholder =
+    BASE_URL_PLACEHOLDER[shapeEl.value] ?? BASE_URL_PLACEHOLDER[DEFAULT_API_SHAPE]!;
+}
+
 function wireApiKeyValidation(
   providerEl: HTMLSelectElement,
   keyEl: HTMLInputElement,
@@ -907,6 +929,7 @@ function wireApiKeyValidation(
   baseUrlEl?: HTMLInputElement,
   modelEl?: HTMLSelectElement,
   onModels?: (provider: string, models: string[]) => void,
+  apiShapeEl?: HTMLSelectElement,
 ): void {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let seq = 0;
@@ -918,6 +941,10 @@ function wireApiKeyValidation(
     const provider = providerEl.value;
     const key = keyEl.value.trim();
     const baseUrl = baseUrlEl?.value.trim() || undefined;
+    // Only meaningful with a base URL, and the probe differs by shape: an
+    // Anthropic gateway answers /v1/models behind x-api-key, not /models
+    // behind a bearer, so sending the wrong one reports a good key as bad.
+    const api = baseUrl ? apiShapeEl?.value || undefined : undefined;
     if (!key) {
       setStatus("", "");
       return;
@@ -925,7 +952,7 @@ function wireApiKeyValidation(
     const mySeq = ++seq;
     setStatus("checking", "Checking…");
     try {
-      const res = await window.orbit.validateApiKey(provider, key, baseUrl);
+      const res = await window.orbit.validateApiKey(provider, key, baseUrl, api);
       // The provider dropdown's own change fires this on a 600ms debounce, so
       // a reply that outlived a provider switch would otherwise paint one
       // provider's models into another's picker.
@@ -987,6 +1014,7 @@ function readWelcomeFields(): ProviderFields {
     typedKey: welcomeApiKey.value,
     model: welcomeModel.value,
     baseUrl: welcomeBaseUrl.value,
+    api: welcomeApiShape.value,
   };
 }
 
@@ -994,6 +1022,8 @@ function showWelcomeFields(provider: string, state: ProviderState): void {
   populateWelcomeModels(provider, state.model || undefined);
   welcomeApiKey.value = state.typedKey;
   welcomeBaseUrl.value = state.baseUrl;
+  welcomeApiShape.value = state.api || DEFAULT_API_SHAPE;
+  applyApiShapeHint(welcomeApiShape, welcomeBaseUrl);
   // The validation verdict belongs to the key that just left the field.
   welcomeApiKeyStatus.className = "api-key-status";
   welcomeApiKeyStatus.textContent = "";
@@ -1009,6 +1039,8 @@ function forgetWelcomeKeys(): void {
   welcomeProviders.clear();
   welcomeApiKey.value = "";
   welcomeBaseUrl.value = "";
+  welcomeApiShape.value = DEFAULT_API_SHAPE;
+  applyApiShapeHint(welcomeApiShape, welcomeBaseUrl);
 }
 
 welcomeProvider.addEventListener("change", () => {
@@ -1021,10 +1053,20 @@ wireApiKeyValidation(
   welcomeApiKeyStatus,
   welcomeBaseUrl,
   welcomeModel,
+  undefined,
+  welcomeApiShape,
 );
+welcomeApiShape.addEventListener("change", () => {
+  applyApiShapeHint(welcomeApiShape, welcomeBaseUrl);
+  // Re-run validation: the same key against the same URL is a different
+  // request now.
+  welcomeApiKey.dispatchEvent(new Event("input"));
+});
 
 welcomeJetstreamPreset.addEventListener("click", () => {
   welcomeBaseUrl.value = JETSTREAM_BASE_URL;
+  welcomeApiShape.value = DEFAULT_API_SHAPE;
+  applyApiShapeHint(welcomeApiShape, welcomeBaseUrl);
   welcomeModel.innerHTML = "";
   for (const id of JETSTREAM_MODELS) {
     const opt = document.createElement("option");
@@ -1040,6 +1082,7 @@ async function updateWelcomeAuthUi(): Promise<void> {
   const signIn = providerOffersSignIn(welcomeProvider.value);
   const oauthOnly = isOAuthOnlyProvider(welcomeProvider.value);
   const custom = welcomeProvider.value === "openai-compatible";
+  welcomeApiShapeRow.classList.toggle("hidden", !custom);
   welcomeBaseUrlRow.classList.toggle("hidden", !custom);
   welcomeApiKeyRow.classList.toggle("hidden", oauthOnly);
   welcomeApiKeyHintRow.classList.toggle("hidden", oauthOnly);
@@ -3213,6 +3256,8 @@ const prefsOauthHintText = document.getElementById("prefs-oauth-hint-text")!;
 const prefsOauthStatus = document.getElementById("prefs-oauth-status")!;
 const prefsOauthSignIn = document.getElementById("prefs-oauth-signin") as HTMLButtonElement;
 const prefsOauthSignOut = document.getElementById("prefs-oauth-signout") as HTMLButtonElement;
+const prefsApiShapeRow = document.getElementById("prefs-api-shape-row")!;
+const prefsApiShape = document.getElementById("prefs-api-shape") as HTMLSelectElement;
 const prefsBaseUrlRow = document.getElementById("prefs-base-url-row")!;
 const prefsBaseUrl = document.getElementById("prefs-base-url") as HTMLInputElement;
 const prefsJetstreamPreset = document.getElementById("prefs-jetstream-preset") as HTMLButtonElement;
@@ -3322,9 +3367,20 @@ wireApiKeyValidation(
     const target = prefsProviderStates[provider];
     if (target) target.discoveredModels = models;
   },
+  prefsApiShape,
 );
+prefsApiShape.addEventListener("change", () => {
+  applyApiShapeHint(prefsApiShape, prefsBaseUrl);
+  // A shape change repoints the probe, so anything discovered under the old
+  // one is stale -- drop it rather than leave a list that no longer matches.
+  const state = prefsProviderStates[prefsActiveProvider];
+  if (state) state.discoveredModels = undefined;
+  prefsApiKey.dispatchEvent(new Event("input"));
+});
 prefsJetstreamPreset.addEventListener("click", () => {
   prefsBaseUrl.value = JETSTREAM_BASE_URL;
+  prefsApiShape.value = DEFAULT_API_SHAPE;
+  applyApiShapeHint(prefsApiShape, prefsBaseUrl);
   // Announce the new URL before painting: the input handler resyncs the picker
   // to whatever the field now says, so the preset's own list has to be written
   // after it rather than be wiped by it.
@@ -3386,6 +3442,7 @@ async function updatePrefsAuthUi(): Promise<void> {
   const signIn = providerOffersSignIn(prefsProvider.value);
   const oauthOnly = isOAuthOnlyProvider(prefsProvider.value);
   const custom = prefsProvider.value === "openai-compatible";
+  prefsApiShapeRow.classList.toggle("hidden", !custom);
   prefsBaseUrlRow.classList.toggle("hidden", !custom);
   // Model discovery is a custom-endpoint affordance only (#432).
   prefsModelRefresh.classList.toggle("hidden", !custom);
@@ -3577,7 +3634,12 @@ prefsGalaxyKey.addEventListener("input", updatePrefsGalaxyValidity);
 function snapshotCurrentProvider(): void {
   prefsProviderStates[prefsActiveProvider] = snapshotProviderState(
     prefsProviderStates[prefsActiveProvider],
-    { typedKey: prefsApiKey.value, model: prefsModel.value, baseUrl: prefsBaseUrl.value },
+    {
+      typedKey: prefsApiKey.value,
+      model: prefsModel.value,
+      baseUrl: prefsBaseUrl.value,
+      api: prefsApiShape.value,
+    },
   );
 }
 
@@ -3686,6 +3748,8 @@ function loadProviderFields(provider: string): void {
   setModelStatus("", "");
   prefsApiKey.value = state.typedKey;
   prefsBaseUrl.value = state.baseUrl;
+  prefsApiShape.value = state.api || DEFAULT_API_SHAPE;
+  applyApiShapeHint(prefsApiShape, prefsBaseUrl);
   prefsBaseUrlDiverged = state.baseUrl.trim() !== state.savedBaseUrl.trim();
   prefsApiKey.placeholder = state.hadKey ? "leave blank to keep existing key" : "";
   if (state.hadKey && !state.typedKey) {
@@ -3702,7 +3766,10 @@ async function openPreferences(): Promise<void> {
   const config = (await window.orbit.getConfig()) as {
     llm?: {
       active?: string;
-      providers?: Record<string, { model?: string; baseUrl?: string; hasApiKey?: boolean }>;
+      providers?: Record<
+        string,
+        { model?: string; baseUrl?: string; api?: string; hasApiKey?: boolean }
+      >;
     };
     galaxy?: {
       active: string | null;
@@ -3723,6 +3790,7 @@ async function openPreferences(): Promise<void> {
       typedKey: "",
       model: p.model ?? "",
       baseUrl: p.baseUrl ?? "",
+      api: p.api ?? "",
       savedBaseUrl: p.baseUrl ?? "",
     };
   }
@@ -3820,12 +3888,16 @@ async function savePreferences(): Promise<void> {
   // (sentinel or "") for them, or the reconciler would try to preserve/clear a
   // config.json key that was never there. Dual-auth providers do keep a
   // config.json key, so they go down the normal sentinel path (#429).
-  const providers: Record<string, { apiKey?: string; model?: string; baseUrl?: string }> = {};
+  const providers: Record<
+    string,
+    { apiKey?: string; model?: string; baseUrl?: string; api?: string }
+  > = {};
   for (const [name, state] of Object.entries(prefsProviderStates)) {
-    const entry: { apiKey?: string; model?: string; baseUrl?: string } = {
+    const entry: { apiKey?: string; model?: string; baseUrl?: string; api?: string } = {
       model: state.model || undefined,
     };
     if (state.baseUrl) entry.baseUrl = state.baseUrl;
+    if (state.baseUrl && state.api) entry.api = state.api;
     if (!isOAuthOnlyProvider(name)) {
       entry.apiKey = state.typedKey.trim()
         ? state.typedKey.trim()
@@ -3837,10 +3909,13 @@ async function savePreferences(): Promise<void> {
   }
   // Override the active provider with the resolved current-screen values
   // (covers the brand-new-provider case too).
-  const activeEntry: { apiKey?: string; model?: string; baseUrl?: string } = {
+  const activeEntry: { apiKey?: string; model?: string; baseUrl?: string; api?: string } = {
     model: selectedModel,
   };
-  if (prefsBaseUrl.value.trim()) activeEntry.baseUrl = prefsBaseUrl.value.trim();
+  if (prefsBaseUrl.value.trim()) {
+    activeEntry.baseUrl = prefsBaseUrl.value.trim();
+    activeEntry.api = prefsApiShape.value;
+  }
   if (!isOAuthOnlyProvider(activeProvider)) activeEntry.apiKey = llmApiKey;
   providers[activeProvider] = activeEntry;
 

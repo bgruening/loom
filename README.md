@@ -529,11 +529,11 @@ If you have a tester ID, you can set it like this:
 
 Run `/tester-id` with no argument to see the current value. It writes only the `testerId` key to `~/.loom/config.json` (the rest of the file is left untouched), and Orbit attaches it to any feedback you send so reports can be traced back to your session. It can also be supplied via the `LOOM_TESTER_ID` environment variable.
 
-### Local LLMs
+### Custom endpoints (local LLMs, gateways, proxies)
 
-Loom works with any OpenAI-compatible API -- a hosted service like [Jetstream](https://docs.jetstream-cloud.org/inference-service/overview/), or a local backend like [LiteLLM](https://litellm.ai/) or [Ollama](https://ollama.com/).
+Loom works with any OpenAI-compatible API -- a hosted service like [Jetstream](https://docs.jetstream-cloud.org/inference-service/overview/), or a local backend like [LiteLLM](https://litellm.ai/) or [Ollama](https://ollama.com/) -- and with Anthropic-compatible gateways that front the Messages API, such as an institutional proxy or LiteLLM in anthropic mode.
 
-In **Orbit**, open Preferences, set the provider to **OpenAI-compatible endpoint**, enter the base URL + API key (or click the **Jetstream** preset), and pick a model. The key is stored encrypted.
+In **Orbit**, open Preferences, set the provider to **OpenAI-compatible endpoint**, pick the **API shape**, enter the base URL + API key (or click the **Jetstream** preset), and choose a model. The key is stored encrypted.
 
 For the **CLI**, add a provider entry with a `baseUrl` to `~/.loom/config.json`:
 
@@ -553,6 +553,26 @@ For the **CLI**, add a provider entry with a `baseUrl` to `~/.loom/config.json`:
 ```
 
 The `baseUrl` marks the entry as a custom endpoint: Loom registers it with Pi for you (writing the matching `~/.pi/agent/models.json` entry, with sensible metadata defaults) and passes the key to Pi at runtime, so the key never lands in `models.json`. The provider name is yours to choose -- `"openai-compatible"` is just a convention.
+
+An optional `api` field picks the wire format. It defaults to `openai-completions`, so existing entries need no change; set it to `anthropic-messages` for a gateway that speaks the Anthropic Messages API:
+
+```json
+{
+  "llm": {
+    "active": "argo",
+    "providers": {
+      "argo": {
+        "baseUrl": "https://gateway.example/argoapi",
+        "api": "anthropic-messages",
+        "model": "claudeopus5",
+        "apiKey": "your-key"
+      }
+    }
+  }
+}
+```
+
+**The two shapes want different base URLs**, because their clients append different paths. An `openai-completions` URL includes the version segment (`https://host/v1`); an `anthropic-messages` URL stops at the host (`https://host`) because the client adds `/v1/messages` itself. A `/v1` in the wrong place is a 404 against a URL that looks correct.
 
 ### Standing instructions (`LOOM.md`)
 

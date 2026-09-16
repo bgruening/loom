@@ -89,11 +89,12 @@ export interface OrbitAPI {
     provider: string,
     key: string,
     baseUrl?: string,
+    api?: string,
   ): Promise<{ valid: boolean; error?: string; models?: string[] }>;
   /**
-   * Re-list an OpenAI-compatible provider's models using the key already
-   * stored in main. Takes only the provider name -- the renderer never holds
-   * the credential (#432).
+   * Re-list a custom endpoint's models using the key already stored in main.
+   * Takes only the provider name -- the renderer never holds the credential
+   * (#432), and the endpoint's wire format is read from the same stored entry.
    */
   discoverModels(
     provider: string,
@@ -203,8 +204,8 @@ const api: OrbitAPI = {
   refreshSkills: () => ipcRenderer.invoke("skills:refresh"),
   getGalaxyUser: () => ipcRenderer.invoke("galaxy:current-user"),
   setBypassPermissions: (enabled) => ipcRenderer.invoke("guardian:set-bypass", enabled),
-  validateApiKey: (provider, key, baseUrl) =>
-    ipcRenderer.invoke("apiKey:validate", provider, key, baseUrl),
+  validateApiKey: (provider, key, baseUrl, api) =>
+    ipcRenderer.invoke("apiKey:validate", provider, key, baseUrl, api),
   discoverModels: (provider) => ipcRenderer.invoke("models:discover", provider),
   oauthProviders: () => ipcRenderer.invoke("oauth:providers"),
   oauthStatus: (provider) => ipcRenderer.invoke("oauth:status", provider),

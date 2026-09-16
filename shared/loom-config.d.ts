@@ -6,11 +6,26 @@ export interface LlmProviderConfig {
   apiKeyEncrypted?: string;
   model?: string;
   /**
-   * Base URL for an OpenAI-compatible endpoint (e.g. Jetstream, vLLM, Ollama).
-   * Presence marks this entry as a custom provider: the brain registers it in
-   * ~/.pi/agent/models.json and supplies the key at runtime via --api-key.
+   * Base URL for a user-supplied endpoint (e.g. Jetstream, vLLM, Ollama, an
+   * Anthropic-compatible gateway). Presence marks this entry as a custom
+   * provider: the brain registers it in ~/.pi/agent/models.json and supplies
+   * the key at runtime via --api-key.
+   *
+   * What the URL should include depends on `api` -- see there.
    */
   baseUrl?: string;
+  /**
+   * Wire format the endpoint speaks. `openai-completions` (the default, and
+   * the only shape Loom used to support) or `anthropic-messages`, for a gateway
+   * that fronts the Anthropic Messages API -- Argo, LiteLLM in anthropic mode,
+   * a Bedrock proxy. Ignored unless `baseUrl` is set.
+   *
+   * The two want different base URLs, because their SDKs append different
+   * paths: `openai-completions` wants the version segment included
+   * (`https://host/v1`), `anthropic-messages` wants it left off
+   * (`https://host`, and the client appends `/v1/messages`).
+   */
+  api?: string;
 }
 
 export interface LoomConfig {
