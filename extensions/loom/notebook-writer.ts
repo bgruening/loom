@@ -137,6 +137,62 @@ export async function readNotebook(filePath: string): Promise<string> {
 }
 
 /**
+ * How many times a guarded update re-reads and retries before giving up. A
+ * write only loses the stamp check when someone else wrote in the microseconds
+ * between our read and our rename; three attempts is far more than convergence
+ * needs, and bounding it keeps a pathological writer from spinning us.
+ */
+const MAX_CAS_ATTEMPTS = 3;
+
+/**
+ * Read -> apply -> write as a compare-and-swap, retrying against fresh content
+ * when the notebook moved under us.
+ *
+ * This is the discipline the poller already writes under (#391), packaged for
+ * the callers that mutate a block from outside a poll. An unguarded whole-file
+ * write renders the file from content captured before whatever landed in
+ * between -- a poll advancing a block, an agent `edit`, a `bash` append -- and
+ * the in-process lock cannot help, because it only orders Loom's own writers.
+ *
+ * Call with the notebook lock held. The stamp is taken *before* the read on
+ * purpose: stamping afterwards would let a write that landed in between look
+ * unchanged, which is the exact clobber this prevents, while stamping first can
+ * only ever cost a spurious retry.
+ *
+ * `apply` runs against each attempt's fresh content and may throw to abandon
+ * the update outright -- a validation that depends on what the file says now
+ * belongs inside it, not before the loop.
+ */
+export async function withNotebookCas<T>(
+  filePath: string,
+  apply: (content: string) => { content: string; result: T },
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
+    const stamp = await statNotebook(filePath);
+    // Read regardless of the stat, so a notebook that's actually gone or
+    // unreadable fails with its own ENOENT/EACCES instead of being dressed up
+    // as a race.
+    const fresh = await readNotebook(filePath);
+    // Readable but unstattable: without a stamp there's no compare-and-swap,
+    // and an unguarded whole-file write is the thing this exists to stop.
+    if (!stamp) {
+      lastError = new NotebookChangedError(filePath);
+      continue;
+    }
+    const { content, result } = apply(fresh);
+    try {
+      await writeNotebook(filePath, content, stamp);
+      return result;
+    } catch (error) {
+      if (!(error instanceof NotebookChangedError)) throw error;
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+/**
  * Check if a file exists.
  */
 export async function fileExists(filePath: string): Promise<boolean> {

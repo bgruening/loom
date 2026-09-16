@@ -17,6 +17,7 @@ import {
   readNotebook,
   writeNotebook,
   withNotebookLock,
+  withNotebookCas,
   findInvocationBlocks,
   upsertInvocationBlock,
   applyInvocationUpdates,
@@ -529,25 +530,26 @@ notebook.md, and the invocation id must exist on the Galaxy server.`,
         const serverVerified = check.outcome === "found";
 
         const submittedAt = new Date().toISOString();
-        let inv: InvocationYaml | undefined;
-        await withNotebookLock(notebookPath, async () => {
-          const content = await readNotebook(notebookPath);
-          // Resolve the anchor against the bytes we're about to rewrite, not a
-          // copy read earlier: the step could have been renamed in between, and
-          // a block bound to a step that isn't there any more is exactly the
-          // silent-nothing this check exists to stop.
-          inv = {
-            invocationId: params.invocationId,
-            galaxyServerUrl,
-            notebookAnchor: requireAnchor(content, params.notebookAnchor),
-            label: params.label,
-            submittedAt,
-            status: "in_progress",
-            serverVerified,
-          };
-          await writeNotebook(notebookPath, upsertInvocationBlock(content, inv));
-        });
-        if (!inv) throw new Error("Invocation was not recorded.");
+        // Guarded write: the poller and the agent both write this file while we
+        // are talking to Galaxy, and an unguarded whole-file rewrite would drop
+        // whatever landed in between. Resolving the anchor inside means it is
+        // checked against the bytes we're about to rewrite rather than a copy
+        // read earlier -- a block bound to a step that was renamed away is
+        // exactly the silent-nothing the check exists to stop.
+        const inv = await withNotebookLock(notebookPath, () =>
+          withNotebookCas(notebookPath, (content) => {
+            const record: InvocationYaml = {
+              invocationId: params.invocationId,
+              galaxyServerUrl,
+              notebookAnchor: requireAnchor(content, params.notebookAnchor),
+              label: params.label,
+              submittedAt,
+              status: "in_progress",
+              serverVerified,
+            };
+            return { content: upsertInvocationBlock(content, record), result: record };
+          }),
+        );
 
         const where = `${inv.invocationId} (${inv.label}) at ${inv.notebookAnchor}`;
         return {
@@ -646,22 +648,21 @@ exist on the Galaxy server.`,
         const serverVerified = check.outcome === "found";
 
         const submittedAt = new Date().toISOString();
-        let job: JobYaml | undefined;
-        await withNotebookLock(notebookPath, async () => {
-          const content = await readNotebook(notebookPath);
-          job = {
-            jobId: params.jobId,
-            galaxyServerUrl: cfg?.url || "",
-            notebookAnchor: requireAnchor(content, params.notebookAnchor),
-            label: params.label,
-            toolId: params.toolId,
-            submittedAt,
-            status: "in_progress",
-            serverVerified,
-          };
-          await writeNotebook(notebookPath, upsertJobBlock(content, job));
-        });
-        if (!job) throw new Error("Job was not recorded.");
+        const job = await withNotebookLock(notebookPath, () =>
+          withNotebookCas(notebookPath, (content) => {
+            const record: JobYaml = {
+              jobId: params.jobId,
+              galaxyServerUrl: cfg?.url || "",
+              notebookAnchor: requireAnchor(content, params.notebookAnchor),
+              label: params.label,
+              toolId: params.toolId,
+              submittedAt,
+              status: "in_progress",
+              serverVerified,
+            };
+            return { content: upsertJobBlock(content, record), result: record };
+          }),
+        );
 
         const where = `${job.jobId} (${job.label}) at ${job.notebookAnchor}`;
         return {

@@ -10,6 +10,7 @@ import {
   applyInvocationUpdates,
   findInvocationBlocks,
   statNotebook,
+  withNotebookCas,
   NotebookChangedError,
   renderInvocationYaml,
   type InvocationYaml,
@@ -158,6 +159,71 @@ describe("writeNotebook staleness guard", () => {
 
   it("statNotebook returns null for a missing file", async () => {
     expect(await statNotebook(join(dir, "nope.md"))).toBeNull();
+  });
+});
+
+describe("withNotebookCas", () => {
+  let dir: string;
+  let nbPath: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "loom-cas-"));
+    nbPath = join(dir, "notebook.md");
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("applies and returns the caller's result", async () => {
+    await writeNotebook(nbPath, "one\n");
+    const result = await withNotebookCas(nbPath, (content) => ({
+      content: content + "two\n",
+      result: content.length,
+    }));
+    expect(result).toBe(4);
+    expect(readFileSync(nbPath, "utf-8")).toBe("one\ntwo\n");
+  });
+
+  it("retries against fresh content when a writer lands mid-update", async () => {
+    await writeNotebook(nbPath, "one\n");
+    let calls = 0;
+    const out = await withNotebookCas(nbPath, (content) => {
+      // The competing write lands after our read, before our rename.
+      if (calls++ === 0) appendFileSync(nbPath, "outsider\n", "utf-8");
+      return { content: content + "ours\n", result: calls };
+    });
+    expect(out).toBe(2);
+    const final = readFileSync(nbPath, "utf-8");
+    expect(final).toContain("outsider");
+    expect(final).toContain("ours");
+  });
+
+  it("gives up rather than clobbering a notebook that never settles", async () => {
+    await writeNotebook(nbPath, "one\n");
+    await expect(
+      withNotebookCas(nbPath, (content) => {
+        appendFileSync(nbPath, "outsider\n", "utf-8");
+        return { content: content + "ours\n", result: null };
+      }),
+    ).rejects.toBeInstanceOf(NotebookChangedError);
+    expect(readFileSync(nbPath, "utf-8")).not.toContain("ours");
+  });
+
+  it("lets the apply callback abandon the update by throwing", async () => {
+    await writeNotebook(nbPath, "one\n");
+    await expect(
+      withNotebookCas(nbPath, () => {
+        throw new Error("nope");
+      }),
+    ).rejects.toThrow("nope");
+    expect(readFileSync(nbPath, "utf-8")).toBe("one\n");
+  });
+
+  it("surfaces a missing notebook as its own ENOENT, not as a lost race", async () => {
+    await expect(
+      withNotebookCas(nbPath, (content) => ({ content, result: null })),
+    ).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
 

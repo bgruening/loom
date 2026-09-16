@@ -7,11 +7,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { resetState, setNotebookPath } from "../extensions/loom/state";
-import { findInvocationBlocks } from "../extensions/loom/notebook-writer";
+import { findInvocationBlocks, renderInvocationYaml } from "../extensions/loom/notebook-writer";
+import * as anchors from "../extensions/loom/notebook-anchors";
 import { findJobBlocks } from "../extensions/loom/galaxy-job-block";
 import { registerPlanTools } from "../extensions/loom/tools";
 
@@ -355,5 +356,120 @@ describe("record tools: server verification", () => {
     expect(res.success).toBe(false);
     expect(res.error).toContain("not-a-step");
     expect(readFileSync(nbPath, "utf-8")).toBe(NOTEBOOK);
+  });
+});
+
+describe("record tools: compare-and-swap write", () => {
+  let dir: string;
+  let nbPath: string;
+  const origUrl = process.env.GALAXY_URL;
+  const origKey = process.env.GALAXY_API_KEY;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "loom-record-cas-"));
+    nbPath = join(dir, "notebook.md");
+    writeFileSync(nbPath, NOTEBOOK, "utf-8");
+    setNotebookPath(nbPath);
+    process.env.GALAXY_URL = "https://usegalaxy.org";
+    process.env.GALAXY_API_KEY = "test-key";
+    stubGalaxy(200);
+  });
+
+  afterEach(() => {
+    resetState();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    if (origUrl !== undefined) process.env.GALAXY_URL = origUrl;
+    else delete process.env.GALAXY_URL;
+    if (origKey !== undefined) process.env.GALAXY_API_KEY = origKey;
+    else delete process.env.GALAXY_API_KEY;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /**
+   * Land `write` on disk from inside the record tool's read-modify-write
+   * window, `times` times.
+   *
+   * Anchor resolution is the one step of that window the test can reach: it
+   * runs against the content the tool just read and before the write goes out,
+   * which is exactly where a competing writer does its damage. Real resolution
+   * still happens -- the spy only sneaks a file write in first.
+   */
+  function writeDuringRecord(write: () => void, times = 1): void {
+    const real = anchors.resolveNotebookAnchor;
+    let seen = 0;
+    vi.spyOn(anchors, "resolveNotebookAnchor").mockImplementation((content, input) => {
+      if (seen++ < times) write();
+      return real(content, input);
+    });
+  }
+
+  it("keeps a poll update that lands between the record's read and its write", async () => {
+    // The poller writes under its own compare-and-swap, but that can't defend
+    // against an unguarded whole-file write from this side: the record tool
+    // used to render the file from content captured before the poll existed.
+    const polled = (status: string) =>
+      renderInvocationYaml({
+        invocationId: "inv-earlier",
+        galaxyServerUrl: "https://usegalaxy.org",
+        notebookAnchor: "plan-a-step-1",
+        label: "Earlier run",
+        submittedAt: "2026-09-16T00:00:00Z",
+        status: status as "in_progress" | "completed" | "failed",
+      });
+    writeFileSync(nbPath, `${NOTEBOOK}\n${polled("in_progress")}`, "utf-8");
+    writeDuringRecord(() => writeFileSync(nbPath, `${NOTEBOOK}\n${polled("completed")}`, "utf-8"));
+
+    const { invocation } = recordTools();
+    const res = await run(invocation, {
+      invocationId: "inv-new",
+      notebookAnchor: "plan-a-step-2",
+      label: "Second run",
+    });
+
+    expect(res.success).toBe(true);
+    const blocks = findInvocationBlocks(readFileSync(nbPath, "utf-8"));
+    expect(blocks).toHaveLength(2);
+    // The poll's transition survived...
+    expect(blocks.find((b) => b.invocationId === "inv-earlier")?.status).toBe("completed");
+    // ...and so did our new block.
+    expect(blocks.find((b) => b.invocationId === "inv-new")?.label).toBe("Second run");
+  });
+
+  it("keeps a concurrent write when recording a job", async () => {
+    writeDuringRecord(() =>
+      appendFileSync(nbPath, "\n### Results\n\nCD4 up, CD8 flat.\n", "utf-8"),
+    );
+
+    const { job } = recordTools();
+    const res = await run(job, {
+      jobId: "job-1",
+      notebookAnchor: "plan-a-step-1",
+      label: "FastQC",
+    });
+
+    expect(res.success).toBe(true);
+    const notebook = readFileSync(nbPath, "utf-8");
+    expect(notebook).toContain("CD4 up, CD8 flat.");
+    expect(findJobBlocks(notebook)).toHaveLength(1);
+  });
+
+  it("gives up rather than clobbering when the notebook never settles", async () => {
+    // A writer that lands on every attempt. Refusing is the right answer: the
+    // alternative is overwriting whatever it wrote.
+    writeDuringRecord(() => appendFileSync(nbPath, "\nstill moving\n", "utf-8"), 10);
+
+    const { invocation } = recordTools();
+    const res = await run(invocation, {
+      invocationId: "inv-1",
+      notebookAnchor: "plan-a-step-1",
+      label: "BWA",
+    });
+
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("changed on disk");
+    const notebook = readFileSync(nbPath, "utf-8");
+    expect(notebook).not.toContain("invocation_id: inv-1");
+    expect(notebook).toContain("still moving");
   });
 });
