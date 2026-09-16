@@ -181,6 +181,16 @@ export type GalaxyRunVerification =
 const ABSENT_STATUSES: ReadonlySet<number> = new Set([400, 404]);
 
 /**
+ * Galaxy's encoded ids are hex, which `galaxy-markdown-adapter.ts` already
+ * relies on for the same reason: a value like `.` or `../histories` survives
+ * `encodeURIComponent` unchanged, and URL dot-segment normalization then turns
+ * `/api/jobs/.` into `/api/jobs` -- the *collection* endpoint, which answers
+ * 200 with a list. Without this, `galaxy_job_record({jobId: "."})` records a
+ * verified block for a job that does not exist.
+ */
+const ENCODED_ID_RE = /^[0-9a-fA-F]+$/;
+
+/**
  * Ask Galaxy whether a run id exists, without caring what it says beyond that.
  *
  * Deliberately fails open on anything that isn't a definite no: a 500, a dead
@@ -193,6 +203,9 @@ export async function verifyGalaxyRun(
   id: string,
   signal?: AbortSignal,
 ): Promise<GalaxyRunVerification> {
+  if (!ENCODED_ID_RE.test(id)) {
+    return { outcome: "absent", detail: `"${id}" is not a Galaxy id (they are hex)` };
+  }
   if (!getGalaxyConfig()) {
     return { outcome: "unreachable", detail: "Galaxy credentials are not configured" };
   }
@@ -201,7 +214,13 @@ export async function verifyGalaxyRun(
       ? `/invocations/${encodeURIComponent(id)}`
       : `/jobs/${encodeURIComponent(id)}`;
   try {
-    await galaxyGet(path, signal);
+    const body = await galaxyGet<{ id?: unknown }>(path, signal);
+    // A 200 is not the answer; a 200 *for this id* is. Anything else means the
+    // request landed on some other resource, which is how a path that survives
+    // encoding gets itself certified.
+    if (!body || typeof body !== "object" || Array.isArray(body) || body.id !== id) {
+      return { outcome: "absent", detail: `Galaxy answered for a different resource than ${id}` };
+    }
     return { outcome: "found" };
   } catch (error) {
     if (error instanceof GalaxyApiError && ABSENT_STATUSES.has(error.status)) {
@@ -212,6 +231,26 @@ export async function verifyGalaxyRun(
       detail: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+/**
+ * Whether a block's recorded `galaxy_server_url` is the server we are polling.
+ *
+ * Every Galaxy call reads the *current* credentials, not the block's own url,
+ * so after a profile switch the poller happily asks server B about a block
+ * recorded against server A. It has always done that; what must not follow is
+ * B's answer certifying A's record. An empty url is no claim -- the block
+ * predates the field, or was written with no credentials -- so it matches
+ * whatever we have.
+ */
+export function sameGalaxyServer(
+  blockUrl: string | undefined,
+  currentUrl: string | undefined,
+): boolean {
+  if (!blockUrl) return true;
+  if (!currentUrl) return false;
+  const norm = (u: string) => u.trim().replace(/\/+$/, "").toLowerCase();
+  return norm(blockUrl) === norm(currentUrl);
 }
 
 export interface GalaxyHistorySummary {

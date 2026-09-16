@@ -167,6 +167,48 @@ describe("poller clears server_verified: false", () => {
     expect(block.status).toBe("in_progress");
   });
 
+  it("does not let another Galaxy server certify a block recorded against ours", async () => {
+    // The poller always asks the currently-configured server, so after a
+    // profile switch it polls server B about a block recorded against A. It
+    // may advance the run -- that is pre-existing -- but B's answer is not
+    // proof that A's id exists.
+    writeFileSync(
+      nbPath,
+      renderJobYaml(job({ galaxyServerUrl: "https://other.galaxy.test", serverVerified: false })),
+      "utf-8",
+    );
+    mockJobDetails.mockResolvedValue({
+      id: "job-1",
+      state: "running",
+      tool_id: "fastqc",
+      tool_version: "1.0",
+    });
+
+    startGalaxyPoller(notify);
+    await pollGalaxyNow();
+
+    expect(findJobBlocks(readFileSync(nbPath, "utf-8"))[0].serverVerified).toBe(false);
+  });
+
+  it("still clears the flag when the block names the server we are polling", async () => {
+    writeFileSync(
+      nbPath,
+      renderJobYaml(job({ galaxyServerUrl: "https://GALAXY.test/", serverVerified: false })),
+      "utf-8",
+    );
+    mockJobDetails.mockResolvedValue({
+      id: "job-1",
+      state: "ok",
+      tool_id: "fastqc",
+      tool_version: "1.0",
+    });
+
+    startGalaxyPoller(notify);
+    await pollGalaxyNow();
+
+    expect(findJobBlocks(readFileSync(nbPath, "utf-8"))[0].serverVerified).toBe(true);
+  });
+
   it("leaves the flag false when Galaxy does not answer", async () => {
     writeFileSync(nbPath, renderJobYaml(job({ serverVerified: false })), "utf-8");
     mockJobDetails.mockRejectedValue(new Error("Galaxy API 502: bad gateway"));

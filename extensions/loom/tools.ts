@@ -27,10 +27,17 @@ import {
   type InvocationPollUpdate,
 } from "./notebook-writer";
 import { isTerminalJobState, upsertJobBlock, type JobYaml } from "./galaxy-job-block";
-import { listNotebookAnchors, resolveNotebookAnchor, UnknownAnchorError } from "./notebook-anchors";
+import {
+  ambiguousAnchorMessage,
+  listNotebookAnchors,
+  resolveNotebookAnchor,
+  unknownAnchorMessage,
+  UnknownAnchorError,
+} from "./notebook-anchors";
 import {
   getGalaxyConfig,
   galaxyGet,
+  sameGalaxyServer,
   verifyGalaxyRun,
   type GalaxyInvocationResponse,
 } from "./galaxy-api";
@@ -89,8 +96,12 @@ function stripGtnHtml(html: string): string {
  */
 function requireAnchor(content: string, input: string): string {
   const resolved = resolveNotebookAnchor(content, input);
-  if (resolved === null) throw new UnknownAnchorError(input, listNotebookAnchors(content));
-  return resolved;
+  if (resolved.kind === "resolved") return resolved.anchor;
+  throw new UnknownAnchorError(
+    resolved.kind === "ambiguous"
+      ? ambiguousAnchorMessage(input, resolved.candidates)
+      : unknownAnchorMessage(input, listNotebookAnchors(content)),
+  );
 }
 
 /** The refusal both record tools hand back: nothing written, reason named. */
@@ -1043,8 +1054,10 @@ export async function checkInvocations(
         failedJobs: summary.error,
         lastPolledAt,
         // We just got an answer out of Galaxy for this id, which is the proof a
-        // block recorded `server_verified: false` is waiting for.
-        serverVerified: true,
+        // block recorded `server_verified: false` is waiting for -- but only if
+        // the answer came from the server the block names. A profile switch
+        // must not let another server's `inv-1` certify this one.
+        serverVerified: sameGalaxyServer(block.galaxyServerUrl, getGalaxyConfig()?.url),
         transition,
       });
 

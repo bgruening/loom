@@ -44,6 +44,7 @@ import {
   getGalaxyConfig,
   galaxyGet,
   galaxyGetJobDetails,
+  sameGalaxyServer,
   type GalaxyInvocationResponse,
 } from "./galaxy-api.js";
 import { buildResumePrompt } from "./auto-resume.js";
@@ -361,7 +362,8 @@ async function tickJobs(content: string): Promise<void> {
 
   const pending = findJobBlocks(content).filter((j) => j.status === "in_progress");
   if (pending.length === 0) return;
-  if (!getGalaxyConfig()) return;
+  const currentServer = getGalaxyConfig()?.url;
+  if (!currentServer) return;
 
   for (const job of pending) {
     let state: string | undefined;
@@ -377,7 +379,7 @@ async function tickJobs(content: string): Promise<void> {
       // answered, which is the proof a block the record tool could only write
       // `server_verified: false` is waiting for. Without this the flag would
       // sit false for the whole run and only clear when the job ends.
-      if (job.serverVerified === false) {
+      if (job.serverVerified === false && sameGalaxyServer(job.galaxyServerUrl, currentServer)) {
         try {
           await withNotebookLock(nbPath, () =>
             // Only the flag and the timestamp: this write knows nothing about
@@ -407,7 +409,8 @@ async function tickJobs(content: string): Promise<void> {
           status,
           galaxyState: state,
           lastPolledAt: polledAt,
-          serverVerified: true,
+          // Only the server the block names can confirm the block's id.
+          serverVerified: sameGalaxyServer(job.galaxyServerUrl, currentServer),
         }),
       );
     } catch (err) {

@@ -48,20 +48,32 @@ function run(
     .then((r) => JSON.parse(r.content[0].text));
 }
 
-/** A fake Galaxy answer; `verifyGalaxyRun` only cares whether it is ok. */
-function response(status: number, body = "{}"): Response {
+/** Galaxy's encoded ids are hex; the verifier refuses anything else outright. */
+const INV_ID = "f2db41e1fa331b3e";
+const INV_ID_2 = "f597429621d6eb2b";
+const JOB_ID = "bbd44e69cb8906b5";
+
+function response(status: number, body: unknown): Response {
+  const text = typeof body === "string" ? body : JSON.stringify(body);
   return {
     ok: status >= 200 && status < 300,
     status,
     statusText: `status ${status}`,
-    text: async () => body,
-    json: async () => JSON.parse(body),
+    text: async () => text,
+    json: async () => JSON.parse(text),
   } as unknown as Response;
 }
 
-/** Stub every Galaxy round trip with one status. Returns the fetch mock. */
-function stubGalaxy(status: number, body = "{}") {
-  const fetchMock = vi.fn(async () => response(status, body));
+/**
+ * Stub every Galaxy round trip. A 2xx echoes back the id in the request path,
+ * which is what `verifyGalaxyRun` checks for -- a bare 200 proves nothing.
+ */
+function stubGalaxy(status: number, body?: unknown) {
+  const fetchMock = vi.fn(async (url: string) => {
+    if (body !== undefined) return response(status, body);
+    const id = String(url).split("/").pop() ?? "";
+    return response(status, status < 300 ? { id, state: "ok" } : "error");
+  });
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
 }
@@ -109,7 +121,7 @@ describe("record tools: anchor validation", () => {
   it("records an invocation against an anchor that exists", async () => {
     const { invocation } = recordTools();
     const res = await run(invocation, {
-      invocationId: "inv-1",
+      invocationId: INV_ID,
       notebookAnchor: "plan-a-step-2",
       label: "BWA alignment",
     });
@@ -123,7 +135,7 @@ describe("record tools: anchor validation", () => {
   it("rejects an anchor nothing in the notebook resolves to, and writes nothing", async () => {
     const { invocation } = recordTools();
     const res = await run(invocation, {
-      invocationId: "inv-1",
+      invocationId: INV_ID,
       notebookAnchor: "plan-1-step-3",
       label: "BWA alignment",
     });
@@ -137,10 +149,52 @@ describe("record tools: anchor validation", () => {
     expect(readFileSync(nbPath, "utf-8")).toBe(NOTEBOOK);
   });
 
-  it("accepts a plan heading's slug, for notebooks written without {#anchors}", async () => {
+  it("records against a derived step address when the plan has no {#anchors}", async () => {
+    // The Llama-4 path: buildPlanConventionBlock({omitAnchors:true}) tells the
+    // model not to write curly braces and to say "Plan A step 2" instead.
+    // Refusing that would leave a real Galaxy run untracked.
+    writeFileSync(
+      nbPath,
+      `## Plan A: chrM Variant Calling [galaxy]\n\n### Steps\n\n` +
+        `- [ ] 1. **QC FASTQs** — fastp\n- [ ] 2. **Align** — BWA-MEM\n`,
+      "utf-8",
+    );
     const { invocation } = recordTools();
     const res = await run(invocation, {
-      invocationId: "inv-1",
+      invocationId: INV_ID,
+      notebookAnchor: "Plan A step 2",
+      label: "BWA alignment",
+    });
+
+    expect(res.success).toBe(true);
+    expect(findInvocationBlocks(readFileSync(nbPath, "utf-8"))[0].notebookAnchor).toBe(
+      "plan-a-step-2",
+    );
+  });
+
+  it("refuses to guess between two anchors that differ only in case", async () => {
+    writeFileSync(
+      nbPath,
+      `## Plan A: X [galaxy]\n\n- [ ] 1. **A** {#Plan-A-Step-1}\n- [ ] 2. **B** {#PLAN-a-step-1}\n`,
+      "utf-8",
+    );
+    const before = readFileSync(nbPath, "utf-8");
+    const { invocation } = recordTools();
+    const res = await run(invocation, {
+      invocationId: INV_ID,
+      notebookAnchor: "plan-a-step-1",
+      label: "QC",
+    });
+
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("Ambiguous");
+    expect(readFileSync(nbPath, "utf-8")).toBe(before);
+  });
+
+  it("accepts a plan heading's slug", async () => {
+    const { invocation } = recordTools();
+    const res = await run(invocation, {
+      invocationId: INV_ID,
       notebookAnchor: "plan-a-chrm-variant-calling-galaxy",
       label: "BWA alignment",
     });
@@ -154,7 +208,7 @@ describe("record tools: anchor validation", () => {
   it("stores the notebook's spelling of the anchor, not the caller's", async () => {
     const { invocation } = recordTools();
     await run(invocation, {
-      invocationId: "inv-1",
+      invocationId: INV_ID,
       notebookAnchor: "{#PLAN-A-STEP-1}",
       label: "QC",
     });
@@ -167,7 +221,7 @@ describe("record tools: anchor validation", () => {
   it("records a job against an anchor that exists", async () => {
     const { job } = recordTools();
     const res = await run(job, {
-      jobId: "job-1",
+      jobId: JOB_ID,
       notebookAnchor: "plan-a-step-1",
       label: "FastQC",
       toolId: "fastqc",
@@ -182,7 +236,7 @@ describe("record tools: anchor validation", () => {
   it("rejects a job whose anchor does not resolve, and writes nothing", async () => {
     const { job } = recordTools();
     const res = await run(job, {
-      jobId: "job-1",
+      jobId: JOB_ID,
       notebookAnchor: "step-99",
       label: "FastQC",
     });
@@ -197,12 +251,12 @@ describe("record tools: anchor validation", () => {
     // those as anchors would make the check confirm its own writes.
     const { invocation } = recordTools();
     await run(invocation, {
-      invocationId: "inv-1",
+      invocationId: INV_ID,
       notebookAnchor: "plan-a-step-1",
       label: "QC",
     });
     const res = await run(invocation, {
-      invocationId: "inv-2",
+      invocationId: INV_ID_2,
       notebookAnchor: "plan-a-step-1-typo",
       label: "QC again",
     });
@@ -242,13 +296,13 @@ describe("record tools: server verification", () => {
     stubGalaxy(404, "No invocation found");
     const { invocation } = recordTools();
     const res = await run(invocation, {
-      invocationId: "inv-does-not-exist",
+      invocationId: INV_ID,
       notebookAnchor: "plan-a-step-1",
       label: "BWA alignment",
     });
 
     expect(res.success).toBe(false);
-    expect(res.error).toContain("inv-does-not-exist");
+    expect(res.error).toContain(INV_ID);
     expect(res.error).toContain("404");
     expect(readFileSync(nbPath, "utf-8")).toBe(NOTEBOOK);
   });
@@ -257,13 +311,27 @@ describe("record tools: server verification", () => {
     stubGalaxy(400, "Malformed id");
     const { job } = recordTools();
     const res = await run(job, {
-      jobId: "dataset-id-by-mistake",
+      jobId: JOB_ID,
       notebookAnchor: "plan-a-step-1",
       label: "FastQC",
     });
 
     expect(res.success).toBe(false);
-    expect(res.error).toContain("dataset-id-by-mistake");
+    expect(res.error).toContain(JOB_ID);
+    expect(readFileSync(nbPath, "utf-8")).toBe(NOTEBOOK);
+  });
+
+  it("refuses an id that cannot be a Galaxy id, without calling Galaxy", async () => {
+    const fetchMock = stubGalaxy(200);
+    const { job } = recordTools();
+    const res = await run(job, {
+      jobId: "../histories",
+      notebookAnchor: "plan-a-step-1",
+      label: "FastQC",
+    });
+
+    expect(res.success).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(readFileSync(nbPath, "utf-8")).toBe(NOTEBOOK);
   });
 
@@ -271,7 +339,7 @@ describe("record tools: server verification", () => {
     stubGalaxy(200);
     const { invocation } = recordTools();
     const res = await run(invocation, {
-      invocationId: "inv-1",
+      invocationId: INV_ID,
       notebookAnchor: "plan-a-step-1",
       label: "BWA alignment",
     });
@@ -289,7 +357,7 @@ describe("record tools: server verification", () => {
     stubGalaxy(502, "bad gateway");
     const { invocation } = recordTools();
     const res = await run(invocation, {
-      invocationId: "inv-1",
+      invocationId: INV_ID,
       notebookAnchor: "plan-a-step-1",
       label: "BWA alignment",
     });
@@ -311,7 +379,7 @@ describe("record tools: server verification", () => {
     );
     const { job } = recordTools();
     const res = await run(job, {
-      jobId: "job-1",
+      jobId: JOB_ID,
       notebookAnchor: "plan-a-step-1",
       label: "FastQC",
     });
@@ -335,7 +403,7 @@ describe("record tools: server verification", () => {
     const { invocation } = recordTools();
     const res = await run(
       invocation,
-      { invocationId: "inv-1", notebookAnchor: "plan-a-step-1", label: "BWA" },
+      { invocationId: INV_ID, notebookAnchor: "plan-a-step-1", label: "BWA" },
       controller.signal,
     );
 
@@ -348,7 +416,7 @@ describe("record tools: server verification", () => {
     stubGalaxy(200);
     const { invocation } = recordTools();
     const res = await run(invocation, {
-      invocationId: "inv-1",
+      invocationId: INV_ID,
       notebookAnchor: "not-a-step",
       label: "BWA",
     });
@@ -410,7 +478,7 @@ describe("record tools: compare-and-swap write", () => {
     // used to render the file from content captured before the poll existed.
     const polled = (status: string) =>
       renderInvocationYaml({
-        invocationId: "inv-earlier",
+        invocationId: INV_ID,
         galaxyServerUrl: "https://usegalaxy.org",
         notebookAnchor: "plan-a-step-1",
         label: "Earlier run",
@@ -422,7 +490,7 @@ describe("record tools: compare-and-swap write", () => {
 
     const { invocation } = recordTools();
     const res = await run(invocation, {
-      invocationId: "inv-new",
+      invocationId: INV_ID_2,
       notebookAnchor: "plan-a-step-2",
       label: "Second run",
     });
@@ -431,9 +499,9 @@ describe("record tools: compare-and-swap write", () => {
     const blocks = findInvocationBlocks(readFileSync(nbPath, "utf-8"));
     expect(blocks).toHaveLength(2);
     // The poll's transition survived...
-    expect(blocks.find((b) => b.invocationId === "inv-earlier")?.status).toBe("completed");
+    expect(blocks.find((b) => b.invocationId === INV_ID)?.status).toBe("completed");
     // ...and so did our new block.
-    expect(blocks.find((b) => b.invocationId === "inv-new")?.label).toBe("Second run");
+    expect(blocks.find((b) => b.invocationId === INV_ID_2)?.label).toBe("Second run");
   });
 
   it("keeps a concurrent write when recording a job", async () => {
@@ -443,7 +511,7 @@ describe("record tools: compare-and-swap write", () => {
 
     const { job } = recordTools();
     const res = await run(job, {
-      jobId: "job-1",
+      jobId: JOB_ID,
       notebookAnchor: "plan-a-step-1",
       label: "FastQC",
     });
@@ -461,7 +529,7 @@ describe("record tools: compare-and-swap write", () => {
 
     const { invocation } = recordTools();
     const res = await run(invocation, {
-      invocationId: "inv-1",
+      invocationId: INV_ID,
       notebookAnchor: "plan-a-step-1",
       label: "BWA",
     });
@@ -469,7 +537,7 @@ describe("record tools: compare-and-swap write", () => {
     expect(res.success).toBe(false);
     expect(res.error).toContain("changed on disk");
     const notebook = readFileSync(nbPath, "utf-8");
-    expect(notebook).not.toContain("invocation_id: inv-1");
+    expect(notebook).not.toContain(`invocation_id: ${INV_ID}`);
     expect(notebook).toContain("still moving");
   });
 });
