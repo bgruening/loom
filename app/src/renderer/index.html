@@ -550,6 +550,15 @@
               <label for="prefs-model">Model</label>
               <div class="prefs-row-with-btn">
                 <select id="prefs-model"></select>
+                <input
+                  id="prefs-model-custom"
+                  class="hidden"
+                  type="text"
+                  list="prefs-model-options"
+                  placeholder="model id, e.g. claudeopus5"
+                  autocomplete="off"
+                />
+                <datalist id="prefs-model-options"></datalist>
                 <button
                   id="prefs-model-refresh"
                   class="plan-btn hidden"
@@ -573,14 +582,17 @@
                 Prices in the dropdown are per 1M tokens (input/output).
               </span>
             </div>
+            <div class="prefs-row hidden" id="prefs-api-shape-row">
+              <label for="prefs-api-shape">API shape</label>
+              <select id="prefs-api-shape">
+                <option value="openai-completions">OpenAI-compatible</option>
+                <option value="anthropic-messages">Anthropic-compatible</option>
+              </select>
+            </div>
             <div class="prefs-row hidden" id="prefs-base-url-row">
               <label for="prefs-base-url">Base URL</label>
               <div class="prefs-row-with-btn">
-                <input
-                  id="prefs-base-url"
-                  type="text"
-                  placeholder="https://host/v1 (OpenAI-compatible)"
-                />
+                <input id="prefs-base-url" type="text" placeholder="https://host/v1" />
                 <button
                   id="prefs-jetstream-preset"
                   class="plan-btn"
@@ -767,15 +779,27 @@
             <div class="prefs-row">
               <label for="welcome-model">Model</label>
               <select id="welcome-model"></select>
+              <input
+                id="welcome-model-custom"
+                class="hidden"
+                type="text"
+                list="welcome-model-options"
+                placeholder="model id, e.g. claudeopus5"
+                autocomplete="off"
+              />
+              <datalist id="welcome-model-options"></datalist>
+            </div>
+            <div class="prefs-row hidden" id="welcome-api-shape-row">
+              <label for="welcome-api-shape">API shape</label>
+              <select id="welcome-api-shape">
+                <option value="openai-completions">OpenAI-compatible</option>
+                <option value="anthropic-messages">Anthropic-compatible</option>
+              </select>
             </div>
             <div class="prefs-row hidden" id="welcome-base-url-row">
               <label for="welcome-base-url">Base URL</label>
               <div class="prefs-row-with-btn">
-                <input
-                  id="welcome-base-url"
-                  type="text"
-                  placeholder="https://host/v1 (OpenAI-compatible)"
-                />
+                <input id="welcome-base-url" type="text" placeholder="https://host/v1" />
                 <button
                   id="welcome-jetstream-preset"
                   class="plan-btn"
