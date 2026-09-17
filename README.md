@@ -255,7 +255,7 @@ Three paths, depending on what you want.
 
 ### Desktop app (Orbit)
 
-Orbit ships as a native installer that bundles its own Node runtime, `uv`, and Loom -- no separate prerequisites. The macOS (Apple Silicon) build is Developer ID signed + notarized, so it opens with a normal double-click; Linux ships `.deb`/`.rpm`/`.zip`; Windows ships a native `Orbit-<version> Setup.exe` (remote-only -- no local bash shell). All installers are attached to each [release](https://github.com/galaxyproject/loom/releases). See [INSTALL.md](INSTALL.md) for per-platform steps and [RELEASING.md](RELEASING.md) for how a release is cut. Intel Macs and other unpackaged targets can use the developer install below.
+Orbit ships as a native build that bundles its own Node runtime, `uv`, and Loom -- no separate prerequisites. The macOS builds are Developer ID signed + notarized for both Apple Silicon and Intel, so they open with a normal double-click; Linux ships `.deb`/`.rpm`/`.zip` for x64 and arm64; Windows ships a portable `Orbit-win32-x64-<version>.zip` (remote-only -- no local bash shell, and no installer yet). All builds are attached to each [release](https://github.com/galaxyproject/loom/releases). See [INSTALL.md](INSTALL.md) for per-platform steps and [RELEASING.md](RELEASING.md) for how a release is cut. Targets we don't package can use the developer install below.
 
 ### Loom CLI from npm
 
