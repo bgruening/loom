@@ -550,6 +550,15 @@
               <label for="prefs-model">Model</label>
               <div class="prefs-row-with-btn">
                 <select id="prefs-model"></select>
+                <input
+                  id="prefs-model-custom"
+                  class="hidden"
+                  type="text"
+                  list="prefs-model-options"
+                  placeholder="model id, e.g. claudeopus5"
+                  autocomplete="off"
+                />
+                <datalist id="prefs-model-options"></datalist>
                 <button
                   id="prefs-model-refresh"
                   class="plan-btn hidden"
@@ -770,6 +779,15 @@
             <div class="prefs-row">
               <label for="welcome-model">Model</label>
               <select id="welcome-model"></select>
+              <input
+                id="welcome-model-custom"
+                class="hidden"
+                type="text"
+                list="welcome-model-options"
+                placeholder="model id, e.g. claudeopus5"
+                autocomplete="off"
+              />
+              <datalist id="welcome-model-options"></datalist>
             </div>
             <div class="prefs-row hidden" id="welcome-api-shape-row">
               <label for="welcome-api-shape">API shape</label>
