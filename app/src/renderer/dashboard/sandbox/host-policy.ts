@@ -46,7 +46,11 @@ function isInert(source: string): boolean {
  * frame is contained if **any one** of them pins it to inert sources.
  */
 export function checkHostFramePolicy(doc: Document = document): HostFramePolicy {
-  const metas = Array.from(doc.querySelectorAll("meta")).filter(
+  // `doc.head` only. A CSP meta in the body is ignored by the browser, so
+  // scanning the whole document let a policy that is not being enforced satisfy
+  // the precondition -- and the agent can get markup into the body. The check
+  // has to look where the browser looks.
+  const metas = Array.from(doc.head?.querySelectorAll("meta") ?? []).filter(
     (m) => (m.getAttribute("http-equiv") ?? "").toLowerCase() === "content-security-policy",
   );
 

@@ -90,3 +90,26 @@ describe("the policy the app actually ships", () => {
     ).toBe(true);
   });
 });
+
+describe("where the policy has to live", () => {
+  it("ignores a CSP meta in the body, which the browser ignores too", () => {
+    // Scanning the whole document meant a policy the browser is not enforcing
+    // could satisfy the precondition, and the agent can get markup into the
+    // body. The frame must stay refused.
+    const doc = document.implementation.createHTMLDocument("t");
+    const meta = doc.createElement("meta");
+    meta.setAttribute("http-equiv", "Content-Security-Policy");
+    meta.setAttribute("content", "frame-src blob:;");
+    doc.body.append(meta);
+    expect(checkHostFramePolicy(doc).contained).toBe(false);
+  });
+
+  it("honours the same policy in the head", () => {
+    const doc = document.implementation.createHTMLDocument("t");
+    const meta = doc.createElement("meta");
+    meta.setAttribute("http-equiv", "Content-Security-Policy");
+    meta.setAttribute("content", "frame-src blob:;");
+    doc.head.append(meta);
+    expect(checkHostFramePolicy(doc).contained).toBe(true);
+  });
+});
