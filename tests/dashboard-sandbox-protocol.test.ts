@@ -13,6 +13,7 @@ import {
   SANDBOX_MIN_HEIGHT,
 } from "../app/src/renderer/dashboard/sandbox/policy.js";
 import {
+  byteLength,
   collectSandboxData,
   resolveAllowedSources,
   SANDBOX_DATA_SOURCES,
@@ -87,7 +88,7 @@ describe("MessageBudget", () => {
     budget.allow();
     budget.allow();
     expect(budget.allow()).toBe(false);
-    expect(budget.exceeded).toBe(true);
+    expect(budget.allow()).toBe(false);
   });
 
   it("forgives once the second is over", () => {
@@ -98,7 +99,7 @@ describe("MessageBudget", () => {
     expect(budget.allow()).toBe(false);
     now = 1001;
     expect(budget.allow()).toBe(true);
-    expect(budget.exceeded).toBe(false);
+    expect(budget.allow()).toBe(true);
   });
 });
 
@@ -236,12 +237,89 @@ describe("collectSandboxData", () => {
   });
 });
 
+describe("the file tree budgets", () => {
+  /** A tree `depth` deep with `fan` children at every level. */
+  function tree(depth: number, fan: number, prefix = "n"): unknown {
+    const node: Record<string, unknown> = {
+      name: prefix,
+      relPath: prefix,
+      type: depth > 0 ? "directory" : "file",
+      size: 10,
+    };
+    if (depth > 0) {
+      node.children = Array.from({ length: fan }, (_, i) => tree(depth - 1, fan, `${prefix}-${i}`));
+    }
+    return node;
+  }
+
+  /** A single deep chain, built iteratively -- 5000 frames of recursion would
+   *  overflow the test helper long before it reached the code under test. */
+  function chain(depth: number): unknown {
+    let node: Record<string, unknown> = { name: "leaf", relPath: "leaf", type: "file" };
+    for (let i = 0; i < depth; i++) {
+      node = { name: `d${i}`, relPath: `d${i}`, type: "directory", children: [node] };
+    }
+    return node;
+  }
+
+  function filesPayload(root: unknown): Record<string, unknown> {
+    const fake = {
+      files: source({ root, available: true, updatedAt: 1 }),
+    } as unknown as DashboardSources["sources"];
+    return collectSandboxData(fake, ["files"]).sources.files as Record<string, unknown>;
+  }
+
+  it("cuts the tree off at a fixed depth", () => {
+    const out = filesPayload(tree(12, 1));
+    let node = out.root as { children?: Array<Record<string, unknown>> } | null;
+    let depth = 0;
+    while (node?.children && node.children.length > 0) {
+      depth += 1;
+      node = node.children[0] as { children?: Array<Record<string, unknown>> };
+    }
+    // MAX_FILE_DEPTH is 6, so six levels of children below the root.
+    expect(depth).toBe(6);
+  });
+
+  it("stops at a fixed number of nodes however wide the tree is", () => {
+    const out = filesPayload(tree(3, 40));
+    const count = (node: unknown): number => {
+      if (!node || typeof node !== "object") return 0;
+      const n = node as { children?: unknown[] };
+      return 1 + (n.children ?? []).reduce<number>((sum, c) => sum + count(c), 0);
+    };
+    expect(count(out.root)).toBeLessThanOrEqual(500);
+  });
+
+  it("does not blow the stack on a deep tree, which is the point of the cap", () => {
+    expect(() => filesPayload(chain(50_000))).not.toThrow();
+  });
+
+  it("keeps only the fields a view could draw with", () => {
+    const out = filesPayload({
+      name: "n",
+      relPath: "n",
+      type: "file",
+      size: 3,
+      secret: "should not travel",
+    });
+    expect(JSON.stringify(out)).not.toContain("should not travel");
+  });
+});
+
 describe("buildDataMessage", () => {
   it("carries the tag the frame filters on", () => {
     const msg = buildDataMessage({ sources: { plan: null }, dropped: ["files"] });
     expect(msg.tag).toBe(SANDBOX_MESSAGE_TAG);
     expect(msg.type).toBe("data");
     expect(msg.dropped).toEqual(["files"]);
+  });
+
+  it("measures the cap in bytes, not in UTF-16 code units", () => {
+    // A notebook of three-byte characters is three times its `.length`, and
+    // the cap is a byte cap.
+    expect(byteLength("\u4e2d".repeat(1000))).toBe(3000);
+    expect(byteLength("abc")).toBe(3);
   });
 
   it("is structured-cloneable, which is what postMessage will do to it", () => {

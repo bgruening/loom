@@ -8,8 +8,9 @@
  *
  * A second `<meta>` CSP inside the content cannot help an attacker: policies
  * compose by intersection, so an additional one can only narrow what is
- * already allowed. That is a claim about the browser rather than about this
- * code, so it is checked in the browser too (see the threat-model note).
+ * already allowed. That is a claim about the browser and not about this code,
+ * so the tests below pin only what this file controls -- that ours is first
+ * and intact.
  */
 
 import { SANDBOX_FRAME_CSP } from "./policy.js";
@@ -110,7 +111,11 @@ export function buildSandboxDocument(opts: SandboxDocumentOptions): string {
   assertNoCloseTag(style, "style");
   assertNoCloseTag(SANDBOX_BRIDGE_SOURCE, "script");
 
-  const title = escapeText(opts.title?.slice(0, 200) ?? "Custom view");
+  // The config this comes from is whatever was in the layout file, so `title`
+  // can be a number, an object, anything. A view should not become an error
+  // card over a typo in a field we only use for the document title.
+  const rawTitle = typeof opts.title === "string" ? opts.title : "";
+  const title = escapeText(rawTitle.slice(0, 200) || "Custom view");
 
   // Order is the point of this function. Policy, then charset, then our own
   // style and bridge, then -- last, and only last -- the agent's markup.

@@ -94,9 +94,4 @@ export class MessageBudget {
     this.count += 1;
     return this.count <= this.limit;
   }
-
-  /** True once the budget has been exceeded in the current window. */
-  get exceeded(): boolean {
-    return this.count > this.limit;
-  }
 }

@@ -78,6 +78,13 @@ export function allowedDataSources(
   return allowed.map((name) => sources[name] as DataSource<Snapshot>);
 }
 
+/** Last path segment, for either separator, or null. */
+function basename(path: string | null): string | null {
+  if (!path) return null;
+  const parts = path.split(/[\\/]/);
+  return parts[parts.length - 1] || null;
+}
+
 function tail(text: string, max: number): string {
   if (typeof text !== "string") return "";
   return text.length <= max ? text : text.slice(text.length - max);
@@ -123,7 +130,11 @@ function snapshotFor(name: SandboxDataSourceName, sources: DashboardDataSources)
       const s = sources.notebook.get();
       return {
         markdown: tail(s.markdown, MAX_NOTEBOOK_CHARS),
-        path: s.path,
+        // The file name, not the path it sits at. `session.cwd` is withheld
+        // below for saying something about the machine rather than about the
+        // analysis, and an absolute notebook path is the same cwd plus a
+        // filename -- sending it would have made that omission pointless.
+        name: basename(s.path),
         updatedAt: s.updatedAt,
       };
     }
@@ -221,9 +232,23 @@ function snapshotFor(name: SandboxDataSourceName, sources: DashboardDataSources)
   }
 }
 
+/**
+ * UTF-8 bytes, not UTF-16 code units. `String.length` would let a notebook of
+ * CJK or emoji through at roughly three times the cap it is being measured
+ * against, and the HTML cap next door is already measured in real bytes.
+ */
+export function byteLength(text: string): number {
+  try {
+    return new TextEncoder().encode(text).length;
+  } catch {
+    return text.length;
+  }
+}
+
 function sizeOf(value: unknown): number {
   try {
-    return JSON.stringify(value)?.length ?? 0;
+    const json = JSON.stringify(value);
+    return json === undefined ? 0 : byteLength(json);
   } catch {
     return Number.POSITIVE_INFINITY;
   }

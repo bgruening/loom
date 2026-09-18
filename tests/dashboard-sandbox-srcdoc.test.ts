@@ -32,10 +32,12 @@ describe("sandbox policy", () => {
   });
 
   it("grants allow-scripts and nothing else", () => {
+    // The equality is the test. Looping over SANDBOX_FORBIDDEN_TOKENS after it
+    // cannot fail for any value that gets past this line, so it is not here;
+    // the list is documentation of intent, asserted against the DOM attribute
+    // the widget actually sets in the widget's own test.
     expect(SANDBOX_TOKENS.split(/\s+/).filter(Boolean)).toEqual(["allow-scripts"]);
-    for (const token of SANDBOX_FORBIDDEN_TOKENS) {
-      expect(SANDBOX_TOKENS).not.toContain(token);
-    }
+    expect(SANDBOX_FORBIDDEN_TOKENS).toContain("allow-same-origin");
   });
 });
 
