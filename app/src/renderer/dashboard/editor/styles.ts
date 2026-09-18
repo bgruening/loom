@@ -102,8 +102,10 @@ export const EDITOR_STYLES = `
   color: var(--text-bright);
 }
 
+/* Played down because it replaces everything, but still obviously a button:
+   with a transparent border at rest it read as a stray label. */
 .dash-editor-btn-quiet {
-  border-color: transparent;
+  border-color: var(--border);
   background: transparent;
   color: var(--dash-text-meta);
 }
