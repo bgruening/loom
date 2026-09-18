@@ -21,6 +21,7 @@
  */
 
 import { ipcMain } from "electron";
+import { randomBytes } from "node:crypto";
 import * as fsp from "node:fs/promises";
 import { createIdempotentIpc } from "./ipc-registry.js";
 import { resolveWithin } from "./files-handler.js";
@@ -104,9 +105,13 @@ export function registerDashboardIpc(getCwd: () => string): void {
 
       // Temp file in the same directory, then rename: rename is atomic within a
       // filesystem, so a concurrent reader sees the old file or the new one and
-      // never a truncated one.
-      const tmp = `${abs}.${process.pid}.${Date.now()}.tmp`;
-      await fsp.writeFile(tmp, raw, "utf8");
+      // never a truncated one. The scratch name is random and the write is
+      // `wx` (O_CREAT | O_EXCL) for the same reason the handler lstats the real
+      // filename: the agent can write in this directory, and a predictable
+      // scratch name is a second place to plant a symlink that a following
+      // write would go through, after the guard on the real name has passed.
+      const tmp = `${abs}.tmp.${randomBytes(8).toString("hex")}`;
+      await fsp.writeFile(tmp, raw, { encoding: "utf8", flag: "wx" });
       try {
         await fsp.rename(tmp, abs);
       } catch (err) {

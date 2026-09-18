@@ -7,6 +7,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
 import { createServer } from "node:http";
 import {
@@ -621,8 +622,12 @@ wss.on("connection", (socket) => {
         }
 
         // Temp file plus rename, so a reader never sees a half-written document.
-        const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-        writeFileSync(tmp, raw);
+        // Random name and `wx` (O_CREAT | O_EXCL) for the same reason the real
+        // filename is lstat'd above: a guessable scratch name in a directory
+        // the agent can write is a second place to plant a symlink, and this
+        // write would follow it after the guard on the real name has passed.
+        const tmp = `${file}.tmp.${randomBytes(8).toString("hex")}`;
+        writeFileSync(tmp, raw, { flag: "wx" });
         try {
           renameSync(tmp, file);
         } catch (err) {
