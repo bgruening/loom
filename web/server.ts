@@ -25,6 +25,7 @@ import { isForwardableUiResponse } from "./rpc-guard.js";
 import { isCustomProvider } from "../shared/custom-provider.js";
 import { hasProviderKey, llmKeyEnvVar } from "./llm-credentials.js";
 import { resolveShutdownGraceMs } from "./shutdown-grace.js";
+import { DASHBOARD_FILENAME, DASHBOARD_MAX_BYTES } from "../shared/dashboard-contract.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // In dev this file runs from web/; the container bundles it to web/build/ and
@@ -517,6 +518,40 @@ wss.on("connection", (socket) => {
     }
     if (channel === "agent:get-cwd") {
       respond(id, cwd);
+      return;
+    }
+    // Dashboard layout: one fixed filename in the session cwd, alongside
+    // notebook.md. Allowed in remote mode -- it is pane layout, not config, and
+    // the renderer is the only thing that reads it. No path argument, so there
+    // is nothing to traverse with.
+    if (channel === "dashboard:load") {
+      const file = join(cwd, DASHBOARD_FILENAME);
+      try {
+        respond(id, { ok: true, raw: existsSync(file) ? readFileSync(file, "utf-8") : null });
+      } catch (err) {
+        respond(id, { ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+      return;
+    }
+    if (channel === "dashboard:save") {
+      const raw = args[0];
+      if (typeof raw !== "string") {
+        respond(id, { ok: false, error: "expected dashboard JSON text" });
+        return;
+      }
+      if (Buffer.byteLength(raw, "utf8") > DASHBOARD_MAX_BYTES) {
+        respond(id, {
+          ok: false,
+          error: `dashboard layout is larger than ${DASHBOARD_MAX_BYTES} bytes`,
+        });
+        return;
+      }
+      try {
+        writeFileSync(join(cwd, DASHBOARD_FILENAME), raw);
+        respond(id, { ok: true });
+      } catch (err) {
+        respond(id, { ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
       return;
     }
     if (channel === "agent:set-cwd") {

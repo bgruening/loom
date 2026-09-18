@@ -10,7 +10,7 @@
  * so users see the final completed/failed state).
  */
 
-interface Invocation {
+export interface Invocation {
   invocationId: string;
   galaxyServerUrl: string;
   notebookAnchor: string;

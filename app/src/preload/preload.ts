@@ -71,6 +71,13 @@ export interface OrbitAPI {
     | { ok: false; error: string; size?: number }
   >;
   writeFile(relPath: string, content: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  /**
+   * Per-analysis dashboard layout, read and written as JSON text so that
+   * shared/dashboard-contract is the only thing that validates it. `raw: null`
+   * means no layout has been saved for this workspace yet.
+   */
+  loadDashboard(): Promise<{ ok: true; raw: string | null } | { ok: false; error: string }>;
+  saveDashboard(raw: string): Promise<{ ok: true } | { ok: false; error: string }>;
   // changedPaths is the batch of changed cwd-relative paths, or null when the
   // watcher couldn't name what changed (#313).
   onFilesChanged(callback: (changedPaths: string[] | null) => void): () => void;
@@ -194,6 +201,8 @@ const api: OrbitAPI = {
   listFiles: (opts) => ipcRenderer.invoke("files:list", opts),
   readFile: (relPath, opts) => ipcRenderer.invoke("files:read", relPath, opts),
   writeFile: (relPath, content) => ipcRenderer.invoke("files:write", relPath, content),
+  loadDashboard: () => ipcRenderer.invoke("dashboard:load"),
+  saveDashboard: (raw) => ipcRenderer.invoke("dashboard:save", raw),
   onFilesChanged: (callback) => {
     const handler = (_e: unknown, changedPaths: string[] | null) => callback(changedPaths ?? null);
     ipcRenderer.on("files:changed", handler);

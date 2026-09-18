@@ -1,0 +1,326 @@
+/**
+ * The six read-only data sources a widget sees.
+ *
+ * Two of them are pulled from the shell (`activity`, `files`) and are marked
+ * unavailable where the shell has no file surface -- the web shim stubs
+ * `readFile` and does not implement `listFiles` at all. The other four are
+ * pushed by the renderer, and two of those (`invocations`, `plan`) are derived
+ * from the notebook markdown rather than re-read off disk, which is what gets
+ * the web shell the same jobs and plan views the desktop has.
+ */
+
+import { parseInvocationBlocks } from "../galaxy-invocations.js";
+import type { FileNode } from "../../preload/preload.js";
+import type {
+  ActivityEvent,
+  ActivitySnapshot,
+  DashboardDataSources,
+  DataSource,
+  FilesSnapshot,
+  InvocationSnapshot,
+  NotebookSnapshot,
+  PlanSection,
+  PlanSnapshot,
+  PlanStep,
+  PlanStepStatus,
+  SessionSnapshot,
+  Unsubscribe,
+} from "./widget-api.js";
+
+/** How many activity events a widget is handed. The tail read caps at 200 lines. */
+const ACTIVITY_LIMIT = 200;
+
+class MutableSource<T> implements DataSource<T> {
+  private listeners = new Set<(value: T) => void>();
+
+  constructor(private value: T) {}
+
+  get(): T {
+    return this.value;
+  }
+
+  set(next: T): void {
+    this.value = next;
+    // Copy first: a listener that unsubscribes itself must not skip the next one.
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(next);
+      } catch (err) {
+        console.error("[dashboard] data source listener threw:", err);
+      }
+    }
+  }
+
+  subscribe(listener: (value: T) => void): Unsubscribe {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+}
+
+// ── Plan parsing ─────────────────────────────────────────────────────────────
+
+const PLAN_HEADING = /^##\s+(Plan\b.*)$/i;
+const ANY_H2 = /^##\s+/;
+const ROUTING_TAG = /\[([a-z]+)\]\s*$/i;
+const STEP_LINE = /^ {0,1}-\s*\[([ xX!])\]\s*(.*)$/;
+const STEP_SUBBULLET = /^\s{2,}-\s*Routing:\s*(.+?)\s*$/i;
+const STEP_NUMBER = /^(\d+)[.)]\s*/;
+const STEP_ANCHOR = /\{#([A-Za-z0-9_-]+)\}/;
+const STEP_BOLD = /\*\*(.+?)\*\*/;
+// \u2014 is the em-dash the notebook schema uses between a step name and its detail.
+const TITLE_SEPARATOR = /\s+(?:\u2014|--)\s+/;
+const LEADING_SEPARATOR = /^\s*(?:\u2014|--|-|:)\s*/;
+
+function slugify(text: string): string {
+  return (
+    text
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "plan"
+  );
+}
+
+function statusFor(marker: string): PlanStepStatus {
+  if (marker === "!") return "failed";
+  if (marker.toLowerCase() === "x") return "done";
+  return "pending";
+}
+
+function splitOnDash(body: string): [string, string] {
+  const parts = body.split(TITLE_SEPARATOR);
+  return [parts[0] ?? "", parts.slice(1).join(" -- ")];
+}
+
+function parseStep(rest: string, fallbackNumber: number): PlanStep {
+  let body = rest;
+  let number = fallbackNumber;
+
+  const numbered = body.match(STEP_NUMBER);
+  if (numbered) {
+    number = Number(numbered[1]);
+    body = body.slice(numbered[0].length);
+  }
+
+  let anchor: string | null = null;
+  const anchored = body.match(STEP_ANCHOR);
+  if (anchored) {
+    anchor = anchored[1];
+    body = body.replace(STEP_ANCHOR, " ");
+  }
+
+  // The schema writes `**Name** -- detail`; tolerate an em-dash or a hyphen
+  // because the notebook is hand-edited as often as it is generated.
+  const bold = body.match(STEP_BOLD);
+  const parts = bold
+    ? [bold[1], body.slice(body.indexOf(bold[0]) + bold[0].length)]
+    : splitOnDash(body);
+
+  return {
+    anchor,
+    number,
+    title: parts[0].trim(),
+    status: "pending",
+    routing: null,
+    detail: parts[1].replace(LEADING_SEPARATOR, "").trim(),
+  };
+}
+
+/**
+ * Pull `## Plan X: ...` sections and their checkbox steps out of the notebook.
+ * Shape per docs/agent/notebook-schema.md. Tolerant by design: a hand-edited
+ * notebook that drops the anchors or the numbers still yields usable steps.
+ */
+export function parsePlanSections(markdown: string): PlanSection[] {
+  const plans: PlanSection[] = [];
+  let current: PlanSection | null = null;
+
+  for (const line of markdown.split("\n")) {
+    const heading = line.match(PLAN_HEADING);
+    if (heading) {
+      let title = heading[1].trim();
+      let routing: string | null = null;
+      const tag = title.match(ROUTING_TAG);
+      if (tag) {
+        routing = tag[1].toLowerCase();
+        title = title.replace(ROUTING_TAG, "").trim();
+      }
+      const label = title.split(":")[0] ?? title;
+      current = { id: slugify(label), title, routing, steps: [] };
+      plans.push(current);
+      continue;
+    }
+    if (ANY_H2.test(line)) {
+      current = null;
+      continue;
+    }
+    if (!current) continue;
+
+    const step = line.match(STEP_LINE);
+    if (step) {
+      const parsed = parseStep(step[2], current.steps.length + 1);
+      parsed.status = statusFor(step[1]);
+      current.steps.push(parsed);
+      continue;
+    }
+
+    const routing = line.match(STEP_SUBBULLET);
+    if (routing && current.steps.length > 0) {
+      current.steps[current.steps.length - 1].routing = routing[1];
+    }
+  }
+
+  return plans;
+}
+
+// ── Activity parsing ─────────────────────────────────────────────────────────
+
+/** Parse an activity.jsonl tail. Unparsable or non-object lines are skipped. */
+export function parseActivityLines(text: string): ActivityEvent[] {
+  const events: ActivityEvent[] = [];
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const record = parsed as Record<string, unknown>;
+    events.push({
+      timestamp: typeof record.timestamp === "string" ? record.timestamp : "",
+      kind: typeof record.kind === "string" ? record.kind : "event",
+      source: typeof record.source === "string" ? record.source : "",
+      payload:
+        record.payload !== null && typeof record.payload === "object"
+          ? (record.payload as Record<string, unknown>)
+          : {},
+    });
+  }
+  return events.slice(-ACTIVITY_LIMIT);
+}
+
+// ── The source set ───────────────────────────────────────────────────────────
+
+/** The slice of `window.orbit` the pulled sources need. Both members optional. */
+export interface DashboardShellApi {
+  readFile?: (
+    relPath: string,
+    opts?: { tail?: boolean },
+  ) => Promise<{ ok: true; bytes: Uint8Array } | { ok: false; error?: string }>;
+  listFiles?: (opts?: {
+    includeHidden?: boolean;
+  }) => Promise<{ ok: true; root: FileNode } | { ok: false; error?: string }>;
+}
+
+function emptySession(): SessionSnapshot {
+  return {
+    status: "unknown",
+    streaming: false,
+    cwd: "",
+    model: null,
+    costUsd: null,
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    updatedAt: Date.now(),
+  };
+}
+
+export class DashboardSources {
+  private notebook = new MutableSource<NotebookSnapshot>({
+    markdown: "",
+    path: null,
+    updatedAt: 0,
+  });
+  private invocations = new MutableSource<InvocationSnapshot>({
+    invocations: [],
+    updatedAt: 0,
+  });
+  private plan = new MutableSource<PlanSnapshot>({ plans: [], updatedAt: 0 });
+  private activity = new MutableSource<ActivitySnapshot>({
+    events: [],
+    available: false,
+    updatedAt: 0,
+  });
+  private files = new MutableSource<FilesSnapshot>({
+    root: null,
+    available: false,
+    updatedAt: 0,
+  });
+  private session = new MutableSource<SessionSnapshot>(emptySession());
+
+  readonly sources: DashboardDataSources;
+
+  constructor(private api: DashboardShellApi = {}) {
+    this.sources = {
+      notebook: this.notebook,
+      invocations: this.invocations,
+      plan: this.plan,
+      activity: this.activity,
+      files: this.files,
+      session: this.session,
+    };
+  }
+
+  /**
+   * The notebook markdown the brain pushed. Invocations and plan steps are
+   * re-derived here, so both shells get them without a file read.
+   */
+  setNotebook(markdown: string, path: string | null = null): void {
+    const updatedAt = Date.now();
+    this.notebook.set({ markdown, path, updatedAt });
+    this.invocations.set({ invocations: parseInvocationBlocks(markdown), updatedAt });
+    this.plan.set({ plans: parsePlanSections(markdown), updatedAt });
+  }
+
+  setSession(patch: Partial<Omit<SessionSnapshot, "updatedAt">>): void {
+    this.session.set({ ...this.session.get(), ...patch, updatedAt: Date.now() });
+  }
+
+  /** Re-read the activity log tail. No-op where the shell has no file read. */
+  async refreshActivity(): Promise<void> {
+    if (typeof this.api.readFile !== "function") return;
+    let events: ActivityEvent[] = [];
+    let available = false;
+    try {
+      const res = await this.api.readFile("activity.jsonl", { tail: true });
+      if (res.ok) {
+        events = parseActivityLines(new TextDecoder("utf-8").decode(res.bytes));
+        available = true;
+      }
+    } catch {
+      /* no activity log yet, or no file surface at all */
+    }
+    this.activity.set({ events, available, updatedAt: Date.now() });
+  }
+
+  /** Re-read the workspace file tree. No-op where the shell has no listing. */
+  async refreshFiles(): Promise<void> {
+    if (typeof this.api.listFiles !== "function") return;
+    let root: FileNode | null = null;
+    let available = false;
+    try {
+      const res = await this.api.listFiles();
+      if (res.ok) {
+        root = res.root;
+        available = true;
+      }
+    } catch {
+      /* no file surface */
+    }
+    this.files.set({ root, available, updatedAt: Date.now() });
+  }
+
+  /** Called on a cwd switch or /new so a new analysis does not inherit the old one's data. */
+  reset(): void {
+    const updatedAt = Date.now();
+    this.notebook.set({ markdown: "", path: null, updatedAt });
+    this.invocations.set({ invocations: [], updatedAt });
+    this.plan.set({ plans: [], updatedAt });
+    this.activity.set({ events: [], available: false, updatedAt });
+    this.files.set({ root: null, available: false, updatedAt });
+    this.session.set(emptySession());
+  }
+}

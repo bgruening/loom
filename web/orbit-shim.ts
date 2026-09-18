@@ -228,6 +228,11 @@ async function fetchMode(): Promise<"remote" | "desktop"> {
   submitFeedback: () =>
     Promise.resolve({ ok: false, error: "feedback is unavailable in remote mode" }),
   readFile: () => Promise.resolve({ ok: false, error: "file read is unavailable in remote mode" }),
+  // Dashboard layout IS available here: the server handles these two channels
+  // against the same session cwd the brain writes notebook.md into, so a layout
+  // persists in the web shell exactly as it does on the desktop.
+  loadDashboard: () => invoke("dashboard:load"),
+  saveDashboard: (raw: string) => invoke("dashboard:save", raw),
   checkVersion: () => Promise.resolve(null),
   openReleasePage: () => Promise.resolve({ opened: false }),
   restartToUpdate: () => Promise.resolve({ restarting: false }),
