@@ -589,7 +589,7 @@ describe("results widget", () => {
     resultsWidget.mount(h.el, h.ctx);
     await h.setFiles(tree([file("heatmap.svg", 2048)]));
     const img = h.el.querySelector("img");
-    expect(img?.getAttribute("src")).toBe("orbit-artifact://cwd/heatmap.svg?v=2048");
+    expect(img?.getAttribute("src")).toBe("orbit-artifact://cwd/heatmap.svg?v=2048.0");
     // An svg is a script carrier; nothing here may become markup.
     expect(h.el.querySelector("svg")).toBeNull();
     expect(h.el.querySelector(".dash-results-name")?.textContent).toBe("heatmap.svg");
@@ -746,8 +746,71 @@ describe("results widget", () => {
     await h.setFiles(tree([file("plot.png", 10)]));
     await h.setFiles(tree([file("plot.png", 99)]));
     expect(h.el.querySelector("img")?.getAttribute("src")).toBe(
-      "orbit-artifact://cwd/plot.png?v=99",
+      "orbit-artifact://cwd/plot.png?v=99.0",
     );
+  });
+
+  it("offers a plot back to the disk when the workspace has moved under it", async () => {
+    // A file listing carries no mtime, so a plot regenerated at the same
+    // dimensions from new data is byte-for-byte the same size and both the
+    // redraw signature and the cache-buster stay put. Nothing in the widget can
+    // see the rewrite, so the image is re-fetched on a slow tick instead.
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      resultsWidget.mount(h.el, h.ctx);
+      await h.setFiles(tree([file("plot.png", 4096)]));
+      const img = h.el.querySelector("img");
+      const before = img?.getAttribute("src");
+      expect(before).toBe("orbit-artifact://cwd/plot.png?v=4096.0");
+
+      // The same listing again: nothing has moved, so nothing is re-fetched.
+      vi.advanceTimersByTime(60_000);
+      expect(h.el.querySelector("img")?.getAttribute("src")).toBe(before);
+
+      // Now a listing arrives that says exactly the same thing -- same name,
+      // same byte count, which is the whole point -- so the panel does not
+      // redraw, and the tick offers the file back to the disk instead.
+      await h.setFiles(tree([file("plot.png", 4096)]));
+      vi.advanceTimersByTime(60_000);
+      const after = h.el.querySelector("img")?.getAttribute("src");
+      expect(after).not.toBe(before);
+      expect(after).toContain("orbit-artifact://cwd/plot.png?v=");
+      // In place, so the thumbnail is not torn down and rebuilt under a reader.
+      expect(h.el.querySelector("img")).toBe(img);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops re-checking images once the panel is gone", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      const dispose = resultsWidget.mount(h.el, h.ctx);
+      await h.setFiles(tree([file("plot.png", 4096)]));
+      const img = h.el.querySelector("img") as HTMLImageElement;
+      h.cleanups.forEach((fn) => fn());
+      dispose?.();
+      vi.advanceTimersByTime(1000);
+      await h.setFiles(tree([file("plot.png", 4096)]));
+      const src = img.getAttribute("src");
+      vi.advanceTimersByTime(120_000);
+      expect(img.getAttribute("src")).toBe(src);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("draws a file it could not measure as a row rather than an uncapped image", async () => {
+    // files-handler leaves the size undefined whenever stat throws -- a broken
+    // symlink, or a file racing the write creating it. That is the one kind of
+    // file we know least about, so it must not be the one that skips the cap.
+    const h = harness();
+    resultsWidget.mount(h.el, h.ctx);
+    await h.setFiles(tree([{ name: "plot.png", relPath: "plot.png", type: "file" }]));
+    expect(h.el.querySelector("img")).toBeNull();
+    expect(h.el.querySelector(".dash-results-name")?.textContent).toBe("plot.png");
   });
 
   it("opens the file when its name is clicked", async () => {

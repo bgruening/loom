@@ -80,6 +80,23 @@ const MAX_LIMIT = 60;
  */
 const LISTING_GRACE_MS = 1200;
 
+/**
+ * How often an image already on screen is offered back to the disk.
+ *
+ * A file listing carries a name and a size and no mtime, so a plot regenerated
+ * from new data at the same dimensions -- which lands on the same byte count
+ * far more often than it sounds like it would -- is indistinguishable from the
+ * old one. Both the redraw signature and the cache-buster are built from that
+ * size, so the panel kept showing the previous figure for the rest of the
+ * session. Nothing in the widget can detect the rewrite, so the images are
+ * re-fetched on a slow tick instead, and only when the file listing has moved
+ * since they were drawn: an analysis nobody is touching costs nothing.
+ *
+ * The real fix is an mtime on `FileNode`; the main process already stats every
+ * file to fill in the size.
+ */
+const IMAGE_RECHECK_MS = 30_000;
+
 const GALLERY_TABLE_ROWS = 4;
 const GALLERY_TABLE_COLS = 4;
 const PINNED_TABLE_ROWS = 10;
@@ -389,12 +406,12 @@ export function formatSize(bytes: number | null): string {
  * and passing through unrewritten -- the rewriter documents that prefix as the
  * way to force a relative reading. Returns "" for anything it cannot jail.
  */
-export function artifactUrl(relPath: string, cacheKey?: number | null): string {
+export function artifactUrl(relPath: string, cacheKey?: string | number | null): string {
   const base = rewritePreviewImageHref("", `./${relPath}`);
   if (!base) return "";
   // The protocol handler reads only the path, so a query is a free cache-buster
   // for a plot that was overwritten in place.
-  return cacheKey ? `${base}?v=${cacheKey}` : base;
+  return cacheKey ? `${base}?v=${encodeURIComponent(String(cacheKey))}` : base;
 }
 
 // ── Reading a head over the artifact scheme ──────────────────────────────────
@@ -514,7 +531,16 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
     let graceExpired = false;
     let wasAvailable = false;
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    // Bumped by the re-check tick to build a URL the browser has not cached.
+    let imageGeneration = 0;
+    // The listing these images were drawn from. Nothing newer means nothing can
+    // have been rewritten under them.
+    let imagesDrawnFrom = 0;
+    const drawnImages = new Map<HTMLImageElement, string>();
     ctx.onDispose(() => controller.abort());
+
+    const imageUrl = (file: ResultFile): string =>
+      artifactUrl(file.relPath, `${file.size ?? "?"}.${imageGeneration}`);
 
     const config = readResultsConfig(ctx.config);
     const pinned = config.mode === "pinned";
@@ -610,8 +636,13 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
 
     const renderEntry = (file: ResultFile, token: AbortSignal): HTMLElement => {
       const entry = node("div", "dash-results-entry");
-      if (file.kind === "image" && (file.size === null || file.size <= IMAGE_MAX_BYTES)) {
-        const url = artifactUrl(file.relPath, file.size);
+      // A null size is a stat that threw -- a broken symlink, or a file racing
+      // the write that is creating it -- not a small file. Drawing it anyway
+      // put an uncapped <img> on the page for the one kind of file we know
+      // least about, so it fails closed to a plain row and comes back as a
+      // thumbnail on the next listing that can measure it.
+      if (file.kind === "image" && file.size !== null && file.size <= IMAGE_MAX_BYTES) {
+        const url = imageUrl(file);
         if (url) {
           // Always an <img>. An SVG is active content and inlining one would
           // run whatever a tool wrote into it.
@@ -619,7 +650,11 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
           img.src = url;
           img.alt = file.name;
           img.loading = "lazy";
-          img.addEventListener("error", () => img.remove());
+          img.addEventListener("error", () => {
+            drawnImages.delete(img);
+            img.remove();
+          });
+          drawnImages.set(img, file.relPath);
           entry.append(img);
         }
       } else if (file.kind === "table") {
@@ -665,6 +700,8 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
       controller = new AbortController();
       const token = controller.signal;
       list.textContent = "";
+      drawnImages.clear();
+      imagesDrawnFrom = snapshot.updatedAt;
 
       showAll.hidden = !pinned;
       count.textContent =
@@ -718,6 +755,27 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
     }
     ctx.onDispose(() => clearTimeout(graceTimer));
     armGrace();
+
+    // Through onDispose rather than the returned dispose, and with the throw
+    // handed to ctx.fail by hand: a widget that throws never gets to return a
+    // dispose, and a timer callback that throws otherwise disappears into the
+    // event loop leaving a panel that has quietly stopped updating.
+    const recheck = setInterval(() => {
+      try {
+        if (drawnImages.size === 0) return;
+        const snapshot = ctx.sources.files.get();
+        if (snapshot.updatedAt <= imagesDrawnFrom) return;
+        imagesDrawnFrom = snapshot.updatedAt;
+        imageGeneration++;
+        for (const [img, relPath] of drawnImages) {
+          const url = artifactUrl(relPath, `r${imageGeneration}`);
+          if (url) img.src = url;
+        }
+      } catch (err) {
+        ctx.fail(err);
+      }
+    }, IMAGE_RECHECK_MS);
+    ctx.onDispose(() => clearInterval(recheck));
 
     ctx.subscribe(ctx.sources.files, draw);
 
