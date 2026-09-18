@@ -520,10 +520,6 @@ wss.on("connection", (socket) => {
       respond(id, cwd);
       return;
     }
-    // Dashboard layout: one fixed filename in the session cwd, alongside
-    // notebook.md. Allowed in remote mode -- it is pane layout, not config, and
-    // the renderer is the only thing that reads it. No path argument, so there
-    // is nothing to traverse with.
     // notebook.md is in the session cwd and the server already owns that path.
     // Without this the web shell shows an empty Notebook tab -- and an empty
     // dashboard -- until the brain happens to push a widget mid-turn, even
@@ -538,6 +534,10 @@ wss.on("connection", (socket) => {
       }
       return;
     }
+    // Dashboard layout: one fixed filename in the session cwd, alongside
+    // notebook.md. Allowed in remote mode -- it is pane layout, not config, and
+    // the renderer is the only thing that reads it. No path argument, so there
+    // is nothing to traverse with.
     if (channel === "dashboard:load") {
       const file = join(cwd, DASHBOARD_FILENAME);
       try {
