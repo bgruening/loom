@@ -48,12 +48,14 @@ const EMPTY = "No plan yet -- ask Loom to draft one.";
  * document may hold" was true of neither dimension: a session that opens
  * several analyses accumulates a set per panel id it has ever seen, and each
  * set accumulates a key per plan that has ever been expanded. Both are bounded
- * below.
+ * now -- by `PANEL_MEMORY_MAX` and `OPEN_KEYS_MAX` below.
  */
-export const PANEL_MEMORY_MAX = 40;
-export const OPEN_KEYS_MAX = 200;
-
 const openedByPanel = new Map<string, Set<string>>();
+
+/** Panel ids remembered at once, least recently mounted evicted first. */
+export const PANEL_MEMORY_MAX = 40;
+/** Expanded rows remembered for one panel. */
+export const OPEN_KEYS_MAX = 200;
 
 function openedFor(panelId: string): Set<string> {
   const existing = openedByPanel.get(panelId);
