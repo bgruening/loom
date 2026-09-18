@@ -641,16 +641,20 @@ wss.on("connection", (socket) => {
     // once, before the await, so a directory switch mid-read cannot redirect it.
     if (channel === "files:list") {
       const sessionCwd = cwd;
-      void listFilesForWeb(sessionCwd, { remote: IS_REMOTE_MODE }).then((result) =>
-        respond(id, result),
+      void listFilesForWeb(sessionCwd, { remote: IS_REMOTE_MODE }).then(
+        (result) => respond(id, result),
+        // Neither of these should reject, but a channel that answers nothing
+        // leaves the caller's promise pending for the life of the socket.
+        () => respond(id, { ok: false, error: "the files could not be listed" }),
       );
       return;
     }
     if (channel === "files:read") {
       const sessionCwd = cwd;
       const opts = (args[1] ?? undefined) as { tail?: boolean } | undefined;
-      void readFileForWeb(sessionCwd, args[0], opts, { remote: IS_REMOTE_MODE }).then((result) =>
-        respond(id, result),
+      void readFileForWeb(sessionCwd, args[0], opts, { remote: IS_REMOTE_MODE }).then(
+        (result) => respond(id, result),
+        () => respond(id, { ok: false, error: "the file could not be read" }),
       );
       return;
     }
