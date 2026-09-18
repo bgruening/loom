@@ -2,8 +2,9 @@
  * The six read-only data sources a widget sees.
  *
  * Two of them are pulled from the shell (`activity`, `files`) and are marked
- * unavailable where the shell has no file surface -- the web shim stubs
- * `readFile` and does not implement `listFiles` at all. The other four are
+ * unavailable where the shell has no file surface. Both shells have one now;
+ * remote mode deliberately does not, and the `typeof` guards below are what
+ * make that a quiet `available: false` rather than a crash. The other four are
  * pushed by the renderer, and two of those (`invocations`, `plan`) are derived
  * from the notebook markdown rather than re-read off disk, which is what gets
  * the web shell the same jobs and plan views the desktop has.

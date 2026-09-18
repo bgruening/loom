@@ -50,6 +50,11 @@ export interface DashboardPanel {
    * say who added a panel and why, and so the user can pin one against being
    * re-curated away, without a schema migration. The validator preserves these;
    * the host ignores them.
+   *
+   * **Absent reads as the user's.** The only panels that arrive with no
+   * provenance are hand-written ones, so anything deciding what an agent may
+   * touch has to treat an unlabelled panel as protected -- otherwise a
+   * hand-edited layout is the one case where curation quietly deletes work.
    */
   addedBy?: PanelOrigin;
   /** Short note on why this panel is here. Capped at 280 characters. */
