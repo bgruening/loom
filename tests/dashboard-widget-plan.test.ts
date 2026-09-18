@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { planWidget } from "../app/src/renderer/dashboard/widgets/plan.js";
+import { currentPlan, planWidget } from "../app/src/renderer/dashboard/widgets/plan.js";
 import { DashboardSources, parsePlanSections } from "../app/src/renderer/dashboard/data-sources.js";
 import type { DataSource, WidgetContext } from "../app/src/renderer/dashboard/widget-api.js";
 
@@ -491,6 +491,10 @@ describe("plan widget -- more than one plan", () => {
       `${ONE_PLAN_FINISHED}\n## Plan B: Tissue comparison [galaxy]\n\n- [ ] 1. **Normalise counts**\n`,
     );
     expect(h.el.querySelector(".dash-plan-title")?.textContent).toBe("Plan B: Tissue comparison");
+  });
+
+  it("has no answer for an empty list, and says so in the type", () => {
+    expect(currentPlan([])).toBeUndefined();
   });
 
   it("falls back to the last plan when none has been started", () => {

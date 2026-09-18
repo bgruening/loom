@@ -105,8 +105,11 @@ function countSteps(steps: PlanStep[]): PlanCounts {
  * being worked on. If none is -- everything finished, or nothing begun -- fall
  * back to the last one, which is right for both of those. The rest stay
  * reachable through "older".
+ *
+ * `undefined` for an empty list rather than a lie in the signature: the caller
+ * in this file has already returned by then, but this is exported.
  */
-export function currentPlan(plans: PlanSection[]): PlanSection {
+export function currentPlan(plans: PlanSection[]): PlanSection | undefined {
   for (let i = plans.length - 1; i >= 0; i--) {
     const counts = countSteps(plans[i].steps);
     const started = counts.done > 0 || counts.failed > 0;
@@ -380,6 +383,7 @@ export const planWidget: WidgetDefinition<PlanConfig> = {
       }
 
       const current = currentPlan(plans);
+      if (!current) return;
       const counts = countSteps(current.steps);
       const verdict = summarize(counts);
 
