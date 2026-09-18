@@ -102,8 +102,9 @@ function countSteps(steps: PlanStep[]): PlanCounts {
  * the wrong one is first.
  *
  * So: the last plan that has been started and still has a step to do. If none
- * has -- everything is over, or nothing has begun -- fall back to the last one,
- * which is right for both of those. The rest stay reachable through "older".
+ * has -- everything is over, or nothing has begun -- fall back to the last one
+ * that has any steps at all, which is right for both of those. The rest stay
+ * reachable through "older".
  *
  * "Still has a step to do" rather than "is not finished" on purpose. A plan
  * whose last unticked step failed has nothing pending and nothing more will
@@ -127,6 +128,19 @@ export function currentPlan(plans: PlanSection[]): PlanSection | undefined {
     const pending = counts.total - counts.done - counts.failed;
     if (started && pending > 0) return plans[i];
   }
+  // A heading with nothing under it is not a plan the panel can answer with.
+  // The agent writes the heading first and the steps a moment later, so the
+  // last section in the notebook is routinely empty while a real plan with
+  // real steps sits above it -- and answering with the empty one hides that
+  // plan completely, since "other plans" only appears once a second plan
+  // exists and the reader has asked for it. The lax heading match in the host
+  // parser widens this further: any `## Plan ...` line in ordinary prose
+  // arrives here as a stepless section.
+  for (let i = plans.length - 1; i >= 0; i--) {
+    if (plans[i].steps.length > 0) return plans[i];
+  }
+  // Nothing anywhere has a step: the last heading is as good an answer as
+  // there is, and "No steps written down yet" is the honest thing to say.
   return plans[plans.length - 1];
 }
 

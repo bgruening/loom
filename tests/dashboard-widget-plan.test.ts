@@ -519,6 +519,43 @@ describe("plan widget -- more than one plan", () => {
     expect(currentPlan(parsePlanSections(md))?.title).toBe("Plan A: Alpha");
   });
 
+  it("does not answer with a heading the agent has not written the steps under yet", () => {
+    // The streaming window the agent opens every time it drafts a plan: the
+    // heading is on disk and the steps are not. Answering with it hid the real
+    // plan completely -- "other plans" is off by default, so its two pending
+    // steps were nowhere on the dashboard.
+    const md =
+      "## Plan A: Alpha\n\n- [ ] 1. **Align the reads**\n- [ ] 2. **Call variants**\n\n## Plan B: Beta\n";
+    const plans = parsePlanSections(md);
+    expect(plans).toHaveLength(2);
+    expect(plans[1].steps).toHaveLength(0);
+    expect(currentPlan(plans)?.title).toBe("Plan A: Alpha");
+  });
+
+  it("ignores a stepless prose heading the host parser mistook for a plan", () => {
+    // PLAN_HEADING matches any `## Plan ...` line, so ordinary prose arrives
+    // here as a section with no steps.
+    const md =
+      "## Plan A: Alpha\n\n- [ ] 1. **Align the reads**\n\n## Plan of record\n\nSome prose.\n";
+    expect(currentPlan(parsePlanSections(md))?.title).toBe("Plan A: Alpha");
+  });
+
+  it("still answers with the last heading when no plan anywhere has a step", () => {
+    const md = "## Plan A: Alpha\n\n## Plan B: Beta\n";
+    expect(currentPlan(parsePlanSections(md))?.title).toBe("Plan B: Beta");
+  });
+
+  it("shows the real plan on screen rather than the empty heading under it", () => {
+    const h = harness();
+    planWidget.mount(h.el, h.ctx);
+    h.notebook(
+      "## Plan A: First [local]\n\n- [ ] 1. **Alpha**\n- [ ] 2. **Beta**\n\n## Plan B: Second\n",
+    );
+    expect(h.el.querySelector(".dash-plan-title")?.textContent).toBe("Plan A: First");
+    expect(has(h, "No steps written down yet")).toBe(false);
+    expect(has(h, "1. Alpha")).toBe(true);
+  });
+
   it("falls back to the last plan when none has been started", () => {
     const h = harness();
     planWidget.mount(h.el, h.ctx);
