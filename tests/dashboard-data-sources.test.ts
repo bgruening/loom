@@ -196,6 +196,63 @@ describe("parseJobBlocks", () => {
   });
 });
 
+describe("plan steps that are not steps", () => {
+  it("ignores example checkboxes inside a fenced code block", () => {
+    // The notebook schema tells the agent to show the step format by example,
+    // so a fenced block full of "- [ ] 1. **Example**" is what a well-behaved
+    // notebook looks like. Counting those moved the progress bar and put an
+    // invented step in the panel's NEXT box.
+    const md = [
+      "## Plan A: Real [galaxy]",
+      "",
+      "- [ ] 1. **Actual step** -- do the thing",
+      "",
+      "Here is how to write one:",
+      "",
+      "```markdown",
+      "- [ ] 1. **Example step** -- not real",
+      "- [x] 2. **Another example** -- also not real",
+      "```",
+      "",
+    ].join("\n");
+    const [plan] = parsePlanSections(md);
+    expect(plan.steps.map((s) => s.title)).toEqual(["Actual step"]);
+  });
+
+  it("handles a tilde fence too, and an unclosed one", () => {
+    const tilde = "## Plan A\n\n- [ ] 1. **Real**\n\n~~~\n- [ ] 2. **Fake**\n~~~\n";
+    expect(parsePlanSections(tilde)[0].steps.map((s) => s.title)).toEqual(["Real"]);
+    const unclosed = "## Plan A\n\n- [ ] 1. **Real**\n\n```\n- [ ] 2. **Fake**\n";
+    expect(parsePlanSections(unclosed)[0].steps.map((s) => s.title)).toEqual(["Real"]);
+  });
+
+  it("parses a step whose detail holds a long run of spaces, quickly", () => {
+    // The old separator pattern backtracked: `split` tried every position and
+    // the leading \s+ re-consumed the run each time, so this took 3.2 s at
+    // 80,000 spaces and 12.8 s at 160,000 -- on the renderer's synchronous
+    // path, with the window frozen.
+    const md = "## Plan A\n- [ ] task x" + " ".repeat(160_000) + "z\n";
+    const started = Date.now();
+    const [plan] = parsePlanSections(md);
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(plan.steps).toHaveLength(1);
+  });
+
+  it("still splits a step on its separator, and not inside a hyphenated word", () => {
+    const md = [
+      "## Plan A",
+      "- [ ] 1. **Align reads** -- bwa-mem2 against the well-known reference",
+      "- [ ] 2. **Count** \u2014 featureCounts",
+      "- [ ] 3. **No detail here**",
+    ].join("\n");
+    const steps = parsePlanSections(md)[0].steps;
+    expect(steps.map((s) => s.title)).toEqual(["Align reads", "Count", "No detail here"]);
+    expect(steps[0].detail).toBe("bwa-mem2 against the well-known reference");
+    expect(steps[1].detail).toBe("featureCounts");
+    expect(steps[2].detail).toBe("");
+  });
+});
+
 describe("Windows line endings", () => {
   // A notebook written on Windows, or round-tripped through a tool that
   // rewrites newlines, reaches these parsers with a trailing CR on every line.

@@ -83,8 +83,8 @@ const STEP_VERIFICATION = /^\s{2,}-\s*Verification:\s*(.+?)\s*$/i;
 const STEP_NUMBER = /^(\d+)[.)]\s*/;
 const STEP_ANCHOR = /\{#([A-Za-z0-9_-]+)\}/;
 const STEP_BOLD = /\*\*(.+?)\*\*/;
-// \u2014 is the em-dash the notebook schema uses between a step name and its detail.
-const TITLE_SEPARATOR = /\s+(?:\u2014|--)\s+/;
+const WHITESPACE = /\s/;
+const TRAILING_WS = /\s+$/;
 const LEADING_SEPARATOR = /^\s*(?:\u2014|--|-|:)\s*/;
 
 function slugify(text: string): string {
@@ -102,9 +102,33 @@ function statusFor(marker: string): PlanStepStatus {
   return "pending";
 }
 
+/**
+ * Split a step line into its name and its detail at the first ` -- ` (or the
+ * em-dash the schema uses).
+ *
+ * Scanned rather than matched with `/\s+(?:\u2014|--)\s+/`. That pattern
+ * backtracks: at every position the leading `\s+` can consume a long run of
+ * whitespace before failing to find the dash, and `split` tries every position,
+ * so a step whose detail holds a run of spaces was quadratic. Measured on the
+ * renderer's synchronous path: 80,000 spaces froze the window for 3.2 seconds
+ * and 160,000 for 12.8. An index scan is linear and answers the same question.
+ */
 function splitOnDash(body: string): [string, string] {
-  const parts = body.split(TITLE_SEPARATOR);
-  return [parts[0] ?? "", parts.slice(1).join(" -- ")];
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    const isEm = ch === "\u2014";
+    const isDoubleHyphen = ch === "-" && body[i + 1] === "-";
+    if (!isEm && !isDoubleHyphen) continue;
+    const end = i + (isEm ? 1 : 2);
+    // The schema puts whitespace on both sides; a hyphenated word must not
+    // split, and neither must a `---` rule.
+    if (i === 0 || !WHITESPACE.test(body[i - 1])) continue;
+    if (end >= body.length || !WHITESPACE.test(body[end])) continue;
+    // Trailing whitespace on the name, leading whitespace on the detail: the
+    // caller trims both, so hand back the raw slices.
+    return [body.slice(0, i).replace(TRAILING_WS, ""), body.slice(end)];
+  }
+  return [body, ""];
 }
 
 function parseStep(rest: string, fallbackNumber: number): PlanStep {
@@ -151,7 +175,19 @@ export function parsePlanSections(markdown: string): PlanSection[] {
   const plans: PlanSection[] = [];
   let current: PlanSection | null = null;
 
+  // A fenced block is prose about a plan, not a plan. The notebook schema tells
+  // the agent to show the step format by example, so "- [ ] 1. **Example step**"
+  // inside a ```markdown fence is exactly what a well-behaved notebook looks
+  // like -- and those examples were counted as real steps, which moved the
+  // progress bar and put an invented step in the NEXT box.
+  let inFence = false;
   for (const line of markdown.split(/\r?\n/)) {
+    const fence = line.trimStart();
+    if (fence.startsWith("```") || fence.startsWith("~~~")) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
     const heading = line.match(PLAN_HEADING);
     if (heading) {
       let title = heading[1].trim();
