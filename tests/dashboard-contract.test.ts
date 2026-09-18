@@ -429,3 +429,49 @@ describe("parseDashboardDocument", () => {
     expect(parseDashboardDocument({ version: 1 }).ok).toBe(false);
   });
 });
+
+describe("a config that tries to reach the prototype", () => {
+  it("drops __proto__ instead of setting the object's prototype", () => {
+    const doc = expectOk(
+      validateDashboardDocument({
+        version: 1,
+        activeId: "d",
+        dashboards: [
+          {
+            id: "d",
+            title: "D",
+            panels: [
+              {
+                id: "p",
+                widget: "plan",
+                config: JSON.parse('{"__proto__":{"polluted":"yes"},"keep":1}'),
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const config = doc.dashboards[0].panels[0].config as Record<string, unknown>;
+    expect(config.keep).toBe(1);
+    // The widget must not see a key the layout never declared.
+    expect(config.polluted).toBeUndefined();
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it("drops constructor and prototype for the same reason", () => {
+    const doc = expectOk(
+      validateDashboardDocument({
+        version: 1,
+        activeId: "d",
+        dashboards: [
+          {
+            id: "d",
+            title: "D",
+            panels: [{ id: "p", widget: "plan", config: { constructor: 1, prototype: 2, ok: 3 } }],
+          },
+        ],
+      }),
+    );
+    expect(doc.dashboards[0].panels[0].config).toEqual({ ok: 3 });
+  });
+});

@@ -190,6 +190,14 @@ function copyConfig(raw) {
 
     const out = {};
     for (const key of Object.keys(value)) {
+      // `out["__proto__"] = x` sets the object's prototype instead of adding a
+      // property, so a config carrying one came back with a poisoned prototype:
+      // a widget reading `ctx.config.anything` could get a value the layout
+      // file never declared. Not global pollution -- `Object.prototype` is
+      // untouched and the key does not survive serialization -- but the widget
+      // sees it for the life of the panel, and no config has a legitimate
+      // reason to carry these names.
+      if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
       let member;
       try {
         member = value[key];
