@@ -26,6 +26,7 @@
  */
 
 import type { Invocation } from "../../galaxy-invocations.js";
+import { safeName, safeNameOr } from "./text-safety.js";
 import type {
   DashboardJob,
   InvocationSnapshot,
@@ -140,6 +141,9 @@ const GALAXY_JOB_STATE: Readonly<Record<string, RunState>> = {
   paused: "paused",
   deleting: "stopping",
   stop: "stopping",
+  // Galaxy serialises STOPPING as `stop` on the wire; the long spelling is here
+  // so a client that sends the enum name does not fall through to `unknown`.
+  stopping: "stopping",
   upload: "running",
   setting_metadata: "running",
   resubmitted: "queued",
@@ -188,7 +192,7 @@ export function foldJobState(status: DashboardJob["status"], galaxyState: string
  * fail-soft: if the wording changes the row just goes back to saying Failed.
  * The real fix is a `cancelled` value on `InvocationYaml["status"]`.
  */
-const CANCELLED_SUMMARY = /^\s*workflow cancelled\b/i;
+const CANCELLED_SUMMARY = /^\s*workflow cancell(?:ed|ing)\b/i;
 
 export function foldInvocationState(
   status: Invocation["status"],
@@ -196,7 +200,15 @@ export function foldInvocationState(
 ): RunState {
   if (status === "completed") return "finished";
   if (status === "failed") return CANCELLED_SUMMARY.test(summary ?? "") ? "cancelled" : "failed";
-  if (status === "in_progress") return "running";
+  // A cancel is not instant. Galaxy moves the invocation to `cancelled` and
+  // then deletes its jobs one at a time, and the block stays `in_progress`
+  // until the last of them has gone -- so the only window in which the panel
+  // could shout about a deliberate cancel is exactly the window where the
+  // status has not settled yet. Heading for the exit is `stopping`, which is
+  // live, quiet, and says what is happening.
+  if (status === "in_progress") {
+    return CANCELLED_SUMMARY.test(summary ?? "") ? "stopping" : "running";
+  }
   return "unknown";
 }
 
@@ -204,6 +216,22 @@ function parseTime(iso: string | undefined): number | null {
   if (!iso) return null;
   const ms = Date.parse(iso);
   return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * How far ahead of this machine's clock a Galaxy timestamp may sit and still
+ * be read as a real event. Two machines a minute apart is ordinary; a stamp
+ * further out than that is a hand edit or a bad clock, and believing it is
+ * worse than having no stamp at all -- `now - heardFrom` goes permanently
+ * negative, so the run can never be called stale again and the panel keeps
+ * drawing confident numbers nobody has refreshed.
+ */
+const FUTURE_SKEW_MS = 60_000;
+
+function parseStamp(iso: string | undefined, now: number): number | null {
+  const ms = parseTime(iso);
+  if (ms === null) return null;
+  return ms - now > FUTURE_SKEW_MS ? null : ms;
 }
 
 function count(value: number | undefined): number {
@@ -258,8 +286,8 @@ function invocationRow(inv: Invocation, plans: PlanSection[], now: number): RunR
   // A hand-edited block can claim 12 total and 14 done. Believe the parts.
   const total = Math.max(count(inv.totalJobs), done + failed);
   const stepsTotal = count(inv.totalSteps);
-  const lastPolledAt = parseTime(inv.lastPolledAt);
-  const submittedAt = parseTime(inv.submittedAt);
+  const lastPolledAt = parseStamp(inv.lastPolledAt, now);
+  const submittedAt = parseStamp(inv.submittedAt, now);
   const live = LIVE_STATES.has(state);
   const heardFrom = lastPolledAt ?? submittedAt;
   return {
@@ -294,8 +322,8 @@ function jobRow(job: DashboardJob, plans: PlanSection[], now: number): RunRow {
   const galaxyState = job.galaxyState?.trim() || null;
   const state = foldJobState(job.status, galaxyState);
   const live = LIVE_STATES.has(state);
-  const lastPolledAt = parseTime(job.lastPolledAt);
-  const submittedAt = parseTime(job.submittedAt);
+  const lastPolledAt = parseStamp(job.lastPolledAt, now);
+  const submittedAt = parseStamp(job.submittedAt, now);
   const heardFrom = lastPolledAt ?? submittedAt;
   return {
     kind: "job",
@@ -327,9 +355,17 @@ function jobRow(job: DashboardJob, plans: PlanSection[], now: number): RunRow {
  * deletes its jobs, and rollUpInvocationJobs scores `deleted` alongside `error`
  * in the same failed_jobs counter -- so without this exception every deliberate
  * cancel arrives here dressed as a failure.
+ *
+ * `stopping` is the same run a few seconds earlier, and it is exempt for the
+ * same reason: the deleted jobs are already in the failed counter while the
+ * cancel is still settling. Nothing Galaxy does on its own puts a run in
+ * `stopping` -- both routes into it, a cancelling invocation and a job in
+ * `deleting` or `stop`, are somebody having asked for it to end.
  */
 export function needsAttention(row: RunRow): boolean {
-  if (row.state === "cancelled" || row.state === "skipped") return false;
+  if (row.state === "cancelled" || row.state === "skipped" || row.state === "stopping") {
+    return false;
+  }
   return row.state === "failed" || row.jobs.failed > 0;
 }
 
@@ -454,7 +490,11 @@ export function countsSentence(row: RunRow): string {
  */
 export function describeRun(row: RunRow, now: number): string {
   if (row.stale) {
-    const ago = formatAgo(row.lastPolledAt ?? row.submittedAt, now);
+    // Only the poll stamp answers "when was Galaxy last asked". Falling back to
+    // the submit time here told a six-day-old invocation nobody has ever polled
+    // that Galaxy was checked six days ago, one line above the meta line saying
+    // "not checked yet".
+    const ago = formatAgo(row.lastPolledAt, now);
     return ago
       ? `Can't tell right now. Galaxy was last checked ${ago}.`
       : "Can't tell right now. Galaxy has not been checked.";
@@ -512,13 +552,14 @@ export function attentionMessage(rows: RunRow[]): string {
   if (bad.length === 0) return "";
   if (bad.length === 1) {
     const row = bad[0];
-    const name = row.label || row.id;
+    const name = safeNameOr(row.label || row.id, "(unnamed run)");
     // A run is usually labelled after the step it runs, so naming the step's
     // title as well costs a line of a 400px panel to say the same word twice.
+    const stepTitle = row.step ? safeName(row.step.title) : "";
     const where = row.step
-      ? name.toLowerCase().includes(row.step.title.toLowerCase())
+      ? name.toLowerCase().includes(stepTitle.toLowerCase())
         ? ` (step ${row.step.number})`
-        : ` (step ${row.step.number}, ${row.step.title})`
+        : ` (step ${row.step.number}, ${stepTitle})`
       : "";
     if (row.jobs.total > 1 && row.jobs.failed > 0) {
       return `${row.jobs.failed} of ${row.jobs.total} jobs failed in "${name}"${where}.`;
@@ -591,6 +632,16 @@ function pct(part: number, total: number): string {
   return `${Math.max(0, Math.min(100, (part / total) * 100)).toFixed(1)}%`;
 }
 
+/**
+ * What the unfinished jobs are called. On a run that is being shut down they
+ * are mostly Galaxy's own deletes, which the brain's counter scores alongside
+ * real errors -- so the only honest thing the panel can say about them is that
+ * they did not finish.
+ */
+function unfinishedWord(row: RunRow): string {
+  return row.state === "stopping" ? "did not finish" : "failed";
+}
+
 function progressBar(row: RunRow): HTMLElement | null {
   const { done, failed, total } = row.jobs;
   // A single job is its own progress bar; two states do not need a chart.
@@ -599,14 +650,16 @@ function progressBar(row: RunRow): HTMLElement | null {
   bar.setAttribute("role", "img");
   bar.setAttribute(
     "aria-label",
-    `${done} of ${total} jobs finished${failed > 0 ? `, ${failed} failed` : ""}`,
+    `${done} of ${total} jobs finished${failed > 0 ? `, ${failed} ${unfinishedWord(row)}` : ""}`,
   );
   if (done > 0) {
     const span = node("span", "dash-jobs-bar-done");
     span.style.width = pct(done, total);
     bar.append(span);
   }
-  if (failed > 0) {
+  // Not on a run being shut down: those are Galaxy's own deletes in the failed
+  // counter, and a red stripe is the same claim the headline stopped making.
+  if (failed > 0 && row.state !== "stopping") {
     const span = node("span", "dash-jobs-bar-fail");
     span.style.width = pct(failed, total);
     bar.append(span);
@@ -620,34 +673,43 @@ export function metaLine(row: RunRow, now: number): string {
   if (row.steps) bits.push(`${row.steps.done} of ${row.steps.total} steps`);
   const started = formatAgo(row.submittedAt, now);
   if (started) bits.push(row.live ? `started ${started}` : `submitted ${started}`);
-  const checked = formatAgo(row.lastPolledAt, now);
-  if (checked) bits.push(`checked ${checked}`);
+  // A job's stamp is not a heartbeat -- `isStaleTracked` exists to say so.
+  // tickJobs asks every fifteen seconds and only writes on a change, so
+  // "checked 3 h ago" on a job is a run we are asking about four times a
+  // minute. What the stamp actually marks is the last change, and saying that
+  // keeps this line agreeing with the "Last change" row in the details.
+  const stamp = formatAgo(row.lastPolledAt, now);
+  if (stamp) bits.push(row.kind === "job" ? `last change ${stamp}` : `checked ${stamp}`);
   // An invocation is stamped on every poll, so a missing stamp really does mean
-  // nobody has asked. A job is only stamped when something changed, so the same
-  // gap means the opposite -- we have been asking and the answer is the same.
+  // nobody has asked. A job with no stamp has had nothing written about it
+  // since it was recorded, which is the normal shape of a live tool run.
   else if (row.live) bits.push(row.kind === "job" ? "no change yet" : "not checked yet");
-  if (row.serverHost) bits.push(row.serverHost);
+  if (row.serverHost) bits.push(safeName(row.serverHost));
   if (row.unconfirmed) bits.push("unconfirmed by Galaxy");
   return bits.join(" · ");
 }
 
 function detailRows(row: RunRow, now: number): Array<[string, string]> {
   const out: Array<[string, string]> = [];
-  if (row.step) out.push(["Plan step", `${row.step.number}. ${row.step.title}`]);
-  else if (row.anchor) out.push(["Notebook anchor", row.anchor]);
-  if (row.toolId) out.push(["Tool", row.toolId]);
-  out.push([row.kind === "invocation" ? "Invocation" : "Job", row.id]);
-  if (row.serverHost) out.push(["Galaxy", row.serverHost]);
-  if (row.galaxyState) out.push(["Galaxy state", row.galaxyState]);
+  if (row.step) out.push(["Plan step", `${row.step.number}. ${safeName(row.step.title)}`]);
+  else if (row.anchor) out.push(["Notebook anchor", safeName(row.anchor)]);
+  if (row.toolId) out.push(["Tool", safeName(row.toolId)]);
+  out.push([row.kind === "invocation" ? "Invocation" : "Job", safeName(row.id)]);
+  // hostOf falls back to the raw notebook string when the URL will not parse,
+  // and the Galaxy state is a notebook field like any other.
+  if (row.serverHost) out.push(["Galaxy", safeName(row.serverHost)]);
+  if (row.galaxyState) out.push(["Galaxy state", safeName(row.galaxyState)]);
   if (row.jobs.total > 1) {
     const left = Math.max(0, row.jobs.total - row.jobs.done - row.jobs.failed);
     out.push([
       "Jobs",
-      `${row.jobs.done} finished, ${row.jobs.failed} failed, ${left} to go, ${row.jobs.total} in total`,
+      `${row.jobs.done} finished, ${row.jobs.failed} ${unfinishedWord(row)}, ${left} to go, ${row.jobs.total} in total`,
     ]);
   }
   const checked = formatAgo(row.lastPolledAt, now);
-  if (checked) out.push(["Last checked", checked]);
+  // Same reason as metaLine: on a job the stamp is the last change, not the
+  // last check, and only the invocation poller rewrites its block every tick.
+  if (checked) out.push([row.kind === "invocation" ? "Last checked" : "Last change", checked]);
   return out;
 }
 
@@ -657,7 +719,11 @@ function detailRows(row: RunRow, now: number): Array<[string, string]> {
  * healthy running row it would only repeat the counts.
  */
 function shouldShowSummary(row: RunRow): boolean {
-  return row.summary !== null && (!row.live || needsAttention(row));
+  // `stopping` is live and deliberately raises no attention, so neither arm
+  // catches it -- and it is the one live state where the brain's sentence says
+  // something the headline cannot: which of the jobs had finished before the
+  // user stopped it.
+  return row.summary !== null && (!row.live || needsAttention(row) || row.state === "stopping");
 }
 
 function renderRow(row: RunRow, now: number, compact: boolean, openIds: Set<string>): HTMLElement {
@@ -668,10 +734,12 @@ function renderRow(row: RunRow, now: number, compact: boolean, openIds: Set<stri
   if (row.stale) item.classList.add("is-stale");
   if (!row.live && !needsAttention(row)) item.classList.add("is-done");
 
-  const title = node("div", "dash-jobs-title", row.label || row.id);
-  title.title = row.step
-    ? `${row.label || row.id} -- step ${row.step.number}, ${row.step.title}`
-    : row.label || row.id;
+  // The label is a workflow name out of the notebook and the step title comes
+  // from the plan, so both are model-written: a bidi override in either would
+  // render the row in an order nobody wrote.
+  const name = safeNameOr(row.label || row.id, "(unnamed run)");
+  const title = node("div", "dash-jobs-title", name);
+  title.title = row.step ? `${name} -- step ${row.step.number}, ${safeName(row.step.title)}` : name;
   item.append(title);
 
   if (!compact) {
@@ -694,7 +762,7 @@ function renderRow(row: RunRow, now: number, compact: boolean, openIds: Set<stri
   if (!compact) {
     item.append(node("p", "dash-jobs-say", describeRun(row, now)));
     if (shouldShowSummary(row)) {
-      item.append(node("p", "dash-jobs-why", row.summary ?? ""));
+      item.append(node("p", "dash-jobs-why", safeName(row.summary ?? "")));
     }
   }
 

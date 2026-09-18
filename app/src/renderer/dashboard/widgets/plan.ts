@@ -10,6 +10,7 @@
  * carries a glyph and a word before it carries a colour.
  */
 
+import { safeName } from "./text-safety.js";
 import type { PlanSection, PlanSnapshot, PlanStep, WidgetDefinition } from "../widget-api.js";
 
 /**
@@ -31,17 +32,71 @@ const EMPTY = "No plan yet -- ask Loom to draft one.";
  * Not in the config, because idly opening an old plan should not write to
  * disk, and not in the closure, because `setConfig` re-mounts the widget: both
  * header buttons would otherwise silently collapse everything the reader had
- * opened. Bounded by the 40 panels a document may hold.
+ * opened.
+ *
+ * Two caveats, both of which cost this map a bound it did not have.
+ *
+ * A panel id is unique within a dashboard and deliberately reused across them
+ * -- `host.ts` says so, and both shipped presets name their plan panel
+ * `p-plan` -- so two plan panels on two dashboards share one entry here. They
+ * read the same notebook, so a shared key still means the same plan and the
+ * only symptom is that opening a row on one dashboard opens it on the other.
+ * Keying on the dashboard as well needs the host to put its id on the widget
+ * context; until it does, this is the honest description of what the map is.
+ *
+ * And nothing used to be removed from it, so "bounded by the 40 panels a
+ * document may hold" was true of neither dimension: a session that opens
+ * several analyses accumulates a set per panel id it has ever seen, and each
+ * set accumulates a key per plan that has ever been expanded. The map is capped
+ * below; each set is bounded by `pruneOpened`, which drops every key the
+ * notebook no longer offers, so a set can never hold more than the notebook
+ * has plans.
  */
 const openedByPanel = new Map<string, Set<string>>();
 
+/** Panel ids remembered at once, least recently mounted evicted first. */
+export const PANEL_MEMORY_MAX = 40;
+
 function openedFor(panelId: string): Set<string> {
-  let set = openedByPanel.get(panelId);
-  if (!set) {
-    set = new Set<string>();
-    openedByPanel.set(panelId, set);
+  const existing = openedByPanel.get(panelId);
+  if (existing) {
+    // Re-insert so the eviction below drops the panel nobody has mounted for
+    // longest rather than the one that happens to have been created first.
+    openedByPanel.delete(panelId);
+    openedByPanel.set(panelId, existing);
+    return existing;
+  }
+  const set = new Set<string>();
+  openedByPanel.set(panelId, set);
+  while (openedByPanel.size > PANEL_MEMORY_MAX) {
+    const oldest = openedByPanel.keys().next();
+    if (oldest.done) break;
+    openedByPanel.delete(oldest.value);
   }
   return set;
+}
+
+/**
+ * The open/closed key for one "other plan" row. Plan ids are slugged from the
+ * heading and two plans can slug alike, so the key carries the plan's position
+ * in the notebook as well -- the position it has in the notebook, not in the
+ * filtered list, because which plan is current changes as steps get ticked and
+ * a key numbered within the list would shift under the reader.
+ */
+function openKey(index: number, plan: PlanSection): string {
+  return `${index}:${plan.title}`;
+}
+
+/**
+ * Forget the rows that are no longer on offer. The keys carry a plan's position
+ * in the notebook, so editing the notebook retires old ones for good; without
+ * this the set only ever grows, and a stale key can hand its open state to a
+ * different plan that later lands in the same position.
+ */
+function pruneOpened(opened: Set<string>, live: ReadonlySet<string>): void {
+  for (const key of opened) {
+    if (!live.has(key)) opened.delete(key);
+  }
 }
 
 /**
@@ -102,8 +157,9 @@ function countSteps(steps: PlanStep[]): PlanCounts {
  * the wrong one is first.
  *
  * So: the last plan that has been started and still has a step to do. If none
- * has -- everything is over, or nothing has begun -- fall back to the last one,
- * which is right for both of those. The rest stay reachable through "older".
+ * has -- everything is over, or nothing has begun -- fall back to the last one
+ * that has any steps at all, which is right for both of those. The rest stay
+ * reachable through "older".
  *
  * "Still has a step to do" rather than "is not finished" on purpose. A plan
  * whose last unticked step failed has nothing pending and nothing more will
@@ -127,6 +183,19 @@ export function currentPlan(plans: PlanSection[]): PlanSection | undefined {
     const pending = counts.total - counts.done - counts.failed;
     if (started && pending > 0) return plans[i];
   }
+  // A heading with nothing under it is not a plan the panel can answer with.
+  // The agent writes the heading first and the steps a moment later, so the
+  // last section in the notebook is routinely empty while a real plan with
+  // real steps sits above it -- and answering with the empty one hides that
+  // plan completely, since "other plans" only appears once a second plan
+  // exists and the reader has asked for it. The lax heading match in the host
+  // parser widens this further: any `## Plan ...` line in ordinary prose
+  // arrives here as a stepless section.
+  for (let i = plans.length - 1; i >= 0; i--) {
+    if (plans[i].steps.length > 0) return plans[i];
+  }
+  // Nothing anywhere has a step: the last heading is as good an answer as
+  // there is, and "No steps written down yet" is the honest thing to say.
   return plans[plans.length - 1];
 }
 
@@ -154,9 +223,10 @@ function routingSentence(routing: string | null): string | null {
  */
 function stepRouting(routing: string | null): string | null {
   if (!routing) return null;
-  const trimmed = routing.trim();
+  const trimmed = safeName(routing);
   if (!trimmed) return null;
   if (/^local$/i.test(trimmed)) return "On this computer";
+  // Step routing is free text, so it is a name like any other.
   const galaxy = trimmed.match(/^galaxy\b(\s*)(.*)$/i);
   if (!galaxy) return trimmed;
   if (!galaxy[2]) return "On Galaxy";
@@ -217,8 +287,13 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+/**
+ * A step title comes out of the notebook, so it is model-written text. A bidi
+ * override in it reorders the whole row -- the same treatment the log panel
+ * gives a tool argument, for the same reason.
+ */
 function stepLabel(step: PlanStep): string {
-  const title = step.title || step.detail || "Untitled step";
+  const title = safeName(step.title || step.detail) || "Untitled step";
   return `${step.number}. ${title}`;
 }
 
@@ -290,11 +365,11 @@ function calloutFor(step: PlanStep, kind: "failed" | "next"): HTMLElement {
 
   const routing = stepRouting(step.routing);
   if (routing) box.append(el("div", "dash-meta", routing));
-  if (step.detail) box.append(el("div", "dash-plan-next-detail", step.detail));
+  if (step.detail) box.append(el("div", "dash-plan-next-detail", safeName(step.detail)));
   // What still has to become true. On a failed step that is the clearest thing
   // the notebook has about what went wrong, so it is not suppressed there.
   if (step.verification) {
-    box.append(el("div", "dash-plan-next-detail", `Done when: ${step.verification}`));
+    box.append(el("div", "dash-plan-next-detail", `Done when: ${safeName(step.verification)}`));
   }
   // A "Needs you" box with nothing in it but a step number is a call to action
   // with no action in it.
@@ -306,7 +381,7 @@ function calloutFor(step: PlanStep, kind: "failed" | "next"): HTMLElement {
 
 function planHeading(plan: PlanSection): DocumentFragment {
   const frag = document.createDocumentFragment();
-  frag.append(el("div", "dash-plan-title", plan.title || "Untitled plan"));
+  frag.append(el("div", "dash-plan-title", safeName(plan.title) || "Untitled plan"));
   const routing = routingSentence(plan.routing);
   if (routing) frag.append(el("div", "dash-plan-routing dash-meta", routing));
   return frag;
@@ -393,6 +468,11 @@ export const planWidget: WidgetDefinition<PlanConfig> = {
         return;
       }
 
+      // Against every plan the notebook still has, not just the ones on offer
+      // as "other": which plan is current changes as steps get ticked, and a
+      // row the reader opened should survive its plan taking a turn at the top.
+      pruneOpened(opened, new Set(plans.map((plan, index) => openKey(index, plan))));
+
       const current = currentPlan(plans);
       if (!current) return;
       const counts = countSteps(current.steps);
@@ -444,10 +524,7 @@ function olderPlans(
 ): HTMLElement {
   const wrap = el("div", "dash-plan-older");
   // Each entry keeps the position it has in the notebook, not its position in
-  // this filtered list. The open/closed key is built from it, and which plan is
-  // current can change as steps get ticked -- a key numbered within this list
-  // would then shift under the reader, collapsing the row they had open or,
-  // where two plans are titled alike, transferring it to the wrong one.
+  // this filtered list -- see `openKey`.
   const others = plans
     .map((plan, index) => ({ plan, index }))
     .filter((entry) => entry.plan !== current);
@@ -461,15 +538,13 @@ function olderPlans(
 
   for (let i = others.length - 1; i >= 0; i--) {
     const { plan, index } = others[i];
-    // Plan ids are slugged from the heading and two plans can slug alike, so
-    // the open/closed key carries the notebook position as well.
-    const key = `${index}:${plan.title}`;
+    const key = openKey(index, plan);
     const counts = countSteps(plan.steps);
     // The same verdict the current plan gets, so the two never disagree about
     // what "finished" or "stopped" means.
     const verdict = summarize(counts);
 
-    const title = plan.title || "Untitled plan";
+    const title = safeName(plan.title) || "Untitled plan";
     const row = el("button", "dash-plan-older-row");
     row.type = "button";
     row.append(stateChip({ glyph: verdict.glyph, word: verdict.text, state: verdict.state }));

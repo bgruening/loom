@@ -442,14 +442,47 @@ describe("readHead", () => {
     ).toBeNull();
   });
 
-  it("falls back to text() for a response with no body", async () => {
+  it("falls back to text() for a small response with no body", async () => {
     (globalThis as unknown as { fetch: unknown }).fetch = async () => ({
       ok: true,
       body: null,
+      headers: { get: () => "8" },
       text: async () => "a\tb\n1\t2\n",
     });
     const head = await readHead("orbit-artifact://cwd/x.tsv", 4096, new AbortController().signal);
     expect(head).toEqual({ text: "a\tb\n1\t2\n", truncated: false });
+  });
+
+  it("will not materialise a huge body to slice a head out of it", async () => {
+    // The whole promise of this function is that it does not read more than it
+    // shows. The fallback cannot stream, so against a 200 MB table the only
+    // options are the whole file or nothing -- and the caller draws a plain row
+    // on nothing, which costs a preview rather than the main thread.
+    const text = vi.fn(async () => "x".repeat(200_000_000));
+    (globalThis as unknown as { fetch: unknown }).fetch = async () => ({
+      ok: true,
+      body: null,
+      headers: { get: () => String(200_000_000) },
+      text,
+    });
+    expect(
+      await readHead("orbit-artifact://cwd/big.tsv", 4096, new AbortController().signal),
+    ).toBeNull();
+    expect(text).not.toHaveBeenCalled();
+  });
+
+  it("will not read a body-less response that declares no length at all", async () => {
+    const text = vi.fn(async () => "a\tb\n");
+    (globalThis as unknown as { fetch: unknown }).fetch = async () => ({
+      ok: true,
+      body: null,
+      headers: { get: () => null },
+      text,
+    });
+    expect(
+      await readHead("orbit-artifact://cwd/x.tsv", 4096, new AbortController().signal),
+    ).toBeNull();
+    expect(text).not.toHaveBeenCalled();
   });
 
   it("does not call a whole body truncated because it exactly fills the budget", async () => {
@@ -493,14 +526,45 @@ describe("results widget", () => {
     expect(h.el.querySelector("img")).toBeNull();
   });
 
-  it("says so instead of drawing a lie once waiting has not helped", () => {
+  it("says what it actually knows once waiting has not helped", () => {
     vi.useFakeTimers();
     try {
       const h = harness({}, { available: false });
       resultsWidget.mount(h.el, h.ctx);
       vi.advanceTimersByTime(2000);
-      expect(h.el.querySelector(".dash-results-empty")?.textContent).toContain("cannot list");
+      const text = h.el.querySelector(".dash-results-empty")?.textContent ?? "";
+      expect(text).toContain("Nothing has been listed for this analysis");
+      // Not "this shell cannot list the analysis folder": the same window's
+      // File pane lists it, and a directory with nothing in it yet looks
+      // exactly like a shell with no listing from in here.
+      expect(text).not.toContain("cannot list the analysis folder");
       expect(h.el.querySelector("img")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("goes back to looking when the listing is reset for a new analysis", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      resultsWidget.mount(h.el, h.ctx);
+      // Spend the first grace period, so the latch is the thing under test
+      // rather than a timer that has not fired yet.
+      vi.advanceTimersByTime(2000);
+      await h.setFiles(tree([file("plot.png")]));
+      expect(h.el.querySelector("img")).not.toBeNull();
+
+      // What /new and every cwd switch do. The grace used to be a one-way
+      // latch, so the reset went straight to a claim about the shell on a
+      // window that had just finished listing a folder.
+      h.sources.reset();
+      expect(h.el.querySelector(".dash-results-empty")?.textContent).toContain("Looking for");
+
+      vi.advanceTimersByTime(2000);
+      expect(h.el.querySelector(".dash-results-empty")?.textContent).toContain(
+        "Nothing has been listed",
+      );
     } finally {
       vi.useRealTimers();
     }
@@ -525,7 +589,7 @@ describe("results widget", () => {
     resultsWidget.mount(h.el, h.ctx);
     await h.setFiles(tree([file("heatmap.svg", 2048)]));
     const img = h.el.querySelector("img");
-    expect(img?.getAttribute("src")).toBe("orbit-artifact://cwd/heatmap.svg?v=2048");
+    expect(img?.getAttribute("src")).toBe("orbit-artifact://cwd/heatmap.svg?v=2048.0");
     // An svg is a script carrier; nothing here may become markup.
     expect(h.el.querySelector("svg")).toBeNull();
     expect(h.el.querySelector(".dash-results-name")?.textContent).toBe("heatmap.svg");
@@ -682,8 +746,111 @@ describe("results widget", () => {
     await h.setFiles(tree([file("plot.png", 10)]));
     await h.setFiles(tree([file("plot.png", 99)]));
     expect(h.el.querySelector("img")?.getAttribute("src")).toBe(
-      "orbit-artifact://cwd/plot.png?v=99",
+      "orbit-artifact://cwd/plot.png?v=99.0",
     );
+  });
+
+  it("offers a plot back to the disk when the workspace has moved under it", async () => {
+    // A file listing carries no mtime, so a plot regenerated at the same
+    // dimensions from new data is byte-for-byte the same size and both the
+    // redraw signature and the cache-buster stay put. Nothing in the widget can
+    // see the rewrite, so the image is re-fetched on a slow tick instead.
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      resultsWidget.mount(h.el, h.ctx);
+      await h.setFiles(tree([file("plot.png", 4096)]));
+      const img = h.el.querySelector("img");
+      const before = img?.getAttribute("src");
+      expect(before).toBe("orbit-artifact://cwd/plot.png?v=4096.0");
+
+      // The same listing again: nothing has moved, so nothing is re-fetched.
+      vi.advanceTimersByTime(60_000);
+      expect(h.el.querySelector("img")?.getAttribute("src")).toBe(before);
+
+      // Now a listing arrives that says exactly the same thing -- same name,
+      // same byte count, which is the whole point -- so the panel does not
+      // redraw, and the tick offers the file back to the disk instead.
+      await h.setFiles(tree([file("plot.png", 4096)]));
+      vi.advanceTimersByTime(60_000);
+      const after = h.el.querySelector("img")?.getAttribute("src");
+      expect(after).not.toBe(before);
+      expect(after).toContain("orbit-artifact://cwd/plot.png?v=");
+      // In place, so the thumbnail is not torn down and rebuilt under a reader.
+      expect(h.el.querySelector("img")).toBe(img);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops re-checking images once the panel is gone", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      const dispose = resultsWidget.mount(h.el, h.ctx);
+      await h.setFiles(tree([file("plot.png", 4096)]));
+      const img = h.el.querySelector("img") as HTMLImageElement;
+      h.cleanups.forEach((fn) => fn());
+      dispose?.();
+      vi.advanceTimersByTime(1000);
+      await h.setFiles(tree([file("plot.png", 4096)]));
+      const src = img.getAttribute("src");
+      vi.advanceTimersByTime(120_000);
+      expect(img.getAttribute("src")).toBe(src);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("draws a file it could not measure as a row rather than an uncapped image", async () => {
+    // files-handler leaves the size undefined whenever stat throws -- a broken
+    // symlink, or a file racing the write creating it. That is the one kind of
+    // file we know least about, so it must not be the one that skips the cap.
+    const h = harness();
+    resultsWidget.mount(h.el, h.ctx);
+    await h.setFiles(tree([{ name: "plot.png", relPath: "plot.png", type: "file" }]));
+    expect(h.el.querySelector("img")).toBeNull();
+    expect(h.el.querySelector(".dash-results-name")?.textContent).toBe("plot.png");
+  });
+
+  it("does not render a filename in an order nobody wrote it in", async () => {
+    // The log panel strips these and the gallery did not, which is one surface
+    // with two answers. A right-to-left override in a filename makes
+    // `a<RLO>gnp.exe` read as `a...exe.png` in every browser, and textContent
+    // does not help: the override applies to text, not to markup.
+    const hostile = `a\u202egnp.exe`;
+    const h = harness();
+    resultsWidget.mount(h.el, h.ctx);
+    await h.setFiles(tree([{ name: hostile, relPath: hostile, type: "file", size: 12 }]));
+    const shown = h.el.querySelector(".dash-results-name");
+    expect(shown?.textContent).not.toContain("\u202e");
+    expect(shown?.getAttribute("title") ?? "").not.toContain("\u202e");
+    // The name is still recognisable, minus the character that lied about it.
+    expect(shown?.textContent).toContain("gnp.exe");
+  });
+
+  it("does not hand back the raw name when nothing readable survives the strip", async () => {
+    // `safeName(x) || x` reads like a safe fallback and is the opposite: a name
+    // made entirely of overrides strips to blank and the `||` reaches for the
+    // one string the fence exists for.
+    const hostile = "\u202e\u202d\u2066";
+    const h = harness();
+    resultsWidget.mount(h.el, h.ctx);
+    await h.setFiles(tree([{ name: hostile, relPath: hostile, type: "file", size: 12 }]));
+    const shown = h.el.querySelector(".dash-results-name");
+    expect(shown?.textContent).toBe("(unnamed file)");
+    expect(shown?.getAttribute("title")).not.toContain("\u202e");
+  });
+
+  it("leaves the spaces in a filename alone, including the ones at the ends", async () => {
+    // The title is the path a reader hovers to copy, so it has to be the path
+    // that is on disk. Tidying whitespace is the log panel's concern, not a
+    // safety property, and a doubled space in a filename is part of the name.
+    const odd = " plot  v2 .png ";
+    const h = harness();
+    resultsWidget.mount(h.el, h.ctx);
+    await h.setFiles(tree([{ name: odd, relPath: odd, type: "file", size: 12 }]));
+    expect(h.el.querySelector(".dash-results-name")?.getAttribute("title")).toBe(`Open ${odd}`);
   });
 
   it("opens the file when its name is clicked", async () => {

@@ -379,6 +379,9 @@ describe("statusWord", () => {
 
 // -- the credential fence ----------------------------------------------------
 
+/** What the fence writes in place of a value. */
+const HIDDEN_MARKER = "[hidden]";
+
 describe("redaction", () => {
   it("hides the value of anything that looks like a credential, at any depth", () => {
     const out = redactForDisplay({
@@ -414,6 +417,27 @@ describe("redaction", () => {
     expect(Object.keys(out).length).toBeLessThanOrEqual(41);
   });
 
+  it("bounds a shared subtree, which cutting a cycle does not", () => {
+    // The cycle guard is a path set, so a node reachable by N paths used to be
+    // materialised N times. Seven distinct objects, six deep, twenty wide: no
+    // cycle anywhere, and the old code spent twenty seconds on it before
+    // JSON.stringify threw.
+    let level: Record<string, unknown> = { leaf: true };
+    for (let d = 0; d < 6; d++) {
+      const wide: Record<string, unknown> = {};
+      for (let i = 0; i < 20; i++) wide[`k${i}`] = level;
+      level = wide;
+    }
+    // Generous on purpose. The unbounded version takes thirteen seconds here
+    // and the bounded one takes under a millisecond, so the gap is four orders
+    // of magnitude and the budget only has to sit inside it -- a tight one
+    // would turn this into a test of how busy the machine is.
+    const started = Date.now();
+    const out = redactForDisplay(level);
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(() => JSON.stringify(out)).not.toThrow();
+  });
+
   it("treats a __proto__ key as data, not as a prototype", () => {
     const payload = JSON.parse('{"__proto__": {"polluted": true}, "normal": 1}');
     const out = redactForDisplay(payload) as Record<string, unknown>;
@@ -427,6 +451,109 @@ describe("redaction", () => {
   it("hides a key called credentials, which the stems alone would miss", () => {
     const out = redactForDisplay({ credentials: "user:pass" });
     expect(JSON.stringify(out)).not.toContain("user:pass");
+  });
+
+  it("covers the abbreviations a payload actually spells", () => {
+    const out = redactForDisplay({
+      auth: "Basic abc",
+      bearer: "b3ar3r",
+      cred: "cr3d",
+      pwd: "pw0rd",
+      passwd: "pa55wd",
+      cookie: "c00kie",
+      sessionId: "s3ss10n",
+      signature: "s1gnature",
+      "x-amz-security-token": "s3curity",
+    });
+    const text = JSON.stringify(out);
+    for (const leaked of [
+      "Basic abc",
+      "b3ar3r",
+      "cr3d",
+      "pw0rd",
+      "pa55wd",
+      "c00kie",
+      "s3ss10n",
+      "s1gnature",
+      "s3curity",
+    ]) {
+      expect(text, leaked).not.toContain(leaked);
+    }
+  });
+
+  it("hides what a credential flag introduces in a command recorded as a token list", () => {
+    // An array element has no key for the fence to read, so a command line
+    // recorded as argv used to carry the key that the same command recorded as
+    // a string would have lost.
+    const out = redactForDisplay({
+      argv: ["galaxy-cli", "--api-key", "sup3rs3cret", "upload", "reads.fq"],
+      curl: ["curl", "-H", "Authorization: Bearer t0kenv4lue", "https://usegalaxy.org"],
+      inline: ["--token=t0keninline"],
+    });
+    const text = JSON.stringify(out);
+    expect(text).not.toContain("sup3rs3cret");
+    expect(text).not.toContain("t0kenv4lue");
+    expect(text).not.toContain("t0keninline");
+    // Whatever the name introduces, of whatever type.
+    const structured = redactForDisplay({ args: ["--secret", { value: "n3sted" }] });
+    expect(JSON.stringify(structured)).not.toContain("n3sted");
+    // The shape of the command still reads, which is the point of showing it.
+    expect(text).toContain("--api-key");
+    expect(text).toContain("upload");
+    expect(text).toContain("reads.fq");
+    expect(text).toContain("https://usegalaxy.org");
+  });
+
+  it("does not blank a value because a sentence next to it mentions a key", () => {
+    const out = redactForDisplay({
+      notes: ["the api key rotated last week", "reads.fq", "https://host:8080/galaxy"],
+    });
+    const text = JSON.stringify(out);
+    expect(text).toContain("reads.fq");
+    expect(text).toContain("https://host:8080/galaxy");
+  });
+
+  it("does not blank a file because the one before it is called monkey.png", () => {
+    // The whole failure mode of a name-shaped heuristic: an ordinary list of
+    // results is not a command line, and a stem match with no leading dash
+    // fires on `monkey`, `session1.dat`, `donkey_genome.fa` and `keygen.py`.
+    // Losing a filename with no way to work out why is worse than the leak.
+    const out = redactForDisplay({
+      outputs: ["monkey.png", "results.csv", "summary.tsv"],
+      datasets: ["donkey_genome.fa", "reads.fastq"],
+      files: ["session1.dat", "session2.dat", "session3.dat", "session4.dat"],
+      argv: ["python", "keygen.py", "out.txt"],
+    });
+    const text = JSON.stringify(out);
+    expect(text).not.toContain(HIDDEN_MARKER);
+    for (const kept of [
+      "results.csv",
+      "summary.tsv",
+      "reads.fastq",
+      "session2.dat",
+      "session4.dat",
+      "out.txt",
+    ]) {
+      expect(text, kept).toContain(kept);
+    }
+  });
+
+  it("hides the element a bare header name introduces, rather than claiming to", () => {
+    // `Authorization:` as its own element carries no value, so writing
+    // "[hidden]" into it hides nothing and prints the real value next door.
+    const out = redactForDisplay({
+      argv: ["curl", "-H", "Authorization:", "Bearer t0kenv4lue", "https://usegalaxy.org"],
+    });
+    const text = JSON.stringify(out);
+    expect(text).not.toContain("t0kenv4lue");
+    expect(text).toContain("Authorization:");
+    expect(text).toContain("https://usegalaxy.org");
+  });
+
+  it("caps a key, because a payload can use a whole value as one", () => {
+    const out = redactForDisplay({ ["z".repeat(500)]: 1 }) as Record<string, unknown>;
+    const [key] = Object.keys(out);
+    expect(key.length).toBeLessThanOrEqual(81);
   });
 
   it("caps a huge string", () => {
@@ -667,11 +794,19 @@ describe("truncate", () => {
 // -- mounted behaviour -------------------------------------------------------
 
 describe("mounted activity widget", () => {
-  it("says the log is not readable here instead of drawing an empty log", () => {
+  it("does not claim the window cannot read a log that simply does not exist yet", () => {
+    // `available: false` is what a brand-new analysis looks like -- the read
+    // returned "no such file" -- in the same window whose File pane is reading
+    // files perfectly well, so naming a missing capability was wrong on the
+    // common path. The panel says what is true of every case it cannot tell
+    // apart, and still says where the log is being written.
     const h = harness();
     activityWidget.mount(h.el, h.ctx);
     h.emit([], false);
-    expect(textOf(h)).toContain("not readable in this window");
+    expect(textOf(h)).toContain("Nothing to show from the analysis log yet");
+    expect(textOf(h)).toContain("either nothing has been written, or this window cannot read it");
+    expect(textOf(h)).toContain("activity.jsonl");
+    expect(textOf(h)).not.toContain("not readable in this window");
     expect(h.rows()).toHaveLength(0);
   });
 
@@ -875,7 +1010,7 @@ describe("mounted activity widget", () => {
     expect(h.rows()).toHaveLength(1);
     h.emit([], false);
     expect(h.rows()).toHaveLength(0);
-    expect(textOf(h)).toContain("not readable in this window");
+    expect(textOf(h)).toContain("Nothing to show from the analysis log yet");
   });
 
   it("never asks the host to fail the panel over a hostile log", () => {

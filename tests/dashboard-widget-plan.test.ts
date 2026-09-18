@@ -1,6 +1,10 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { currentPlan, planWidget } from "../app/src/renderer/dashboard/widgets/plan.js";
+import {
+  currentPlan,
+  PANEL_MEMORY_MAX,
+  planWidget,
+} from "../app/src/renderer/dashboard/widgets/plan.js";
 import { DashboardSources, parsePlanSections } from "../app/src/renderer/dashboard/data-sources.js";
 import type { DataSource, WidgetContext } from "../app/src/renderer/dashboard/widget-api.js";
 
@@ -397,9 +401,15 @@ describe("plan widget -- hostile and odd input", () => {
     h.notebook(stray);
     // Whatever the host makes of a stray CR, the panel must make the same
     // thing of it: a step the plan panel shows and the notebook panel does not
-    // is worse than both of them being wrong the same way.
-    const hostSteps = parsePlanSections(stray)[0]?.steps ?? [];
-    expect(h.el.querySelectorAll(".dash-row-item").length).toBe(hostSteps.length);
+    // is worse than both of them being wrong the same way. Asserting against
+    // the parser alone proves nothing, because the parser is what feeds the
+    // widget and both sides move together -- so the count is written down.
+    // As it happens the host drops the line: `.` does not match a lone CR, so
+    // the step pattern never anchors. Written down rather than derived, so a
+    // change on either side of the boundary has to be looked at.
+    expect(parsePlanSections(stray)[0]?.steps ?? []).toHaveLength(0);
+    expect(h.el.querySelectorAll(".dash-row-item")).toHaveLength(0);
+    expect(has(h, "No steps written down yet")).toBe(true);
   });
 
   it("drops no step when the heading carries no routing tag", () => {
@@ -517,6 +527,54 @@ describe("plan widget -- more than one plan", () => {
     // this panel answers. The finished plan is one click away under "other".
     const md = "## Plan A: Alpha\n\n- [x] a\n- [ ] b\n\n## Plan B: Beta\n\n- [x] e\n- [x] f\n";
     expect(currentPlan(parsePlanSections(md))?.title).toBe("Plan A: Alpha");
+  });
+
+  it("does not answer with a heading the agent has not written the steps under yet", () => {
+    // The streaming window the agent opens every time it drafts a plan: the
+    // heading is on disk and the steps are not. Answering with it hid the real
+    // plan completely -- "other plans" is off by default, so its two pending
+    // steps were nowhere on the dashboard.
+    const md =
+      "## Plan A: Alpha\n\n- [ ] 1. **Align the reads**\n- [ ] 2. **Call variants**\n\n## Plan B: Beta\n";
+    const plans = parsePlanSections(md);
+    expect(plans).toHaveLength(2);
+    expect(plans[1].steps).toHaveLength(0);
+    expect(currentPlan(plans)?.title).toBe("Plan A: Alpha");
+  });
+
+  it("ignores a stepless prose heading the host parser mistook for a plan", () => {
+    // PLAN_HEADING matches any `## Plan ...` line, so ordinary prose arrives
+    // here as a section with no steps.
+    const md =
+      "## Plan A: Alpha\n\n- [ ] 1. **Align the reads**\n\n## Plan of record\n\nSome prose.\n";
+    expect(currentPlan(parsePlanSections(md))?.title).toBe("Plan A: Alpha");
+  });
+
+  it("still answers with the last heading when no plan anywhere has a step", () => {
+    const md = "## Plan A: Alpha\n\n## Plan B: Beta\n";
+    expect(currentPlan(parsePlanSections(md))?.title).toBe("Plan B: Beta");
+  });
+
+  it("shows the real plan on screen rather than the empty heading under it", () => {
+    const h = harness();
+    planWidget.mount(h.el, h.ctx);
+    h.notebook(
+      "## Plan A: First [local]\n\n- [ ] 1. **Alpha**\n- [ ] 2. **Beta**\n\n## Plan B: Second\n",
+    );
+    expect(h.el.querySelector(".dash-plan-title")?.textContent).toBe("Plan A: First");
+    expect(has(h, "No steps written down yet")).toBe(false);
+    expect(has(h, "1. Alpha")).toBe(true);
+  });
+
+  it("does not render a plan or step title in an order nobody wrote it in", () => {
+    const h = harness();
+    planWidget.mount(h.el, h.ctx);
+    h.notebook(
+      "## Plan A: Report for \u202egnp.txt\n\n- [ ] 1. **Open \u202egnp.exe** -- \u202egnp.sh\n",
+    );
+    const text = h.text();
+    expect(text).not.toContain("\u202e");
+    expect(h.el.querySelector(".dash-plan-title")?.textContent).toContain("gnp.txt");
   });
 
   it("falls back to the last plan when none has been started", () => {
@@ -686,6 +744,45 @@ describe("plan widget -- lifecycle", () => {
     );
   });
 
+  it("forgets a row the notebook no longer offers", () => {
+    const three = `${TWO_PLANS}\n## Plan C: Extra [local]\n\n- [ ] 1. **Gamma**\n`;
+    const h = harness({ plan: "all" }, "p-prune");
+    planWidget.mount(h.el, h.ctx);
+    h.notebook(three);
+    const opened = h.el.querySelector(".dash-plan-older-row") as HTMLButtonElement;
+    opened.click();
+    expect(opened.getAttribute("aria-expanded")).toBe("true");
+
+    // The plan leaves the notebook, so its entry has nothing to belong to...
+    h.notebook(ONE_PLAN);
+    // ...and a plan arriving back in the same slot inherits nothing from it.
+    h.notebook(three);
+    expect(h.el.querySelector(".dash-plan-older-row")?.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("evicts the panel nobody has mounted for longest", () => {
+    // The map outlives every mount, so without a cap a long session
+    // accumulates a set for every panel id it has ever seen.
+    const first = harness({ plan: "all" }, "p-evicted");
+    const dispose = planWidget.mount(first.el, first.ctx);
+    first.notebook(TWO_PLANS);
+    (first.el.querySelector(".dash-plan-older-row") as HTMLButtonElement).click();
+    dispose?.();
+
+    // Enough other panels to push it out of the map.
+    for (let i = 0; i <= PANEL_MEMORY_MAX; i++) {
+      const other = harness({ plan: "all" }, `p-filler-${i}`);
+      planWidget.mount(other.el, other.ctx)?.();
+    }
+
+    const again = harness({ plan: "all" }, "p-evicted");
+    planWidget.mount(again.el, again.ctx);
+    again.notebook(TWO_PLANS);
+    expect(again.el.querySelector(".dash-plan-older-row")?.getAttribute("aria-expanded")).toBe(
+      "false",
+    );
+  });
+
   it("takes its header controls back down through onDispose", () => {
     const h = harness();
     const dispose = planWidget.mount(h.el, h.ctx);
@@ -698,13 +795,26 @@ describe("plan widget -- lifecycle", () => {
     expect(h.header.querySelectorAll("button")).toHaveLength(0);
   });
 
-  it("never writes to the notebook", () => {
+  it("asks the host to persist a header change rather than acting on it itself", () => {
+    // The old shape of this test asserted that clicking around left the
+    // notebook source untouched, which no widget could fail: `DataSource`
+    // exposes only get/subscribe, so there is nothing to write through. What
+    // is worth pinning is that the two header buttons go through setConfig --
+    // the host owns persistence -- and that idly opening an older plan does
+    // not, because reading should never write to the layout file.
     const h = harness({ plan: "all" });
     planWidget.mount(h.el, h.ctx);
     h.notebook(TWO_PLANS);
+
     h.buttons().forEach((b) => b.click());
+    expect(h.setConfig.mock.calls.map(([patch]) => patch)).toEqual([
+      { showCompleted: false },
+      { plan: "latest" },
+    ]);
+
+    h.setConfig.mockClear();
     (h.el.querySelector(".dash-plan-older-row") as HTMLButtonElement | null)?.click();
-    expect(h.sources.sources.notebook.get().markdown).toBe(TWO_PLANS);
+    expect(h.setConfig).not.toHaveBeenCalled();
   });
 
   it("shows the empty state before anything has been pushed, and says nothing else", () => {

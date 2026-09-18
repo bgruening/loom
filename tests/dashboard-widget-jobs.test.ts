@@ -259,22 +259,124 @@ describe("state folding", () => {
     expect(foldInvocationState("failed", null)).toBe("failed");
   });
 
-  it("gives every state a word and a glyph, so colour is never the only signal", () => {
-    const states: RunState[] = [
-      "running",
-      "queued",
+  it("stays quiet while a cancel is still settling, not only once it has landed", () => {
+    // Galaxy moves the invocation to `cancelled` and then deletes its jobs one
+    // at a time. rollUpInvocationJobs scores every `deleted` job in the same
+    // failed counter as a real error and activeJobs keeps the block off its
+    // terminal branch, so for the whole of that window the panel sees
+    // in_progress with a failed count -- which is the one shape the cancel
+    // exception used to miss.
+    expect(foldInvocationState("in_progress", "Workflow cancelling: 9 job(s) deleted")).toBe(
       "stopping",
-      "paused",
-      "finished",
-      "failed",
-      "cancelled",
-      "skipped",
-      "unknown",
-    ];
-    for (const state of states) {
-      expect(stateWord(state), state).toBeTruthy();
-      expect(stateGlyph(state), state).toBeTruthy();
+    );
+    const row = rowFor({
+      status: "in_progress",
+      summary: "Workflow cancelling: 9 job(s) deleted, 3 still going",
+      completedJobs: 0,
+      failedJobs: 9,
+      totalJobs: 12,
+    });
+    expect(row.state).toBe("stopping");
+    // Still moving, so it stays on screen under `show: active`.
+    expect(row.live).toBe(true);
+    expect(isActiveRun(row)).toBe(true);
+    expect(needsAttention(row)).toBe(false);
+    expect(attentionMessage([row])).toBe("");
+    expect(describeRun(row, NOW)).toBe("Stopping. Galaxy is still shutting this down.");
+  });
+
+  it("draws no red stripe on a run being shut down, and keeps its explanation", () => {
+    const h = harness({ show: "all" });
+    const dispose = jobsWidget.mount(h.el, h.ctx);
+    h.sources.setNotebook(
+      notebookWith([
+        invocationBlock({
+          invocation_id: "inv-cancelling",
+          galaxy_server_url: "https://usegalaxy.org",
+          notebook_anchor: "plan-a-step-1",
+          label: "chrM alignment",
+          submitted_at: ago(10 * MINUTE),
+          status: "in_progress",
+          summary: '"Workflow cancelling: 0 job(s) stopped, 3 still running"',
+          total_jobs: 12,
+          completed_jobs: 0,
+          failed_jobs: 9,
+          last_polled_at: ago(20_000),
+        }),
+      ]),
+    );
+    const item = h.el.querySelector(".dash-jobs-row");
+    expect(item?.getAttribute("data-state")).toBe("stopping");
+    expect(item?.classList.contains("is-failed")).toBe(false);
+    // The bar is drawn, and the nine deletes are not painted as errors in it.
+    expect(h.el.querySelector(".dash-jobs-bar")).not.toBeNull();
+    expect(h.el.querySelector(".dash-jobs-bar-fail")).toBeNull();
+    expect(h.el.querySelector(".dash-jobs-bar")?.getAttribute("aria-label")).toContain(
+      "9 did not finish",
+    );
+    // And the brain's own sentence about the cancel is not suppressed.
+    expect(h.el.querySelector(".dash-jobs-why")?.textContent).toContain("Workflow cancelling");
+    teardown(h, dispose);
+  });
+
+  it("still raises the alarm for a run that is failing rather than stopping", () => {
+    // Be careful with this fixture. The summary below is *also* what the brain
+    // writes while a cancel is settling, because rollUpInvocationJobs scores a
+    // `deleted` job in the same counter as an errored one and the block has no
+    // word for a cancel in flight -- so this test pins "a run reporting failed
+    // jobs alarms", not "a cancel alarms". Until checkInvocations says which it
+    // is, the widget cannot tell them apart and the exemption above only fires
+    // once the brain names it.
+    const row = rowFor({
+      status: "in_progress",
+      summary: "Workflow in progress: 9 job(s) failed, 3 still running",
+      completedJobs: 0,
+      failedJobs: 9,
+      totalJobs: 12,
+    });
+    expect(row.state).toBe("running");
+    expect(needsAttention(row)).toBe(true);
+    expect(attentionMessage([row])).toBe('9 of 12 jobs failed in "Count features".');
+  });
+
+  it("does not render a run label in an order nobody wrote it in", () => {
+    const rows = [rowFor({ label: "Report for \u202egnp.txt", status: "failed" })];
+    expect(attentionMessage(rows)).not.toContain("\u202e");
+    expect(attentionMessage(rows)).toContain("gnp.txt");
+  });
+
+  it("gives every state a word and a glyph, so colour is never the only signal", () => {
+    // Written out rather than looped over `toBeTruthy`: the point of the glyphs
+    // is that the panel is legible in greyscale and to someone who cannot
+    // separate red from green, and a truthiness check over a Record whose keys
+    // TypeScript already guarantees passes just as happily with the ✓ and the ✕
+    // swapped. Every pair below is the one a reader has to be able to rely on.
+    const vocabulary: Record<RunState, [string, string]> = {
+      running: ["Running", "●"],
+      queued: ["Waiting for Galaxy", "○"],
+      stopping: ["Stopping", "◐"],
+      paused: ["Paused", "⏸"],
+      finished: ["Finished", "✓"],
+      failed: ["Failed", "✕"],
+      cancelled: ["Cancelled", "⊘"],
+      skipped: ["Skipped", "⊘"],
+      unknown: ["In progress", "?"],
+    };
+    for (const [state, [word, glyph]] of Object.entries(vocabulary) as Array<
+      [RunState, [string, string]]
+    >) {
+      expect(stateWord(state), state).toBe(word);
+      expect(stateGlyph(state), state).toBe(glyph);
     }
+    // The behavioural claim underneath the table: no two states read the same.
+    // Two of them share a glyph on purpose -- cancelled and skipped are both
+    // "over, and not a failure" -- so it is the pair that has to be distinct,
+    // which is the same thing as saying the word carries the signal when the
+    // glyph does not.
+    const pairs = Object.values(vocabulary).map(([word, glyph]) => `${glyph} ${word}`);
+    expect(new Set(pairs).size).toBe(pairs.length);
+    const words = Object.values(vocabulary).map(([word]) => word);
+    expect(new Set(words).size).toBe(words.length);
     expect(stateWord("nonsense" as RunState)).toBe("In progress");
     expect(stateGlyph("nonsense" as RunState)).toBe("?");
   });
@@ -406,6 +508,62 @@ describe("staleness", () => {
     expect(row.live).toBe(true);
     expect(row.stale).toBe(false);
     expect(describeRun(row, NOW)).toContain("Running");
+  });
+
+  it("calls a job's stamp what it is -- the last change, not the last check", () => {
+    // tickJobs asks every fifteen seconds and writes only on a change, so
+    // "checked 3 h ago" is a lie about a run we are checking four times a
+    // minute -- and "no change yet" would be a different lie about a job whose
+    // state Galaxy did report. The details block already says "Last change".
+    const row = jobRowFor({ galaxyState: "running", lastPolledAt: ago(3 * HOUR) });
+    const meta = metaLine(row, NOW);
+    expect(meta).not.toContain("checked 3 h");
+    expect(meta).not.toContain("no change yet");
+    expect(meta).toContain("last change 3 h 00 m ago");
+  });
+
+  it("says nothing has changed only when nothing has been written down", () => {
+    // The normal shape of a live tool run: galaxy_job_record writes no state
+    // and no stamp, and the non-terminal poll does not add them.
+    const row = jobRowFor({});
+    expect(row.lastPolledAt).toBeNull();
+    expect(metaLine(row, NOW)).toContain("no change yet");
+  });
+
+  it("keeps calling an invocation's stamp a check, because that is what it is", () => {
+    // checkInvocations rewrites the block on every poll whether or not anything
+    // moved, so for an invocation the stamp really is a heartbeat.
+    const row = rowFor({ lastPolledAt: ago(3 * MINUTE) });
+    expect(metaLine(row, NOW)).toContain("checked 3 m ago");
+    expect(metaLine(row, NOW)).not.toContain("last change");
+  });
+
+  it("does not offer a submit time as the moment Galaxy was last checked", () => {
+    // A six-day-old invocation with no last_polled_at has never been polled.
+    // Reading the submit time as the poll time put "Galaxy was last checked 6 d
+    // ago" directly above a meta line saying "not checked yet".
+    const row = rowFor({ lastPolledAt: undefined, submittedAt: ago(6 * DAY) });
+    expect(row.stale).toBe(true);
+    expect(describeRun(row, NOW)).toBe("Can't tell right now. Galaxy has not been checked.");
+    expect(metaLine(row, NOW)).toContain("not checked yet");
+  });
+
+  it("does not let a timestamp from the future switch staleness off for good", () => {
+    // `now - heardFrom` goes negative, so the comparison against STALE_AFTER_MS
+    // can never be true again and the panel keeps drawing numbers nobody has
+    // refreshed. A stamp this far out is a bad clock or a hand edit, not skew.
+    const future = new Date(NOW + 365 * DAY).toISOString();
+    const row = rowFor({ lastPolledAt: future, submittedAt: ago(6 * DAY) });
+    expect(row.lastPolledAt).toBeNull();
+    expect(row.stale).toBe(true);
+    expect(describeRun(row, NOW)).toBe("Can't tell right now. Galaxy has not been checked.");
+  });
+
+  it("still forgives the clock skew between two ordinary machines", () => {
+    const row = rowFor({ lastPolledAt: new Date(NOW + 20_000).toISOString() });
+    expect(row.lastPolledAt).not.toBeNull();
+    expect(row.stale).toBe(false);
+    expect(formatAgo(row.lastPolledAt, NOW)).toBe("just now");
   });
 });
 

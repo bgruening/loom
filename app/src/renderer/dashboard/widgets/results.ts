@@ -23,6 +23,7 @@ import { extOf } from "../../files/image-preview.js";
 import { rewritePreviewImageHref } from "../../files/markdown-preview.js";
 import type { FileNode } from "../../../preload/preload.js";
 import type { FilesSnapshot, WidgetDefinition, WidgetDispose } from "../widget-api.js";
+import { safeNameOr } from "./text-safety.js";
 
 type ResultsConfig = {
   /** `gallery` shows everything that matches; `pinned` shows one file. */
@@ -72,11 +73,46 @@ const MAX_GLOB_VARIANTS = 16;
 const MAX_LIMIT = 60;
 /**
  * How long a listing may take before the panel stops saying it is looking.
- * The files source reports "not available" both before the host has asked the
- * shell and in a shell that has no listing at all, and only time tells them
- * apart from in here. A host that marked the second case would be better.
+ * The files source reports "not available" before the host has asked the
+ * shell, in a shell that has no listing at all, and for the moment after a
+ * reset -- and only time tells them apart from in here. A host that marked the
+ * shell-has-no-listing case would be better: `FilesSnapshot` wants an `exists`
+ * alongside `available`, and the log panel needs the same thing for the same
+ * reason.
  */
 const LISTING_GRACE_MS = 1200;
+
+/**
+ * How often an image already on screen is offered back to the disk.
+ *
+ * A file listing carries a name and a size and no mtime, so a plot regenerated
+ * from new data at the same dimensions -- which lands on the same byte count
+ * far more often than it sounds like it would -- is indistinguishable from the
+ * old one. Both the redraw signature and the cache-buster are built from that
+ * size, so the panel kept showing the previous figure for the rest of the
+ * session. Nothing in the widget can detect the rewrite, so the images are
+ * re-fetched on a slow tick instead, and only when the file listing has moved
+ * since they were drawn.
+ *
+ * Be honest about what that costs. "The listing has moved" is every
+ * `files:changed` the shell reports, and during an active analysis the brain is
+ * rewriting `notebook.md` and appending to `activity.jsonl` continuously -- so
+ * in practice every drawn image is re-read once per tick for as long as the
+ * session is busy. On an idle analysis it is nothing. A tighter guard is not
+ * available: the one signal that would say "this plot changed" is the one the
+ * listing does not carry.
+ *
+ * **Table previews have the identical bug and are not covered here.** The same
+ * byte count gives `renderTable` the same URL and the same signature, so a
+ * regenerated counts file keeps its old rows. Re-running a table preview means
+ * re-rendering the entry rather than swapping one attribute, which is a bigger
+ * change than this one and wants the real fix instead.
+ *
+ * The real fix is an mtime on `FileNode`. The main process already stats every
+ * file to fill in the size (`app/src/main/files-handler.ts`), and so does the
+ * web file surface, so it is one field and this whole tick goes away.
+ */
+const IMAGE_RECHECK_MS = 30_000;
 
 const GALLERY_TABLE_ROWS = 4;
 const GALLERY_TABLE_COLS = 4;
@@ -387,20 +423,32 @@ export function formatSize(bytes: number | null): string {
  * and passing through unrewritten -- the rewriter documents that prefix as the
  * way to force a relative reading. Returns "" for anything it cannot jail.
  */
-export function artifactUrl(relPath: string, cacheKey?: number | null): string {
+export function artifactUrl(relPath: string, cacheKey?: string | number | null): string {
   const base = rewritePreviewImageHref("", `./${relPath}`);
   if (!base) return "";
   // The protocol handler reads only the path, so a query is a free cache-buster
   // for a plot that was overwritten in place.
-  return cacheKey ? `${base}?v=${cacheKey}` : base;
+  return cacheKey ? `${base}?v=${encodeURIComponent(String(cacheKey))}` : base;
 }
 
 // ── Reading a head over the artifact scheme ──────────────────────────────────
 
 /**
+ * How far past the budget a body-less response may declare itself and still be
+ * worth reading whole. Generous, because `content-length` is bytes while the
+ * budget and the slice below it are characters -- a multibyte text file needs
+ * headroom for the two to mean the same thing -- and because a few multiples of
+ * 32 KB is nothing; bounded, because the alternative on that path is the whole
+ * file.
+ */
+const NO_BODY_BUDGET_MULTIPLE = 8;
+
+/**
  * Pull at most `budget` bytes and stop. The stream is cancelled rather than
- * drained, so a 2 GB counts table costs the same as a 2 KB one. Exported so
- * that "does not read more than it shows" is a test rather than a claim.
+ * drained, so a 2 GB counts table costs the same as a 2 KB one, and the
+ * fallback for a response with no body at all refuses to read one it cannot
+ * prove is small. Exported so that "does not read more than it shows" is a
+ * test rather than a claim.
  */
 export async function readHead(
   url: string,
@@ -412,9 +460,17 @@ export async function readHead(
     const res = await fetch(url, { signal });
     if (!res.ok) return null;
     if (!res.body) {
-      // A Response with no body cannot be read incrementally, so there is no
-      // read to save here and the budget is applied in characters rather than
-      // bytes. Electron's net.fetch always gives a body; this is the fallback.
+      // A Response with no body cannot be read incrementally, so the only way
+      // to slice a head out of it is to materialise the whole thing -- which is
+      // the one thing this function promises not to do, and against a 200 MB
+      // counts table it is 200 MB on the main thread. So this path reads only
+      // what the response has proved is small: no declared length, or a length
+      // well past the budget, and the caller gets nothing and draws a plain row
+      // instead. Electron's net.fetch always gives a body, so this is a
+      // fallback for shells that do not.
+      const declared = res.headers?.get?.("content-length");
+      const bytes = declared === null || declared === undefined ? NaN : Number(declared);
+      if (!Number.isFinite(bytes) || bytes > budget * NO_BODY_BUDGET_MULTIPLE) return null;
       const all = await res.text();
       return { text: all.slice(0, budget), truncated: all.length > budget };
     }
@@ -492,7 +548,18 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
     // a console rather than a card in the user's face.
     let warnedAboutReads = false;
     let graceExpired = false;
+    let wasAvailable = false;
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    // Bumped by the re-check tick to build a URL the browser has not cached.
+    let imageGeneration = 0;
+    // The listing these images were drawn from. Nothing newer means nothing can
+    // have been rewritten under them.
+    let imagesDrawnFrom = 0;
+    const drawnImages = new Map<HTMLImageElement, ResultFile>();
     ctx.onDispose(() => controller.abort());
+
+    const imageUrl = (file: ResultFile): string =>
+      artifactUrl(file.relPath, `${file.size ?? "?"}.${imageGeneration}`);
 
     const config = readResultsConfig(ctx.config);
     const pinned = config.mode === "pinned";
@@ -501,18 +568,24 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
 
     const addCaption = (entry: HTMLElement, file: ResultFile): void => {
       const caption = node("div", "dash-results-caption");
+      // A filename is whatever a tool wrote, so it gets the same treatment the
+      // log panel gives a tool argument: an override in the middle of it would
+      // otherwise render `a<RLO>gnp.exe` as `a...exe.png`. The click still
+      // carries the real path -- only what the reader sees is normalized.
+      const shownName = safeNameOr(file.name, "(unnamed file)");
+      const shownPath = safeNameOr(file.relPath, "(unnamed file)");
       // A button only where the shell can actually open the file. Seeing the
       // plot and not being able to get to it was the weakest part of this
       // panel, but a name that looks clickable and does nothing is worse.
       if (ctx.openFile) {
-        const open = node("button", "dash-results-name dash-results-open", file.name);
+        const open = node("button", "dash-results-name dash-results-open", shownName);
         open.type = "button";
-        open.title = `Open ${file.relPath}`;
+        open.title = `Open ${shownPath}`;
         open.addEventListener("click", () => ctx.openFile?.(file.relPath));
         caption.append(open);
       } else {
-        const name = node("span", "dash-results-name", file.name);
-        name.title = file.relPath;
+        const name = node("span", "dash-results-name", shownName);
+        name.title = shownPath;
         caption.append(name);
       }
       const size = formatSize(file.size);
@@ -588,16 +661,25 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
 
     const renderEntry = (file: ResultFile, token: AbortSignal): HTMLElement => {
       const entry = node("div", "dash-results-entry");
-      if (file.kind === "image" && (file.size === null || file.size <= IMAGE_MAX_BYTES)) {
-        const url = artifactUrl(file.relPath, file.size);
+      // A null size is a stat that threw -- a broken symlink, or a file racing
+      // the write that is creating it -- not a small file. Drawing it anyway
+      // put an uncapped <img> on the page for the one kind of file we know
+      // least about, so it fails closed to a plain row and comes back as a
+      // thumbnail on the next listing that can measure it.
+      if (file.kind === "image" && file.size !== null && file.size <= IMAGE_MAX_BYTES) {
+        const url = imageUrl(file);
         if (url) {
           // Always an <img>. An SVG is active content and inlining one would
           // run whatever a tool wrote into it.
           const img = node("img", pinned ? "dash-results-figure tall" : "dash-results-figure");
           img.src = url;
-          img.alt = file.name;
+          img.alt = safeNameOr(file.name, "(unnamed file)");
           img.loading = "lazy";
-          img.addEventListener("error", () => img.remove());
+          img.addEventListener("error", () => {
+            drawnImages.delete(img);
+            img.remove();
+          });
+          drawnImages.set(img, file);
           entry.append(img);
         }
       } else if (file.kind === "table") {
@@ -608,10 +690,16 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
     };
 
     const draw = (snapshot: FilesSnapshot): void => {
-      // `available: false` covers two different things: the host has not asked
-      // the shell yet, and the shell has no listing to give. Announcing "this
-      // shell cannot list the analysis folder" while a large workspace is still
-      // being walked is a lie the desktop user would see on every startup.
+      // `available: false` covers three different things: the host has not
+      // asked the shell yet, the shell has no listing to give, and the source
+      // was just reset for a new analysis. Announcing anything about the shell
+      // while a large workspace is still being walked is a lie the desktop user
+      // would see on every startup, so a fresh `false` buys a grace period --
+      // including a `false` that arrives after a `true`, which is what /new and
+      // every cwd switch produce and what used to walk straight past a latch
+      // that only ever expired once.
+      if (wasAvailable && !snapshot.available) armGrace();
+      wasAvailable = snapshot.available;
       const listing = snapshot.available ? "on" : graceExpired ? "off" : "pending";
       const files = collectResultFiles(snapshot.root);
       const pinnedFile = pinned ? (files.find((f) => f.relPath === config.path) ?? null) : null;
@@ -637,6 +725,8 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
       controller = new AbortController();
       const token = controller.signal;
       list.textContent = "";
+      drawnImages.clear();
+      imagesDrawnFrom = snapshot.updatedAt;
 
       showAll.hidden = !pinned;
       count.textContent =
@@ -653,7 +743,12 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
             "dash-results-empty",
             listing === "pending"
               ? "Looking for the files in this analysis."
-              : "This shell cannot list the analysis folder yet, so results cannot be shown here.",
+              : // Which of the three it is, the panel cannot tell -- and it is
+                // the shell's own File pane that would say otherwise, so the
+                // old wording claimed a missing capability on a window that
+                // reads files perfectly well.
+                "Nothing has been listed for this analysis. Either nothing has been written yet, " +
+                  "or this window cannot list the folder.",
           ),
         );
         return;
@@ -672,14 +767,47 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
       for (const file of selection.shown) list.append(renderEntry(file, token));
     };
 
-    const graceTimer = setTimeout(() => {
-      graceExpired = true;
-      const snapshot = ctx.sources.files.get();
-      if (snapshot.available) return;
-      signature = "";
-      draw(snapshot);
-    }, LISTING_GRACE_MS);
+    function armGrace(): void {
+      clearTimeout(graceTimer);
+      graceExpired = false;
+      graceTimer = setTimeout(() => {
+        graceExpired = true;
+        const snapshot = ctx.sources.files.get();
+        if (snapshot.available) return;
+        signature = "";
+        draw(snapshot);
+      }, LISTING_GRACE_MS);
+    }
     ctx.onDispose(() => clearTimeout(graceTimer));
+    armGrace();
+
+    // Through onDispose rather than the returned dispose, and with the throw
+    // handed to ctx.fail by hand: a widget that throws never gets to return a
+    // dispose, and a timer callback that throws otherwise disappears into the
+    // event loop leaving a panel that has quietly stopped updating.
+    const recheck = setInterval(() => {
+      try {
+        if (drawnImages.size === 0) return;
+        const snapshot = ctx.sources.files.get();
+        if (snapshot.updatedAt <= imagesDrawnFrom) return;
+        imagesDrawnFrom = snapshot.updatedAt;
+        imageGeneration++;
+        for (const [img, file] of drawnImages) {
+          // Through imageUrl, so the key has one shape: a redraw that follows a
+          // tick then lands on the URL the tick already fetched instead of
+          // paying for a third one.
+          const url = imageUrl(file);
+          if (url) img.src = url;
+        }
+      } catch (err) {
+        // Not ctx.fail: this is a cosmetic refresh of something already on
+        // screen, and the same file two functions up keeps its rows rather
+        // than turning into an error card over a preview. Tearing the whole
+        // panel down because a cache-buster threw would be the louder bug.
+        console.error("[dashboard] results image re-check failed:", err);
+      }
+    }, IMAGE_RECHECK_MS);
+    ctx.onDispose(() => clearInterval(recheck));
 
     ctx.subscribe(ctx.sources.files, draw);
 
