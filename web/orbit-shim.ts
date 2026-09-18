@@ -7,6 +7,7 @@
  */
 
 import { decodeEventPayload } from "./event-payload.js";
+import { decodeListResponse, decodeReadResponse } from "./files-wire.js";
 
 type Callback<T extends unknown[]> = (...args: T) => void;
 
@@ -226,7 +227,15 @@ async function fetchMode(): Promise<"remote" | "desktop"> {
   openIssueReport: () => Promise.resolve({ opened: false }),
   submitFeedback: () =>
     Promise.resolve({ ok: false, error: "feedback is unavailable in remote mode" }),
-  readFile: () => Promise.resolve({ ok: false, error: "file read is unavailable in remote mode" }),
+  // Read-only file surface, served by the web server out of the session cwd
+  // and jailed to it (web/files-surface.ts). Bytes arrive base64-encoded
+  // because the transport is JSON; files-wire rebuilds the Uint8Array the
+  // renderer is typed against, and turns an older server's null for an
+  // unknown channel into a refusal it can draw.
+  listFiles: async (opts?: { includeHidden?: boolean }) =>
+    decodeListResponse(await invoke("files:list", opts)),
+  readFile: async (relPath: string, opts?: { tail?: boolean }) =>
+    decodeReadResponse(await invoke("files:read", relPath, opts)),
   // These three are served by the web server out of the session cwd, so they
   // behave the same here as on the desktop: the notebook the brain is writing,
   // and the dashboard layout that sits beside it.
