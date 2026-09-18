@@ -739,6 +739,35 @@ describe("changes the editor did not make", () => {
     expect(root.querySelector(".dash-editor-note")!.hasAttribute("hidden")).toBe(true);
   });
 
+  it("still records a widget's own config change in a workspace with nothing saved", () => {
+    // Nothing on disk, so the document stays the pristine default until the
+    // person touches something -- and the first thing they touch is often a
+    // control in a panel header. The load-off-disk rule must not eat it.
+    registry = new WidgetRegistry();
+    for (const type of ["jobs", "plan"]) registry.register(stubWidget(type));
+    registry.register(
+      stubWidget("notebook", {
+        label: "Notebook",
+        defaultConfig: { follow: true },
+        mount: (_el, ctx) => {
+          const button = document.createElement("button");
+          button.dataset.act = "widget-toggle";
+          button.addEventListener("click", () => ctx.setConfig({ follow: false }));
+          ctx.header.append(button);
+        },
+      }),
+    );
+    build();
+    expect(host.getDocument()).toEqual(createDefaultDashboardDocument());
+
+    act("widget-toggle").click();
+    expect(host.getDocument().dashboards[0].panels[0].config).toEqual({ follow: false });
+    startEditing();
+    expect(root.querySelector(".dash-editor-note")!.hasAttribute("hidden")).toBe(false);
+    act("undo").click();
+    expect(host.getDocument().dashboards[0].panels[0].config).toEqual({ follow: true });
+  });
+
   it("records every change after that one", () => {
     build();
     host.setDocument(doc("notebook"), { persist: false });

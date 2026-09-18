@@ -1308,14 +1308,20 @@ export class DashboardEditorController implements DashboardEditor {
       return;
     }
 
+    const change = describeDocumentChange(before, current, (panel) => this.panelName(panel));
+
     // The saved layout arriving from disk is not a change to anything the user
     // has seen -- it is the first thing they see. Recognised by what it
     // replaces rather than by a clock, so a slow read is still the first read.
-    const firstChangeFromDefault = !this.sawFirstExternalChange && this.isPristineDefault(before);
-    this.sawFirstExternalChange = true;
-    if (firstChangeFromDefault) return;
+    // Only a structural change can be that load: a workspace with nothing saved
+    // sits on the default until somebody edits it, and treating the first
+    // widget saving its own config as the load would cost them that Undo.
+    if (change.kind === "structure") {
+      const firstStructuralChange = !this.sawFirstExternalChange && this.isPristineDefault(before);
+      this.sawFirstExternalChange = true;
+      if (firstStructuralChange) return;
+    }
 
-    const change = describeDocumentChange(before, current, (panel) => this.panelName(panel));
     this.undo.push(change.label, before, change.kind === "config" ? "external-config" : "external");
   }
 
