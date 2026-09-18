@@ -7,6 +7,7 @@
  */
 
 import { decodeEventPayload } from "./event-payload.js";
+import { decodeListResponse, decodeReadResponse, transportRefusal } from "./files-wire.js";
 
 type Callback<T extends unknown[]> = (...args: T) => void;
 
@@ -226,7 +227,24 @@ async function fetchMode(): Promise<"remote" | "desktop"> {
   openIssueReport: () => Promise.resolve({ opened: false }),
   submitFeedback: () =>
     Promise.resolve({ ok: false, error: "feedback is unavailable in remote mode" }),
-  readFile: () => Promise.resolve({ ok: false, error: "file read is unavailable in remote mode" }),
+  // Read-only file surface, served by the web server out of the session cwd
+  // and jailed to it (web/files-surface.ts). Bytes arrive base64-encoded
+  // because the transport is JSON; files-wire rebuilds the Uint8Array the
+  // renderer is typed against, and turns an older server's null for an
+  // unknown channel into a refusal it can draw.
+  listFiles: (opts?: { includeHidden?: boolean }) =>
+    invoke("files:list", opts).then(decodeListResponse, (err) =>
+      transportRefusal(err, "the files could not be listed"),
+    ),
+  readFile: (relPath: string, opts?: { tail?: boolean }) =>
+    invoke("files:read", relPath, opts).then(decodeReadResponse, (err) =>
+      transportRefusal(err, "the file could not be read"),
+    ),
+  // Read-only means read-only, and the file viewer's Save button is now
+  // reachable here for the first time. Without this it would report
+  // "window.orbit.writeFile is not a function" at the user.
+  writeFile: () =>
+    Promise.resolve({ ok: false as const, error: "the web shell opens files read-only" }),
   // These three are served by the web server out of the session cwd, so they
   // behave the same here as on the desktop: the notebook the brain is writing,
   // and the dashboard layout that sits beside it.

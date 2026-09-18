@@ -38,6 +38,7 @@ import {
   DASHBOARD_MAX_BYTES,
   dashboardRevision,
 } from "../shared/dashboard-contract.js";
+import { listFilesForWeb, readFileForWeb } from "./files-surface.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // In dev this file runs from web/; the container bundles it to web/build/ and
@@ -632,6 +633,29 @@ wss.on("connection", (socket) => {
       } catch (err) {
         respond(id, { ok: false, error: err instanceof Error ? err.message : String(err) });
       }
+      return;
+    }
+    // The read-only file surface. The desktop answers these from the main
+    // process; here they are a network surface onto the analysis directory, so
+    // the jail lives in files-surface.ts and is tested on its own. It is
+    // anchored on the same `cwd` the brain is spawned in, which `agent:set-cwd`
+    // moves -- so the surface is exactly as wide as the directory this session
+    // is pointed at, and no wider.
+    if (channel === "files:list") {
+      void listFilesForWeb(cwd, { remote: IS_REMOTE_MODE }).then(
+        (result) => respond(id, result),
+        // Neither of these should reject, but a channel that answers nothing
+        // leaves the caller's promise pending for the life of the socket.
+        () => respond(id, { ok: false, error: "the files could not be listed" }),
+      );
+      return;
+    }
+    if (channel === "files:read") {
+      const opts = (args[1] ?? undefined) as { tail?: boolean } | undefined;
+      void readFileForWeb(cwd, args[0], opts, { remote: IS_REMOTE_MODE }).then(
+        (result) => respond(id, result),
+        () => respond(id, { ok: false, error: "the file could not be read" }),
+      );
       return;
     }
     if (channel === "agent:set-cwd") {
