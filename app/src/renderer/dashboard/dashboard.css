@@ -2,9 +2,15 @@
    styles.css, which several branches edit at once. Every custom property used
    here is already defined in styles.css. */
 
-/* Per-widget styles live with their widget. @import has to precede every rule
-   below it, so new ones go here. */
+/* Per-widget and editor styles live next to the code that draws them. @import
+   has to precede every rule below it, so new ones go here. */
+@import "./widgets/jobs.css";
+@import "./widgets/plan.css";
+@import "./widgets/activity.css";
+@import "./widgets/results.css";
 @import "./widgets/galaxy-history.css";
+@import "./widgets/html-sandbox.css";
+@import "./editor/editor.css";
 
 #dashboard-view {
   position: absolute;

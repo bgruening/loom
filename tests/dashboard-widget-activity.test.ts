@@ -117,7 +117,6 @@ function textOf(h: Harness): string {
 
 beforeEach(() => {
   document.body.innerHTML = "";
-  document.head.querySelector("#dash-activity-styles")?.remove();
 });
 
 // -- contract ----------------------------------------------------------------
@@ -792,14 +791,6 @@ describe("mounted activity widget", () => {
     scroller.scrollTop = 0;
     h.emit([event("tool.end", { toolName: "a" }), event("tool.end", { toolName: "b" })]);
     expect(scroller.scrollTop).toBe(0);
-  });
-
-  it("installs its stylesheet once, however many panels mount", () => {
-    const a = harness();
-    activityWidget.mount(a.el, a.ctx);
-    const b = harness();
-    activityWidget.mount(b.el, b.ctx);
-    expect(document.head.querySelectorAll("#dash-activity-styles")).toHaveLength(1);
   });
 
   it("empties its element and stops listening when it is disposed", () => {

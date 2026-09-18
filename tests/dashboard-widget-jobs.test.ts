@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   attentionMessage,
   countsSentence,
@@ -31,6 +33,24 @@ import type {
   WidgetContext,
 } from "../app/src/renderer/dashboard/widget-api.js";
 import type { Invocation } from "../app/src/renderer/galaxy-invocations.js";
+
+/**
+ * The widget's rules ship as a stylesheet the page links, not as markup the
+ * widget injects, so a computed-style assertion only means anything if the test
+ * document has loaded the same file the app does.
+ */
+const JOBS_CSS = readFileSync(
+  // Resolved from the repo root, not from `import.meta.url`: under happy-dom
+  // that is an http URL and `fileURLToPath` refuses it.
+  resolve(process.cwd(), "app/src/renderer/dashboard/widgets/jobs.css"),
+  "utf8",
+);
+
+beforeAll(() => {
+  const style = document.createElement("style");
+  style.textContent = JOBS_CSS;
+  document.head.append(style);
+});
 
 /** A fixed clock, so "1 h 34 m ago" is the same string on every machine. */
 const NOW = Date.parse("2026-09-18T12:00:00.000Z");
@@ -1207,8 +1227,8 @@ describe("mounted jobs widget", () => {
 
   it("really hides the failure strip, not just its hidden property", () => {
     // display:flex is an author rule and beats the UA [hidden] rule, so the
-    // property alone proves nothing. The host has its own [hidden] rule, but
-    // this harness mounts outside it -- which is exactly the gap.
+    // property alone proves nothing. The rule that wins it back lives in
+    // jobs.css, which is why this file loads the real stylesheet.
     const h = harness();
     const dispose = jobsWidget.mount(h.el, h.ctx);
     const alert = h.el.querySelector(".dash-jobs-alert") as HTMLElement;
@@ -1278,15 +1298,5 @@ describe("mounted jobs widget", () => {
     h.sources.setNotebook(notebookWith([liveInvocationBlock(9)]));
     expect(open().open).toBe(false);
     teardown(h, dispose);
-  });
-
-  it("adds its stylesheet once, however many panels mount it", () => {
-    const a = harness();
-    const b = harness();
-    const d1 = jobsWidget.mount(a.el, a.ctx);
-    const d2 = jobsWidget.mount(b.el, b.ctx);
-    expect(document.querySelectorAll("#dash-jobs-style").length).toBe(1);
-    teardown(a, d1);
-    teardown(b, d2);
   });
 });

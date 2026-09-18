@@ -195,7 +195,6 @@ const ORBIT_POLICY = "default-src 'self'; script-src 'self'; frame-src blob:; fo
 
 beforeEach(() => {
   document.body.innerHTML = "";
-  document.head.querySelector("#dash-sandbox-styles")?.remove();
   setPagePolicy(ORBIT_POLICY);
   localStorage.clear();
   delete (globalThis as Record<string, unknown>)[HTML_SANDBOX_GLOBAL];

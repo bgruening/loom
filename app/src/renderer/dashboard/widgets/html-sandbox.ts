@@ -52,7 +52,6 @@ import {
 } from "../sandbox/data-snapshot.js";
 import { isHtmlSandboxEnabled } from "../sandbox/flag.js";
 import { checkHostFramePolicy } from "../sandbox/host-policy.js";
-import { ensureSandboxStyles } from "../sandbox/styles.js";
 
 type HtmlSandboxConfig = {
   /** The markup to render. Treated as hostile. */
@@ -90,8 +89,6 @@ export const htmlSandboxWidget: WidgetDefinition<HtmlSandboxConfig> = {
   defaultConfig: { html: "", data: [] },
 
   mount(el, ctx): WidgetDispose {
-    ensureSandboxStyles();
-
     // The badge goes up whatever happens next, including the disabled and
     // refused paths: "this panel's content did not come from us" is true in
     // all of them.

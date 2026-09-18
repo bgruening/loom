@@ -1,20 +1,5 @@
-/**
- * The editor's stylesheet, as text, injected once when the editor attaches.
- *
- * This belongs in `editor/editor.css` with a `<link>` in `index.html` next to
- * the existing `dashboard/dashboard.css`. It lives here instead so that adding
- * the editor needed no edit to `index.html`, which is shared by both shells and
- * by every other pane. The page's CSP allows `style-src 'self' 'unsafe-inline'`,
- * and the element is keyed by id, so a second attach does not add a second copy.
- *
- * Every custom property used here is defined in `styles.css` already, except
- * `--dash-text-meta`, which `dashboard.css` defines only inside `.dash-panel`
- * -- the toolbar is outside that, so the same value is repeated for it.
- */
-
-export const EDITOR_STYLE_ELEMENT_ID = "dash-editor-styles";
-
-export const EDITOR_STYLES = `
+/* Dashboard layout editor. Loaded through the @import in dashboard.css.
+   Every custom property used here is already defined in styles.css. */
 .dash-toolbar.dash-editor {
   --dash-text-meta: rgba(248, 250, 252, 0.72);
   display: flex;
@@ -387,4 +372,3 @@ export const EDITOR_STYLES = `
   opacity: 0.3;
   cursor: default;
 }
-`;

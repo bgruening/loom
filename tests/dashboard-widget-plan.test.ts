@@ -603,14 +603,6 @@ describe("plan widget -- lifecycle", () => {
     expect(h.text()).toBe("No plan yet -- ask Loom to draft one.");
   });
 
-  it("adds its stylesheet once, however many panels mount", () => {
-    const a = harness();
-    planWidget.mount(a.el, a.ctx);
-    const b = harness();
-    planWidget.mount(b.el, b.ctx);
-    expect(document.querySelectorAll("#dash-plan-styles")).toHaveLength(1);
-  });
-
   it("empties its element and drops its class on dispose", () => {
     const h = harness();
     const dispose = planWidget.mount(h.el, h.ctx);

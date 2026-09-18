@@ -452,64 +452,6 @@ export async function readHead(
 
 // ── DOM ──────────────────────────────────────────────────────────────────────
 
-const STYLES = `
-.dash-results { padding: 0; }
-.dash-results-list { display: flex; flex-direction: column; gap: 8px; padding: 10px; }
-.dash-results-entry {
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  overflow: hidden;
-  background: var(--bg-deep);
-}
-.dash-results-figure {
-  display: block;
-  width: 100%;
-  max-height: 150px;
-  object-fit: contain;
-  background: var(--bg-deep);
-}
-.dash-results-figure.tall { max-height: 320px; }
-.dash-results-caption {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 4px 6px;
-  background: var(--bg-surface);
-  font-size: 11px;
-}
-.dash-results-name {
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--font, monospace);
-  color: var(--text);
-}
-.dash-results-meta { color: var(--dash-text-meta); white-space: nowrap; font-size: 10px; }
-.dash-results-table-wrap { overflow-x: auto; }
-.dash-results-table { border-collapse: collapse; font-size: 10px; width: 100%; }
-.dash-results-table th,
-.dash-results-table td {
-  padding: 2px 6px;
-  text-align: left;
-  white-space: nowrap;
-  max-width: 140px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  border-bottom: 1px solid var(--border);
-}
-.dash-results-table th { color: var(--dash-text-meta); font-weight: 600; }
-.dash-results-table td { font-family: var(--font, monospace); }
-.dash-results-note { padding: 2px 6px; font-size: 10px; color: var(--dash-text-meta); }
-.dash-results-empty { padding: 10px; font-size: 12px; line-height: 1.5; color: var(--dash-text-meta); }
-/* Visible without a hover: a control that only appears under a mouse is a
-   control a keyboard or a touchscreen never finds. */
-.dash-results-pin { opacity: 0.55; }
-.dash-results-entry:hover .dash-results-pin,
-.dash-results-pin:focus-visible { opacity: 1; }
-`;
-
 function node<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   className?: string,
@@ -529,15 +471,8 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
 
   mount(el, ctx): WidgetDispose {
     el.classList.add("dash-results");
-    // The stylesheet ships inside the widget because dashboard.css is not this
-    // branch's to edit. Its rules apply document-wide wherever the element is
-    // parented -- prefixing is a naming convention, not a scope -- and they have
-    // to, because the count lives in ctx.header, outside this element. One copy
-    // per panel, removed with the panel; it belongs in dashboard.css.
-    const style = document.createElement("style");
-    style.textContent = STYLES;
     const list = node("div", "dash-results-list");
-    el.append(style, list);
+    el.append(list);
 
     const count = node("span", "dash-results-meta");
     ctx.header.append(count);

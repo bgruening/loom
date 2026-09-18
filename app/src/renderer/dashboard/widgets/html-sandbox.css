@@ -1,18 +1,5 @@
-/**
- * The widget's stylesheet, injected once on first mount.
- *
- * `dashboard/dashboard.css` is the shared foundation file and several branches
- * are editing it at the same time, so this widget carries its own rather than
- * adding to that collision. Injected from `mount` and not at module scope: a
- * module that throws while being imported takes the whole renderer down, and
- * registration runs on the import chain the window boots through.
- *
- * Every custom property used here is already defined in `styles.css`.
- */
-
-const STYLE_ID = "dash-sandbox-styles";
-
-const CSS = `
+/* Agent-authored HTML widget (flag-gated). Loaded through the @import in dashboard.css.
+   Every custom property used here is already defined in styles.css. */
 .dash-sandbox {
   display: flex;
   flex-direction: column;
@@ -88,13 +75,4 @@ const CSS = `
   border-left-color: var(--error);
   background: var(--error-bg);
   color: var(--text);
-}
-`;
-
-export function ensureSandboxStyles(doc: Document = document): void {
-  if (doc.getElementById(STYLE_ID)) return;
-  const style = doc.createElement("style");
-  style.id = STYLE_ID;
-  style.textContent = CSS;
-  doc.head.append(style);
 }

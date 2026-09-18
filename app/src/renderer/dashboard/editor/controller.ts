@@ -62,7 +62,6 @@ import {
   parseConfigJson,
   unsupportedConfigKeys,
 } from "./config-form.js";
-import { EDITOR_STYLES, EDITOR_STYLE_ELEMENT_ID } from "./styles.js";
 
 export interface DashboardEditorOptions {
   /** How many changes back Undo reaches. */
@@ -121,15 +120,6 @@ function quote(name: string): string {
   return "“" + name + "”";
 }
 
-function injectStyles(): void {
-  if (typeof document === "undefined") return;
-  if (document.getElementById(EDITOR_STYLE_ELEMENT_ID)) return;
-  const style = document.createElement("style");
-  style.id = EDITOR_STYLE_ELEMENT_ID;
-  style.textContent = EDITOR_STYLES;
-  document.head.append(style);
-}
-
 export class DashboardEditorController implements DashboardEditor {
   private ctx: DashboardEditorContext | null = null;
   private root: HTMLElement | null = null;
@@ -184,7 +174,6 @@ export class DashboardEditorController implements DashboardEditor {
     this.root = ctx.toolbar.parentElement;
     this.sawFirstExternalChange = false;
     this.lastKnown = ctx.host.getDocument();
-    injectStyles();
     this.buildToolbar(ctx.toolbar);
     this.watchGrid();
     this.renderToolbar();
