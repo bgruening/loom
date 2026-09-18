@@ -171,15 +171,13 @@ describe("compare and swap", () => {
     });
     const shell: FakeShell = {
       loadDashboard: vi.fn().mockResolvedValue({ ok: true, raw: null, revision: null }),
-      saveDashboard: vi
-        .fn()
-        .mockResolvedValue({
-          ok: false,
-          conflict: true,
-          error: "changed",
-          raw: theirs,
-          revision: "r9",
-        }),
+      saveDashboard: vi.fn().mockResolvedValue({
+        ok: false,
+        conflict: true,
+        error: "changed",
+        raw: theirs,
+        revision: "r9",
+      }),
     };
     installShell(shell);
     const dash = initDashboard(root);

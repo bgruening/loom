@@ -17,9 +17,7 @@ export class WidgetRegistry {
    */
   register(def: WidgetDefinition): boolean {
     if (this.defs.has(def.type)) {
-      console.error(
-        `[dashboard] widget type "${def.type}" is registered twice; keeping the first`,
-      );
+      console.error(`[dashboard] widget type "${def.type}" is registered twice; keeping the first`);
       return false;
     }
     this.defs.set(def.type, def);
