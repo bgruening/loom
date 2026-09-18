@@ -244,6 +244,12 @@ describe("dashboard_update -- the happy paths", () => {
     const document = onDisk();
     expect(document.activeId).toBe("monitoring");
     expect(document.dashboards.map((d) => d.id)).toEqual(["current-analysis", "monitoring"]);
+    // A dashboard the agent built is the agent's, preset panels and all, so it
+    // can tidy it away later. One the user installs with /dashboard preset
+    // keeps "preset", because that path does not go through the guard.
+    const panels = document.dashboards.find((d) => d.id === "monitoring")!.panels;
+    expect(panels.every((p) => p.addedBy === "agent")).toBe(true);
+    expect(panels.every((p) => p.reason === "you asked for a monitoring view")).toBe(true);
   });
 
   it("replaces the whole layout when handed a document", async () => {

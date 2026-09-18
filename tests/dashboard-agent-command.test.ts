@@ -135,7 +135,11 @@ describe("/dashboard", () => {
     const { text } = await dash("preset monitoring");
     expect(text).toContain("monitoring preset");
     expect(onDisk().activeId).toBe("monitoring");
-    expect(onDisk().dashboards.some((d) => d.id === "monitoring")).toBe(true);
+    const installed = onDisk().dashboards.find((d) => d.id === "monitoring");
+    expect(installed).toBeTruthy();
+    // The user installed it by name, so its panels stay the preset's -- unlike
+    // the same preset built by the agent, which becomes the agent's.
+    expect(installed!.panels.every((p) => p.addedBy === "preset")).toBe(true);
   });
 
   it("lists the presets rather than guessing at an unknown one", async () => {
