@@ -446,6 +446,47 @@ describe("staleness", () => {
     expect(row.stale).toBe(false);
     expect(describeRun(row, NOW)).toContain("Running");
   });
+
+  it("does not print a running job's frozen stamp as if it were a check", () => {
+    const row = jobRowFor({ galaxyState: "running", lastPolledAt: ago(3 * HOUR) });
+    const meta = metaLine(row, NOW);
+    expect(meta).not.toContain("checked 3 h");
+    expect(meta).toContain("no change yet");
+  });
+
+  it("does print the stamp once the job has settled, because then it is the answer", () => {
+    const row = jobRowFor({ status: "completed", lastPolledAt: ago(3 * HOUR) });
+    expect(row.live).toBe(false);
+    expect(metaLine(row, NOW)).toContain("checked 3 h 00 m ago");
+  });
+
+  it("does not offer a submit time as the moment Galaxy was last checked", () => {
+    // A six-day-old invocation with no last_polled_at has never been polled.
+    // Reading the submit time as the poll time put "Galaxy was last checked 6 d
+    // ago" directly above a meta line saying "not checked yet".
+    const row = rowFor({ lastPolledAt: undefined, submittedAt: ago(6 * DAY) });
+    expect(row.stale).toBe(true);
+    expect(describeRun(row, NOW)).toBe("Can't tell right now. Galaxy has not been checked.");
+    expect(metaLine(row, NOW)).toContain("not checked yet");
+  });
+
+  it("does not let a timestamp from the future switch staleness off for good", () => {
+    // `now - heardFrom` goes negative, so the comparison against STALE_AFTER_MS
+    // can never be true again and the panel keeps drawing numbers nobody has
+    // refreshed. A stamp this far out is a bad clock or a hand edit, not skew.
+    const future = new Date(NOW + 365 * DAY).toISOString();
+    const row = rowFor({ lastPolledAt: future, submittedAt: ago(6 * DAY) });
+    expect(row.lastPolledAt).toBeNull();
+    expect(row.stale).toBe(true);
+    expect(describeRun(row, NOW)).toBe("Can't tell right now. Galaxy has not been checked.");
+  });
+
+  it("still forgives the clock skew between two ordinary machines", () => {
+    const row = rowFor({ lastPolledAt: new Date(NOW + 20_000).toISOString() });
+    expect(row.lastPolledAt).not.toBeNull();
+    expect(row.stale).toBe(false);
+    expect(formatAgo(row.lastPolledAt, NOW)).toBe("just now");
+  });
 });
 
 // ── Sentences ────────────────────────────────────────────────────────────────

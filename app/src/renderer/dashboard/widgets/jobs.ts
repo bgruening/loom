@@ -140,6 +140,9 @@ const GALAXY_JOB_STATE: Readonly<Record<string, RunState>> = {
   paused: "paused",
   deleting: "stopping",
   stop: "stopping",
+  // Galaxy serialises STOPPING as `stop` on the wire; the long spelling is here
+  // so a client that sends the enum name does not fall through to `unknown`.
+  stopping: "stopping",
   upload: "running",
   setting_metadata: "running",
   resubmitted: "queued",
@@ -214,6 +217,22 @@ function parseTime(iso: string | undefined): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
+/**
+ * How far ahead of this machine's clock a Galaxy timestamp may sit and still
+ * be read as a real event. Two machines a minute apart is ordinary; a stamp
+ * further out than that is a hand edit or a bad clock, and believing it is
+ * worse than having no stamp at all -- `now - heardFrom` goes permanently
+ * negative, so the run can never be called stale again and the panel keeps
+ * drawing confident numbers nobody has refreshed.
+ */
+const FUTURE_SKEW_MS = 60_000;
+
+function parseStamp(iso: string | undefined, now: number): number | null {
+  const ms = parseTime(iso);
+  if (ms === null) return null;
+  return ms - now > FUTURE_SKEW_MS ? null : ms;
+}
+
 function count(value: number | undefined): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
@@ -266,8 +285,8 @@ function invocationRow(inv: Invocation, plans: PlanSection[], now: number): RunR
   // A hand-edited block can claim 12 total and 14 done. Believe the parts.
   const total = Math.max(count(inv.totalJobs), done + failed);
   const stepsTotal = count(inv.totalSteps);
-  const lastPolledAt = parseTime(inv.lastPolledAt);
-  const submittedAt = parseTime(inv.submittedAt);
+  const lastPolledAt = parseStamp(inv.lastPolledAt, now);
+  const submittedAt = parseStamp(inv.submittedAt, now);
   const live = LIVE_STATES.has(state);
   const heardFrom = lastPolledAt ?? submittedAt;
   return {
@@ -302,8 +321,8 @@ function jobRow(job: DashboardJob, plans: PlanSection[], now: number): RunRow {
   const galaxyState = job.galaxyState?.trim() || null;
   const state = foldJobState(job.status, galaxyState);
   const live = LIVE_STATES.has(state);
-  const lastPolledAt = parseTime(job.lastPolledAt);
-  const submittedAt = parseTime(job.submittedAt);
+  const lastPolledAt = parseStamp(job.lastPolledAt, now);
+  const submittedAt = parseStamp(job.submittedAt, now);
   const heardFrom = lastPolledAt ?? submittedAt;
   return {
     kind: "job",
@@ -470,7 +489,11 @@ export function countsSentence(row: RunRow): string {
  */
 export function describeRun(row: RunRow, now: number): string {
   if (row.stale) {
-    const ago = formatAgo(row.lastPolledAt ?? row.submittedAt, now);
+    // Only the poll stamp answers "when was Galaxy last asked". Falling back to
+    // the submit time here told a six-day-old invocation nobody has ever polled
+    // that Galaxy was checked six days ago, one line above the meta line saying
+    // "not checked yet".
+    const ago = formatAgo(row.lastPolledAt, now);
     return ago
       ? `Can't tell right now. Galaxy was last checked ${ago}.`
       : "Can't tell right now. Galaxy has not been checked.";
@@ -646,7 +669,12 @@ export function metaLine(row: RunRow, now: number): string {
   if (row.steps) bits.push(`${row.steps.done} of ${row.steps.total} steps`);
   const started = formatAgo(row.submittedAt, now);
   if (started) bits.push(row.live ? `started ${started}` : `submitted ${started}`);
-  const checked = formatAgo(row.lastPolledAt, now);
+  // A live job's stamp is not a heartbeat -- `isStaleTracked` exists to say so.
+  // tickJobs asks every fifteen seconds and only writes on a change, so
+  // printing the stamp as a check puts "checked 3 h ago" on a run we are
+  // checking four times a minute. Once the job has settled the stamp is the
+  // moment Galaxy last told us something, which is worth showing.
+  const checked = row.live && row.kind === "job" ? "" : formatAgo(row.lastPolledAt, now);
   if (checked) bits.push(`checked ${checked}`);
   // An invocation is stamped on every poll, so a missing stamp really does mean
   // nobody has asked. A job is only stamped when something changed, so the same
@@ -673,7 +701,9 @@ function detailRows(row: RunRow, now: number): Array<[string, string]> {
     ]);
   }
   const checked = formatAgo(row.lastPolledAt, now);
-  if (checked) out.push(["Last checked", checked]);
+  // Same reason as metaLine: on a job the stamp is the last change, not the
+  // last check, and only the invocation poller rewrites its block every tick.
+  if (checked) out.push([row.kind === "invocation" ? "Last checked" : "Last change", checked]);
   return out;
 }
 
