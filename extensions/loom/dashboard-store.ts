@@ -338,9 +338,11 @@ export async function replaceDashboardDocument(
   if (!filePath) return { ok: false, error: NO_SESSION };
 
   // Skipping the compare-and-swap is the point here; skipping the lock is not.
-  // Unserialized, this rename lands inside an in-flight update's own check-to-
-  // rename window, and the update -- which has more await points before its
-  // rename -- goes last and silently puts back what the user just reset.
+  // Unserialized, this interleaves with an in-flight update and one of the two
+  // loses: measured against real directories, both calls reported success and
+  // the reset's bytes were not the ones on disk in the large majority of
+  // trials. Which one loses depends on where the renames fall relative to the
+  // update's check; the lock is what stops there being a question.
   return withLayoutLock(filePath, () => replaceLocked(filePath, document));
 }
 
@@ -392,10 +394,13 @@ export async function undoDashboardChange(): Promise<DashboardUndoResult> {
   const filePath = getDashboardPath();
   if (!filePath) return { ok: false, error: NO_SESSION };
   // Same lock as every other write here. The restore is a compare-and-swap, but
-  // an update reading between this revision check and that swap still passes
-  // its own check against the revision undo is about to replace, so both write
-  // and the one that renames last wins -- and the `rm` branch has no swap at
-  // all to save it.
+  // interleaved with an update both can pass their checks against the same
+  // revision, and then the one that renames last decides what survives -- the
+  // other having already reported success. The `rm` branch has no swap at all
+  // underneath it.
+  //
+  // One consequence worth knowing: an undo typed during a tool call now queues
+  // behind that call rather than racing it, so it undoes the tool's write.
   return withLayoutLock(filePath, () => undoLocked(filePath));
 }
 
