@@ -181,7 +181,12 @@ export interface ActivityRow {
  * shows `rm -rf /` as something else is worse than no log. Shared, because the
  * results gallery has untrusted names to draw for the same reason.
  */
-const flatten = safeName;
+function flatten(value: string): string {
+  // The collapse and trim are this panel's own: a log row is one line of prose,
+  // and a run of stripped controls should not leave a gutter in the middle of
+  // it. A filename gets `safeName` without them.
+  return safeName(value).replace(/ {2,}/g, " ").trim();
+}
 
 /**
  * Truncates on code points, so a cap never lands inside a surrogate pair. The

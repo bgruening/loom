@@ -26,7 +26,7 @@
  */
 
 import type { Invocation } from "../../galaxy-invocations.js";
-import { safeName } from "./text-safety.js";
+import { safeName, safeNameOr } from "./text-safety.js";
 import type {
   DashboardJob,
   InvocationSnapshot,
@@ -552,7 +552,7 @@ export function attentionMessage(rows: RunRow[]): string {
   if (bad.length === 0) return "";
   if (bad.length === 1) {
     const row = bad[0];
-    const name = safeName(row.label || row.id) || row.id;
+    const name = safeNameOr(row.label || row.id, "(unnamed run)");
     // A run is usually labelled after the step it runs, so naming the step's
     // title as well costs a line of a 400px panel to say the same word twice.
     const stepTitle = row.step ? safeName(row.step.title) : "";
@@ -731,7 +731,7 @@ function renderRow(row: RunRow, now: number, compact: boolean, openIds: Set<stri
   // The label is a workflow name out of the notebook and the step title comes
   // from the plan, so both are model-written: a bidi override in either would
   // render the row in an order nobody wrote.
-  const name = safeName(row.label || row.id) || row.id;
+  const name = safeNameOr(row.label || row.id, "(unnamed run)");
   const title = node("div", "dash-jobs-title", name);
   title.title = row.step ? `${name} -- step ${row.step.number}, ${safeName(row.step.title)}` : name;
   item.append(title);

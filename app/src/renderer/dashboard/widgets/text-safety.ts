@@ -29,10 +29,28 @@ export const UNSAFE_INLINE = /[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]+/g
 export const UNSAFE_BLOCK = /[\u0000-\u0009\u000b-\u001f\u007f\u202a-\u202e\u2066-\u2069]+/g;
 
 /**
- * A name, safe to put in `textContent`, a `title` or an `aria-label`. Runs of
- * unsafe characters collapse to one space rather than vanishing, so a name that
- * was hiding a word does not silently close up around it.
+ * A name, safe to put in `textContent`, a `title` or an `aria-label`. A run of
+ * unsafe characters becomes one space rather than vanishing, so a name that was
+ * hiding a word does not silently close up around it.
+ *
+ * Nothing else is touched. Doubled spaces and leading or trailing space are
+ * part of a filename, and a `title` a reader hovers to copy has to be the path
+ * that is actually on disk -- tidying those was the log panel's own concern
+ * about fitting prose on one row, not a safety property, and it does not belong
+ * in a filename.
  */
 export function safeName(value: string): string {
-  return value.replace(UNSAFE_INLINE, " ").replace(/ {2,}/g, " ").trim();
+  return value.replace(UNSAFE_INLINE, " ");
+}
+
+/**
+ * `safeName`, with a literal for the case where nothing readable survives.
+ *
+ * `safeName(x) || x` looks like the same thing and is the opposite: a name made
+ * entirely of overrides strips to blank, the `||` then reaches for the raw
+ * input, and the one string the fence exists for is the one that gets through.
+ */
+export function safeNameOr(value: string, fallback: string): string {
+  const safe = safeName(value);
+  return safe.trim() ? safe : fallback;
 }

@@ -829,6 +829,30 @@ describe("results widget", () => {
     expect(shown?.textContent).toContain("gnp.exe");
   });
 
+  it("does not hand back the raw name when nothing readable survives the strip", async () => {
+    // `safeName(x) || x` reads like a safe fallback and is the opposite: a name
+    // made entirely of overrides strips to blank and the `||` reaches for the
+    // one string the fence exists for.
+    const hostile = "\u202e\u202d\u2066";
+    const h = harness();
+    resultsWidget.mount(h.el, h.ctx);
+    await h.setFiles(tree([{ name: hostile, relPath: hostile, type: "file", size: 12 }]));
+    const shown = h.el.querySelector(".dash-results-name");
+    expect(shown?.textContent).toBe("(unnamed file)");
+    expect(shown?.getAttribute("title")).not.toContain("\u202e");
+  });
+
+  it("leaves the spaces in a filename alone, including the ones at the ends", async () => {
+    // The title is the path a reader hovers to copy, so it has to be the path
+    // that is on disk. Tidying whitespace is the log panel's concern, not a
+    // safety property, and a doubled space in a filename is part of the name.
+    const odd = " plot  v2 .png ";
+    const h = harness();
+    resultsWidget.mount(h.el, h.ctx);
+    await h.setFiles(tree([{ name: odd, relPath: odd, type: "file", size: 12 }]));
+    expect(h.el.querySelector(".dash-results-name")?.getAttribute("title")).toBe(`Open ${odd}`);
+  });
+
   it("opens the file when its name is clicked", async () => {
     const h = harness();
     resultsWidget.mount(h.el, h.ctx);
