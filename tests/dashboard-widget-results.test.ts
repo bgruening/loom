@@ -85,9 +85,26 @@ function harness(
   };
 }
 
-/** A fetch that answers every request with the same body, without a stream. */
+/**
+ * A fetch that answers with a real byte stream, because that is what Electron's
+ * `net.fetch` gives back and therefore the branch of `readHead` that ships. The
+ * no-body fallback is covered separately.
+ */
 function stubFetch(body: string): ReturnType<typeof vi.fn> {
-  const fn = vi.fn(async () => ({ ok: true, body: null, text: async () => body }));
+  const fn = vi.fn(async () => ({
+    ok: true,
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        // Two chunks, so the streaming decode is exercised rather than a single
+        // read that happens to contain everything.
+        const bytes = new TextEncoder().encode(body);
+        const half = Math.ceil(bytes.byteLength / 2);
+        controller.enqueue(bytes.subarray(0, half));
+        controller.enqueue(bytes.subarray(half));
+        controller.close();
+      },
+    }),
+  }));
   (globalThis as unknown as { fetch: unknown }).fetch = fn;
   return fn;
 }
@@ -170,8 +187,22 @@ describe("matchesGlob", () => {
     expect(matchesGlob("{png", "plot.png")).toBe(false);
   });
 
-  it("refuses a pattern long enough to be a payload", () => {
-    expect(matchesGlob(`${"*a".repeat(200)}*`, "aaaaaaaaaaab")).toBe(false);
+  it("answers a pathological pattern instantly instead of freezing the renderer", () => {
+    // These shapes took four to five seconds each against a regex built from
+    // the same dialect, on the renderer's own thread, once per file.
+    const name = "GSM123456_sample_control_rep1_counts_matrix_aaaaaaaaaaaaaaa.tsv";
+    const started = Date.now();
+    expect(matchesGlob(`${"**".repeat(12)}x`, name)).toBe(false);
+    expect(matchesGlob(`${"*a".repeat(12)}*b`, "a".repeat(60))).toBe(false);
+    expect(matchesGlob(`${"**/".repeat(12)}x`, name)).toBe(false);
+    expect(Date.now() - started).toBeLessThan(250);
+  });
+
+  it("stops expanding braces long before they become a payload", () => {
+    const started = Date.now();
+    // Six groups of four is 4096 patterns if nothing stops it.
+    expect(matchesGlob(`${"{a,b,c,d}".repeat(6)}.png`, "plot.png")).toBe(false);
+    expect(Date.now() - started).toBeLessThan(250);
   });
 });
 
@@ -199,7 +230,7 @@ describe("collectResultFiles", () => {
     const [only] = collectResultFiles(
       tree([{ name: "x.png", relPath: "x.png", type: "file" } as FileNode]),
     );
-    expect(only.size).toBe(0);
+    expect(only.size).toBeNull();
   });
 });
 
@@ -238,10 +269,16 @@ describe("selectResults", () => {
   });
 
   it("clamps a hostile limit", () => {
-    expect(selectResults(files, { limit: 0 }).shown).toHaveLength(5);
-    expect(selectResults(files, { limit: -3 }).shown).toHaveLength(5);
-    expect(selectResults(files, { limit: Number.NaN }).shown).toHaveLength(5);
-    expect(selectResults(files, { limit: 1e9 }).shown).toHaveLength(5);
+    // More files than either bound, so the assertions are about the clamp and
+    // not about the fixture running out.
+    const many = collectResultFiles(
+      tree(Array.from({ length: 200 }, (_, i) => file(`plot-${String(i).padStart(3, "0")}.png`))),
+    );
+    expect(selectResults(many, { limit: 0 }).shown).toHaveLength(8);
+    expect(selectResults(many, { limit: -3 }).shown).toHaveLength(8);
+    expect(selectResults(many, { limit: Number.NaN }).shown).toHaveLength(8);
+    expect(selectResults(many, { limit: 1e9 }).shown).toHaveLength(60);
+    expect(selectResults(many, { limit: 3 }).total).toBe(200);
   });
 });
 
@@ -294,6 +331,30 @@ describe("parseDelimitedPreview", () => {
     const preview = parseDelimitedPreview(`h\n${"x".repeat(500)}\n`, opts);
     expect(preview?.rows[0][0].length).toBeLessThan(80);
     expect(preview?.rows[0][0].endsWith("...")).toBe(true);
+  });
+
+  it("does not turn the first row of a headerless table into column names", () => {
+    // BED, GTF and most Galaxy .tabular output have no header row.
+    const preview = parseDelimitedPreview("chrM\t101\t340\nchrM\t902\t1104\n", opts);
+    expect(preview?.headers).toBeNull();
+    expect(preview?.rows).toEqual([
+      ["chrM", "101", "340"],
+      ["chrM", "902", "1104"],
+    ]);
+  });
+
+  it("still finds a header when the file has one", () => {
+    const preview = parseDelimitedPreview("chrom\tstart\tend\nchrM\t101\t340\n", opts);
+    expect(preview?.headers).toEqual(["chrom", "start", "end"]);
+    expect(preview?.rows).toEqual([["chrM", "101", "340"]]);
+  });
+
+  it("counts a headerless table's rows against the cap correctly", () => {
+    const preview = parseDelimitedPreview("1\t1\n2\t2\n3\t3\n4\t4\n", opts);
+    expect(preview?.headers).toBeNull();
+    // maxRows is 2, and the row that would have been the header is data here.
+    expect(preview?.rows).toHaveLength(2);
+    expect(preview?.moreRows).toBe(true);
   });
 
   it("skips blank lines and returns null for nothing usable", () => {
@@ -375,6 +436,32 @@ describe("readHead", () => {
     ).toBeNull();
   });
 
+  it("falls back to text() for a response with no body", async () => {
+    (globalThis as unknown as { fetch: unknown }).fetch = async () => ({
+      ok: true,
+      body: null,
+      text: async () => "a\tb\n1\t2\n",
+    });
+    const head = await readHead("orbit-artifact://cwd/x.tsv", 4096, new AbortController().signal);
+    expect(head).toEqual({ text: "a\tb\n1\t2\n", truncated: false });
+  });
+
+  it("does not call a whole body truncated because it exactly fills the budget", async () => {
+    const body = new TextEncoder().encode("abcd");
+    (globalThis as unknown as { fetch: unknown }).fetch = async () => ({
+      ok: true,
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(body);
+          controller.close();
+        },
+      }),
+    });
+    // Exactly the budget. Calling this truncated costs the caller its last row.
+    const head = await readHead("orbit-artifact://cwd/x.tsv", 4, new AbortController().signal);
+    expect(head).toEqual({ text: "abcd", truncated: false });
+  });
+
   it("returns null on a non-ok response", async () => {
     (globalThis as unknown as { fetch: unknown }).fetch = async () => ({ ok: false, body: null });
     expect(
@@ -390,12 +477,27 @@ describe("results widget", () => {
     expect(resultsWidget.defaultConfig).toEqual({ mode: "gallery", path: "", glob: "", limit: 8 });
   });
 
-  it("says so instead of drawing a lie when the shell has no file listing", async () => {
+  it("says it is still looking before the shell has answered", async () => {
     const h = harness({}, { available: false });
     resultsWidget.mount(h.el, h.ctx);
     await h.setFiles(tree([file("plot.png")]));
-    expect(h.el.querySelector(".dash-results-empty")?.textContent).toContain("cannot list");
+    // A desktop workspace can take a moment to walk, and "this shell cannot
+    // list the analysis folder" is the wrong thing to say while it does.
+    expect(h.el.querySelector(".dash-results-empty")?.textContent).toContain("Looking for");
     expect(h.el.querySelector("img")).toBeNull();
+  });
+
+  it("says so instead of drawing a lie once waiting has not helped", () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness({}, { available: false });
+      resultsWidget.mount(h.el, h.ctx);
+      vi.advanceTimersByTime(2000);
+      expect(h.el.querySelector(".dash-results-empty")?.textContent).toContain("cannot list");
+      expect(h.el.querySelector("img")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("explains an empty workspace", async () => {
@@ -537,6 +639,24 @@ describe("results widget", () => {
     expect(back?.hidden).toBe(false);
     back?.click();
     expect(h.setConfig).toHaveBeenCalledWith({ mode: "gallery", path: "" });
+  });
+
+  it("gives a pinned table more of itself than a gallery entry gets", async () => {
+    const body = ["a\tb\tc"];
+    for (let i = 0; i < 12; i++) body.push(`${i}\t${i}\t${i}`);
+    stubFetch(`${body.join("\n")}\n`);
+
+    const gallery = harness();
+    resultsWidget.mount(gallery.el, gallery.ctx);
+    await gallery.setFiles(tree([file("counts.tsv", 64)]));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(gallery.el.querySelectorAll("tbody tr")).toHaveLength(4);
+
+    const pinned = harness({ mode: "pinned", path: "counts.tsv" });
+    resultsWidget.mount(pinned.el, pinned.ctx);
+    await pinned.setFiles(tree([file("counts.tsv", 64)]));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(pinned.el.querySelectorAll("tbody tr")).toHaveLength(10);
   });
 
   it("leaves the gallery alone when a files refresh changes nothing", async () => {

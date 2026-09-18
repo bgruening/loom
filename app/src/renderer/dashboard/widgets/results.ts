@@ -40,7 +40,8 @@ export type ResultKind = "image" | "table" | "document" | "other";
 export interface ResultFile {
   name: string;
   relPath: string;
-  size: number;
+  /** Null where the shell could not stat the file, which is not the same as empty. */
+  size: number | null;
   kind: ResultKind;
 }
 
@@ -65,8 +66,17 @@ const MAX_CELL_CHARS = 60;
 
 /** A glob is a few characters someone typed, never a payload. */
 const MAX_GLOB_CHARS = 200;
+/** How many patterns `{a,b}` alternation may expand to before it stops. */
+const MAX_GLOB_VARIANTS = 16;
 /** However hostile the layout file is, a panel draws a panel's worth. */
 const MAX_LIMIT = 60;
+/**
+ * How long a listing may take before the panel stops saying it is looking.
+ * The files source reports "not available" both before the host has asked the
+ * shell and in a shell that has no listing at all, and only time tells them
+ * apart from in here. A host that marked the second case would be better.
+ */
+const LISTING_GRACE_MS = 1200;
 
 const GALLERY_TABLE_ROWS = 4;
 const GALLERY_TABLE_COLS = 4;
@@ -88,67 +98,115 @@ export function classifyResult(relPath: string): ResultKind {
   return "other";
 }
 
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/**
+ * Expand `{a,b}` alternation into concrete patterns. Bounded: past
+ * `MAX_GLOB_VARIANTS` the expansion stops and the remaining braces match as
+ * literal characters, which is wrong but cheap and cannot be made to hang.
+ */
+export function expandBraces(pattern: string): string[] {
+  let out = [pattern];
+  for (;;) {
+    const next: string[] = [];
+    let expanded = false;
+    for (const candidate of out) {
+      const open = candidate.indexOf("{");
+      const close = open < 0 ? -1 : candidate.indexOf("}", open);
+      if (open < 0 || close < 0) {
+        next.push(candidate);
+        continue;
+      }
+      expanded = true;
+      const head = candidate.slice(0, open);
+      const tail = candidate.slice(close + 1);
+      for (const alt of candidate.slice(open + 1, close).split(",")) next.push(head + alt + tail);
+    }
+    if (!expanded) return next;
+    if (next.length > MAX_GLOB_VARIANTS) return out;
+    out = next;
+  }
 }
 
 /**
- * A small glob dialect: `*` within a path segment, `**` across segments, `?`
- * for one character, and `{a,b}` alternation. A pattern with no `/` is matched
- * against the file name alone, so `*.png` finds `figures/volcano.png` -- which
- * is what someone typing it into a panel means.
+ * `*` and `?` inside one path segment.
+ *
+ * This is the linear wildcard match with a single backtrack point, not a
+ * regular expression, and that is the whole reason it exists. `[^/]*` repeated
+ * -- which `*a*a*a*a*a*a*a*a*b` compiles to -- backtracks exponentially, and a
+ * seventeen-character pattern in the layout file froze the renderer for over
+ * four seconds per file. The layout file is untrusted, this runs once per file
+ * on the main thread, and there is no length cap that makes a regex safe here.
  */
-export function globToRegExp(pattern: string): RegExp {
-  let out = "";
-  for (let i = 0; i < pattern.length; i++) {
-    const ch = pattern[i];
-    if (ch === "*") {
-      if (pattern[i + 1] === "*") {
-        // `**/` should also match zero directories, so `**/x` finds a root `x`.
-        if (pattern[i + 2] === "/") {
-          out += "(?:.*/)?";
-          i += 2;
-        } else {
-          out += ".*";
-          i += 1;
-        }
-      } else {
-        out += "[^/]*";
-      }
-      continue;
+function matchSegment(pattern: string, subject: string): boolean {
+  let p = 0;
+  let s = 0;
+  let star = -1;
+  let mark = 0;
+  while (s < subject.length) {
+    if (p < pattern.length && (pattern[p] === "?" || pattern[p] === subject[s])) {
+      p++;
+      s++;
+    } else if (p < pattern.length && pattern[p] === "*") {
+      star = p++;
+      mark = s;
+    } else if (star >= 0) {
+      p = star + 1;
+      s = ++mark;
+    } else {
+      return false;
     }
-    if (ch === "?") {
-      out += "[^/]";
-      continue;
-    }
-    if (ch === "{") {
-      const close = pattern.indexOf("}", i);
-      if (close > i) {
-        const alts = pattern.slice(i + 1, close).split(",");
-        out += `(?:${alts.map(escapeRegExp).join("|")})`;
-        i = close;
-        continue;
-      }
-    }
-    out += escapeRegExp(ch);
   }
-  return new RegExp(`^${out}$`, "i");
+  while (p < pattern.length && pattern[p] === "*") p++;
+  return p === pattern.length;
+}
+
+/** The same algorithm one level up, where a `**` segment stands for any depth. */
+function matchPath(pattern: string[], subject: string[]): boolean {
+  let p = 0;
+  let s = 0;
+  let star = -1;
+  let mark = 0;
+  while (s < subject.length) {
+    if (p < pattern.length && pattern[p] !== "**" && matchSegment(pattern[p], subject[s])) {
+      p++;
+      s++;
+    } else if (p < pattern.length && pattern[p] === "**") {
+      star = p++;
+      mark = s;
+    } else if (star >= 0) {
+      p = star + 1;
+      s = ++mark;
+    } else {
+      return false;
+    }
+  }
+  while (p < pattern.length && pattern[p] === "**") p++;
+  return p === pattern.length;
+}
+
+/**
+ * Compile once, match many. A small glob dialect: `*` within a path segment,
+ * `**` across segments, `?` for one character, `{a,b}` alternation. A pattern
+ * with no `/` is matched against the file name alone, so `*.png` finds
+ * `figures/volcano.png` -- which is what someone typing it into a panel means.
+ * An empty pattern matches everything.
+ */
+export function compileGlob(pattern: string): (relPath: string) => boolean {
+  const trimmed = pattern.trim();
+  if (!trimmed) return () => true;
+  // Not a safety measure any more, just a sanity bound: a glob is a few
+  // characters someone typed.
+  if (trimmed.length > MAX_GLOB_CHARS) return () => false;
+  const wholePath = trimmed.includes("/");
+  const variants = expandBraces(trimmed.toLowerCase()).map((v) => v.split("/"));
+  return (relPath) => {
+    const subject = wholePath ? relPath : (relPath.split("/").pop() ?? relPath);
+    const segments = subject.toLowerCase().split("/");
+    return variants.some((variant) => matchPath(variant, segments));
+  };
 }
 
 export function matchesGlob(pattern: string, relPath: string): boolean {
-  const trimmed = pattern.trim();
-  if (!trimmed) return true;
-  // A pattern is a handful of characters someone typed. Anything longer is
-  // either a mistake or an attempt to make the matcher backtrack.
-  if (trimmed.length > MAX_GLOB_CHARS) return false;
-  const subject = trimmed.includes("/") ? relPath : (relPath.split("/").pop() ?? relPath);
-  try {
-    return globToRegExp(trimmed).test(subject);
-  } catch {
-    // A pattern that will not compile should narrow nothing rather than hide
-    // every result behind a typo.
-    return true;
-  }
+  return compileGlob(pattern)(relPath);
 }
 
 /** Flatten the file tree into result candidates, skipping the workspace's own bookkeeping. */
@@ -165,7 +223,7 @@ export function collectResultFiles(root: FileNode | null): ResultFile[] {
     out.push({
       name: entry.name,
       relPath: entry.relPath,
-      size: typeof entry.size === "number" ? entry.size : 0,
+      size: typeof entry.size === "number" ? entry.size : null,
       kind: classifyResult(entry.relPath),
     });
   };
@@ -182,7 +240,8 @@ export function selectResults(
   files: ResultFile[],
   opts: { glob?: string; limit: number },
 ): { shown: ResultFile[]; total: number } {
-  const matched = files.filter((f) => matchesGlob(opts.glob ?? "", f.relPath));
+  const matches = compileGlob(opts.glob ?? "");
+  const matched = files.filter((f) => matches(f.relPath));
   matched.sort((a, b) => {
     if (KIND_ORDER[a.kind] !== KIND_ORDER[b.kind]) return KIND_ORDER[a.kind] - KIND_ORDER[b.kind];
     const depthA = a.relPath.split("/").length;
@@ -256,12 +315,27 @@ function splitRow(line: string, delimiter: string): string[] {
 }
 
 export interface TablePreview {
-  headers: string[];
+  /** Null when the file has no header row -- BED, GTF and most `.tabular`. */
+  headers: string[] | null;
   rows: string[][];
   /** Columns beyond `maxCols` that were dropped from every row. */
   extraColumns: number;
   /** True when rows were cut, either by `maxRows` or by the byte budget. */
   moreRows: boolean;
+}
+
+function looksNumeric(cell: string): boolean {
+  const trimmed = cell.trim();
+  return trimmed !== "" && Number.isFinite(Number(trimmed));
+}
+
+/**
+ * Galaxy's `.tabular`, and BED and GTF with it, are routinely headerless, and
+ * drawing a row of real data bold as a column name is worse than drawing no
+ * names at all. A header row is the one with no numbers in it.
+ */
+function looksLikeHeader(row: string[]): boolean {
+  return row.length > 0 && !row.some(looksNumeric);
 }
 
 /**
@@ -281,23 +355,24 @@ export function parseDelimitedPreview(
   const cut = (cell: string): string =>
     cell.length > MAX_CELL_CHARS ? `${cell.slice(0, MAX_CELL_CHARS)}...` : cell;
 
+  const first = splitRow(usable[0], opts.delimiter).map(cut);
+  const titled = looksLikeHeader(first);
   const parsed = usable
-    .slice(0, opts.maxRows + 1)
-    .map((line) => splitRow(line, opts.delimiter).map(cut));
+    .slice(0, titled ? opts.maxRows + 1 : opts.maxRows)
+    .map((line, index) => (index === 0 ? first : splitRow(line, opts.delimiter).map(cut)));
   const widest = parsed.reduce((max, row) => Math.max(max, row.length), 0);
-  const headers = (parsed[0] ?? []).slice(0, opts.maxCols);
-  const rows = parsed.slice(1).map((row) => row.slice(0, opts.maxCols));
+  const body = titled ? parsed.slice(1) : parsed;
 
   return {
-    headers,
-    rows,
+    headers: titled ? parsed[0].slice(0, opts.maxCols) : null,
+    rows: body.map((row) => row.slice(0, opts.maxCols)),
     extraColumns: Math.max(0, widest - opts.maxCols),
     moreRows: usable.length > parsed.length || Boolean(opts.partial),
   };
 }
 
-export function formatSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) return "";
+export function formatSize(bytes: number | null): string {
+  if (bytes === null || !Number.isFinite(bytes) || bytes < 0) return "";
   if (bytes < 1024) return `${bytes} B`;
   const kb = bytes / 1024;
   if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)} KB`;
@@ -312,7 +387,7 @@ export function formatSize(bytes: number): string {
  * and passing through unrewritten -- the rewriter documents that prefix as the
  * way to force a relative reading. Returns "" for anything it cannot jail.
  */
-export function artifactUrl(relPath: string, cacheKey?: number): string {
+export function artifactUrl(relPath: string, cacheKey?: number | null): string {
   const base = rewritePreviewImageHref("", `./${relPath}`);
   if (!base) return "";
   // The protocol handler reads only the path, so a query is a free cache-buster
@@ -337,6 +412,9 @@ export async function readHead(
     const res = await fetch(url, { signal });
     if (!res.ok) return null;
     if (!res.body) {
+      // A Response with no body cannot be read incrementally, so there is no
+      // read to save here and the budget is applied in characters rather than
+      // bytes. Electron's net.fetch always gives a body; this is the fallback.
       const all = await res.text();
       return { text: all.slice(0, budget), truncated: all.length > budget };
     }
@@ -350,7 +428,9 @@ export async function readHead(
       if (chunk.done) break;
       const value = chunk.value;
       if (!value) continue;
-      if (seen + value.byteLength >= budget) {
+      // `>` rather than `>=`: a body that is exactly the budget was read whole,
+      // and calling it truncated costs the caller its last row.
+      if (seen + value.byteLength > budget) {
         text += decoder.decode(value.subarray(0, budget - seen));
         truncated = true;
         break;
@@ -449,8 +529,11 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
 
   mount(el, ctx): WidgetDispose {
     el.classList.add("dash-results");
-    // The stylesheet lives with the widget rather than in dashboard.css, which
-    // this branch does not own. Scoped by prefix and thrown away with the panel.
+    // The stylesheet ships inside the widget because dashboard.css is not this
+    // branch's to edit. Its rules apply document-wide wherever the element is
+    // parented -- prefixing is a naming convention, not a scope -- and they have
+    // to, because the count lives in ctx.header, outside this element. One copy
+    // per panel, removed with the panel; it belongs in dashboard.css.
     const style = document.createElement("style");
     style.textContent = STYLES;
     const list = node("div", "dash-results-list");
@@ -468,6 +551,12 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
 
     let controller = new AbortController();
     let signature = "";
+    // A shell that cannot serve the artifact scheme, or whose CSP will not let
+    // the renderer read it, fails every table the same way. The entries are
+    // still correct as plain rows, so this is a note for whoever is looking at
+    // a console rather than a card in the user's face.
+    let warnedAboutReads = false;
+    let graceExpired = false;
     ctx.onDispose(() => controller.abort());
 
     const config = readResultsConfig(ctx.config);
@@ -495,46 +584,65 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
     const renderTable = (entry: HTMLElement, file: ResultFile, token: AbortSignal): void => {
       const url = artifactUrl(file.relPath, file.size);
       if (!url) return;
-      void readHead(url, TABLE_HEAD_BYTES, token).then((head) => {
-        if (token.aborted || !head) return;
-        const preview = parseDelimitedPreview(head.text, {
-          delimiter: delimiterFor(file.relPath),
-          maxRows: tableRows,
-          maxCols: tableCols,
-          partial: head.truncated,
-        });
-        if (!preview) return;
-        const wrap = node("div", "dash-results-table-wrap");
-        const table = node("table", "dash-results-table");
-        const thead = document.createElement("thead");
-        const headRow = document.createElement("tr");
-        for (const header of preview.headers) headRow.append(node("th", undefined, header));
-        thead.append(headRow);
-        const tbody = document.createElement("tbody");
-        for (const row of preview.rows) {
-          const tr = document.createElement("tr");
-          for (const cell of row) tr.append(node("td", undefined, cell));
-          tbody.append(tr);
-        }
-        table.append(thead, tbody);
-        wrap.append(table);
-        entry.prepend(wrap);
-        const notes: string[] = [];
-        // "first 0 rows" is what a header-only read, or one the byte budget cut
-        // inside its first row, would otherwise say.
-        if (preview.moreRows && preview.rows.length > 0) {
-          notes.push(`first ${preview.rows.length} rows`);
-        }
-        if (preview.extraColumns > 0) {
-          notes.push(`${preview.extraColumns} more column${preview.extraColumns === 1 ? "" : "s"}`);
-        }
-        if (notes.length) wrap.after(node("div", "dash-results-note", notes.join(", ")));
-      });
+      void readHead(url, TABLE_HEAD_BYTES, token)
+        .then((head) => {
+          if (token.aborted) return;
+          if (!head) {
+            if (!warnedAboutReads) {
+              warnedAboutReads = true;
+              console.warn(
+                "[dashboard] could not read a table head over orbit-artifact:; tables will show as plain rows. " +
+                  "This shell may not serve that scheme, or its CSP connect-src may not allow it.",
+              );
+            }
+            return;
+          }
+          const preview = parseDelimitedPreview(head.text, {
+            delimiter: delimiterFor(file.relPath),
+            maxRows: tableRows,
+            maxCols: tableCols,
+            partial: head.truncated,
+          });
+          if (!preview) return;
+          const wrap = node("div", "dash-results-table-wrap");
+          const table = node("table", "dash-results-table");
+          if (preview.headers) {
+            const thead = document.createElement("thead");
+            const headRow = document.createElement("tr");
+            for (const header of preview.headers) headRow.append(node("th", undefined, header));
+            thead.append(headRow);
+            table.append(thead);
+          }
+          const tbody = document.createElement("tbody");
+          for (const row of preview.rows) {
+            const tr = document.createElement("tr");
+            for (const cell of row) tr.append(node("td", undefined, cell));
+            tbody.append(tr);
+          }
+          table.append(tbody);
+          wrap.append(table);
+          entry.prepend(wrap);
+          const notes: string[] = [];
+          // "first 0 rows" is what a read the byte budget cut inside the very
+          // first row would otherwise say.
+          if (preview.moreRows && preview.rows.length > 0) {
+            notes.push(`first ${preview.rows.length} rows`);
+          }
+          if (preview.extraColumns > 0) {
+            notes.push(
+              `${preview.extraColumns} more column${preview.extraColumns === 1 ? "" : "s"}`,
+            );
+          }
+          if (notes.length) wrap.after(node("div", "dash-results-note", notes.join(", ")));
+        })
+        // A throw in there would otherwise be an unhandled rejection: the panel
+        // keeps its rows rather than turning into an error card over a preview.
+        .catch((err) => console.error("[dashboard] results table preview failed:", err));
     };
 
     const renderEntry = (file: ResultFile, token: AbortSignal): HTMLElement => {
       const entry = node("div", "dash-results-entry");
-      if (file.kind === "image" && file.size <= IMAGE_MAX_BYTES) {
+      if (file.kind === "image" && (file.size === null || file.size <= IMAGE_MAX_BYTES)) {
         const url = artifactUrl(file.relPath, file.size);
         if (url) {
           // Always an <img>. An SVG is active content and inlining one would
@@ -554,6 +662,11 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
     };
 
     const draw = (snapshot: FilesSnapshot): void => {
+      // `available: false` covers two different things: the host has not asked
+      // the shell yet, and the shell has no listing to give. Announcing "this
+      // shell cannot list the analysis folder" while a large workspace is still
+      // being walked is a lie the desktop user would see on every startup.
+      const listing = snapshot.available ? "on" : graceExpired ? "off" : "pending";
       const files = collectResultFiles(snapshot.root);
       const pinnedFile = pinned ? (files.find((f) => f.relPath === config.path) ?? null) : null;
       const selection = pinned
@@ -561,7 +674,7 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
         : selectResults(files, { glob: config.glob, limit: config.limit });
 
       const next = [
-        snapshot.available ? "on" : "off",
+        listing,
         config.mode,
         config.path,
         config.glob,
@@ -569,7 +682,7 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
         // The total as well as the selection: at limit 1 a workspace going from
         // three files to five changes the header and nothing else.
         String(selection.total),
-        ...selection.shown.map((f) => `${f.relPath}:${f.size}`),
+        ...selection.shown.map((f) => `${f.relPath}:${f.size ?? "?"}`),
       ].join("|");
       if (next === signature) return;
       signature = next;
@@ -581,18 +694,20 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
 
       showAll.hidden = !pinned;
       count.textContent =
-        !snapshot.available || pinned || selection.total === 0
+        listing !== "on" || pinned || selection.total === 0
           ? ""
           : selection.total > selection.shown.length
             ? `${selection.shown.length} of ${selection.total}`
             : `${selection.total} ${selection.total === 1 ? "file" : "files"}`;
 
-      if (!snapshot.available) {
+      if (listing !== "on") {
         list.append(
           node(
             "div",
             "dash-results-empty",
-            "This shell cannot list the analysis folder yet, so results cannot be shown here.",
+            listing === "pending"
+              ? "Looking for the files in this analysis."
+              : "This shell cannot list the analysis folder yet, so results cannot be shown here.",
           ),
         );
         return;
@@ -610,6 +725,15 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
 
       for (const file of selection.shown) list.append(renderEntry(file, token));
     };
+
+    const graceTimer = setTimeout(() => {
+      graceExpired = true;
+      const snapshot = ctx.sources.files.get();
+      if (snapshot.available) return;
+      signature = "";
+      draw(snapshot);
+    }, LISTING_GRACE_MS);
+    ctx.onDispose(() => clearTimeout(graceTimer));
 
     ctx.subscribe(ctx.sources.files, draw);
 
