@@ -10,6 +10,7 @@
  * carries a glyph and a word before it carries a colour.
  */
 
+import { safeName } from "./text-safety.js";
 import type { PlanSection, PlanSnapshot, PlanStep, WidgetDefinition } from "../widget-api.js";
 
 /**
@@ -227,9 +228,10 @@ function routingSentence(routing: string | null): string | null {
  */
 function stepRouting(routing: string | null): string | null {
   if (!routing) return null;
-  const trimmed = routing.trim();
+  const trimmed = safeName(routing);
   if (!trimmed) return null;
   if (/^local$/i.test(trimmed)) return "On this computer";
+  // Step routing is free text, so it is a name like any other.
   const galaxy = trimmed.match(/^galaxy\b(\s*)(.*)$/i);
   if (!galaxy) return trimmed;
   if (!galaxy[2]) return "On Galaxy";
@@ -290,8 +292,13 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+/**
+ * A step title comes out of the notebook, so it is model-written text. A bidi
+ * override in it reorders the whole row -- the same treatment the log panel
+ * gives a tool argument, for the same reason.
+ */
 function stepLabel(step: PlanStep): string {
-  const title = step.title || step.detail || "Untitled step";
+  const title = safeName(step.title || step.detail) || "Untitled step";
   return `${step.number}. ${title}`;
 }
 
@@ -363,11 +370,11 @@ function calloutFor(step: PlanStep, kind: "failed" | "next"): HTMLElement {
 
   const routing = stepRouting(step.routing);
   if (routing) box.append(el("div", "dash-meta", routing));
-  if (step.detail) box.append(el("div", "dash-plan-next-detail", step.detail));
+  if (step.detail) box.append(el("div", "dash-plan-next-detail", safeName(step.detail)));
   // What still has to become true. On a failed step that is the clearest thing
   // the notebook has about what went wrong, so it is not suppressed there.
   if (step.verification) {
-    box.append(el("div", "dash-plan-next-detail", `Done when: ${step.verification}`));
+    box.append(el("div", "dash-plan-next-detail", `Done when: ${safeName(step.verification)}`));
   }
   // A "Needs you" box with nothing in it but a step number is a call to action
   // with no action in it.
@@ -379,7 +386,7 @@ function calloutFor(step: PlanStep, kind: "failed" | "next"): HTMLElement {
 
 function planHeading(plan: PlanSection): DocumentFragment {
   const frag = document.createDocumentFragment();
-  frag.append(el("div", "dash-plan-title", plan.title || "Untitled plan"));
+  frag.append(el("div", "dash-plan-title", safeName(plan.title) || "Untitled plan"));
   const routing = routingSentence(plan.routing);
   if (routing) frag.append(el("div", "dash-plan-routing dash-meta", routing));
   return frag;
@@ -542,7 +549,7 @@ function olderPlans(
     // what "finished" or "stopped" means.
     const verdict = summarize(counts);
 
-    const title = plan.title || "Untitled plan";
+    const title = safeName(plan.title) || "Untitled plan";
     const row = el("button", "dash-plan-older-row");
     row.type = "button";
     row.append(stateChip({ glyph: verdict.glyph, word: verdict.text, state: verdict.state }));

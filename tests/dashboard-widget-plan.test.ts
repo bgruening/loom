@@ -567,6 +567,17 @@ describe("plan widget -- more than one plan", () => {
     expect(has(h, "1. Alpha")).toBe(true);
   });
 
+  it("does not render a plan or step title in an order nobody wrote it in", () => {
+    const h = harness();
+    planWidget.mount(h.el, h.ctx);
+    h.notebook(
+      "## Plan A: Report for \u202egnp.txt\n\n- [ ] 1. **Open \u202egnp.exe** -- \u202egnp.sh\n",
+    );
+    const text = h.text();
+    expect(text).not.toContain("\u202e");
+    expect(h.el.querySelector(".dash-plan-title")?.textContent).toContain("gnp.txt");
+  });
+
   it("falls back to the last plan when none has been started", () => {
     const h = harness();
     planWidget.mount(h.el, h.ctx);

@@ -298,6 +298,12 @@ describe("state folding", () => {
     expect(attentionMessage([row])).toBe('9 of 12 jobs failed in "Count features".');
   });
 
+  it("does not render a run label in an order nobody wrote it in", () => {
+    const rows = [rowFor({ label: "Report for \u202egnp.txt", status: "failed" })];
+    expect(attentionMessage(rows)).not.toContain("\u202e");
+    expect(attentionMessage(rows)).toContain("gnp.txt");
+  });
+
   it("gives every state a word and a glyph, so colour is never the only signal", () => {
     // Written out rather than looped over `toBeTruthy`: the point of the glyphs
     // is that the panel is legible in greyscale and to someone who cannot

@@ -26,6 +26,7 @@
  */
 
 import type { Invocation } from "../../galaxy-invocations.js";
+import { safeName } from "./text-safety.js";
 import type {
   DashboardJob,
   InvocationSnapshot,
@@ -551,13 +552,14 @@ export function attentionMessage(rows: RunRow[]): string {
   if (bad.length === 0) return "";
   if (bad.length === 1) {
     const row = bad[0];
-    const name = row.label || row.id;
+    const name = safeName(row.label || row.id) || row.id;
     // A run is usually labelled after the step it runs, so naming the step's
     // title as well costs a line of a 400px panel to say the same word twice.
+    const stepTitle = row.step ? safeName(row.step.title) : "";
     const where = row.step
-      ? name.toLowerCase().includes(row.step.title.toLowerCase())
+      ? name.toLowerCase().includes(stepTitle.toLowerCase())
         ? ` (step ${row.step.number})`
-        : ` (step ${row.step.number}, ${row.step.title})`
+        : ` (step ${row.step.number}, ${stepTitle})`
       : "";
     if (row.jobs.total > 1 && row.jobs.failed > 0) {
       return `${row.jobs.failed} of ${row.jobs.total} jobs failed in "${name}"${where}.`;
@@ -687,10 +689,10 @@ export function metaLine(row: RunRow, now: number): string {
 
 function detailRows(row: RunRow, now: number): Array<[string, string]> {
   const out: Array<[string, string]> = [];
-  if (row.step) out.push(["Plan step", `${row.step.number}. ${row.step.title}`]);
-  else if (row.anchor) out.push(["Notebook anchor", row.anchor]);
-  if (row.toolId) out.push(["Tool", row.toolId]);
-  out.push([row.kind === "invocation" ? "Invocation" : "Job", row.id]);
+  if (row.step) out.push(["Plan step", `${row.step.number}. ${safeName(row.step.title)}`]);
+  else if (row.anchor) out.push(["Notebook anchor", safeName(row.anchor)]);
+  if (row.toolId) out.push(["Tool", safeName(row.toolId)]);
+  out.push([row.kind === "invocation" ? "Invocation" : "Job", safeName(row.id)]);
   if (row.serverHost) out.push(["Galaxy", row.serverHost]);
   if (row.galaxyState) out.push(["Galaxy state", row.galaxyState]);
   if (row.jobs.total > 1) {
@@ -724,10 +726,12 @@ function renderRow(row: RunRow, now: number, compact: boolean, openIds: Set<stri
   if (row.stale) item.classList.add("is-stale");
   if (!row.live && !needsAttention(row)) item.classList.add("is-done");
 
-  const title = node("div", "dash-jobs-title", row.label || row.id);
-  title.title = row.step
-    ? `${row.label || row.id} -- step ${row.step.number}, ${row.step.title}`
-    : row.label || row.id;
+  // The label is a workflow name out of the notebook and the step title comes
+  // from the plan, so both are model-written: a bidi override in either would
+  // render the row in an order nobody wrote.
+  const name = safeName(row.label || row.id) || row.id;
+  const title = node("div", "dash-jobs-title", name);
+  title.title = row.step ? `${name} -- step ${row.step.number}, ${safeName(row.step.title)}` : name;
   item.append(title);
 
   if (!compact) {
@@ -750,7 +754,7 @@ function renderRow(row: RunRow, now: number, compact: boolean, openIds: Set<stri
   if (!compact) {
     item.append(node("p", "dash-jobs-say", describeRun(row, now)));
     if (shouldShowSummary(row)) {
-      item.append(node("p", "dash-jobs-why", row.summary ?? ""));
+      item.append(node("p", "dash-jobs-why", safeName(row.summary ?? "")));
     }
   }
 

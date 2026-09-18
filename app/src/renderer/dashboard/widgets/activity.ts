@@ -28,6 +28,7 @@
  */
 
 import type { ActivityEvent, WidgetDefinition, WidgetDispose } from "../widget-api.js";
+import { safeName, UNSAFE_BLOCK } from "./text-safety.js";
 
 export type ActivityConfig = {
   /** Kinds to show. `"all"`, or a list; an empty or unusable list means "all". */
@@ -142,15 +143,10 @@ export interface ActivityRow {
 /**
  * Control characters would break a one-line row, and the bidi overrides would
  * let a tool argument render in an order it was not written in -- a log that
- * shows `rm -rf /` as something else is worse than no log.
+ * shows `rm -rf /` as something else is worse than no log. Shared, because the
+ * results gallery has untrusted names to draw for the same reason.
  */
-const UNSAFE_INLINE = /[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]+/g;
-/** Same, but newlines survive, because the detail block is deliberately multi-line. */
-const UNSAFE_BLOCK = /[\u0000-\u0009\u000b-\u001f\u007f\u202a-\u202e\u2066-\u2069]+/g;
-
-function flatten(value: string): string {
-  return value.replace(UNSAFE_INLINE, " ").replace(/ {2,}/g, " ").trim();
-}
+const flatten = safeName;
 
 /**
  * Truncates on code points, so a cap never lands inside a surrogate pair. The

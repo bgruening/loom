@@ -23,6 +23,7 @@ import { extOf } from "../../files/image-preview.js";
 import { rewritePreviewImageHref } from "../../files/markdown-preview.js";
 import type { FileNode } from "../../../preload/preload.js";
 import type { FilesSnapshot, WidgetDefinition, WidgetDispose } from "../widget-api.js";
+import { safeName } from "./text-safety.js";
 
 type ResultsConfig = {
   /** `gallery` shows everything that matches; `pinned` shows one file. */
@@ -549,18 +550,24 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
 
     const addCaption = (entry: HTMLElement, file: ResultFile): void => {
       const caption = node("div", "dash-results-caption");
+      // A filename is whatever a tool wrote, so it gets the same treatment the
+      // log panel gives a tool argument: an override in the middle of it would
+      // otherwise render `a<RLO>gnp.exe` as `a...exe.png`. The click still
+      // carries the real path -- only what the reader sees is normalized.
+      const shownName = safeName(file.name) || file.name;
+      const shownPath = safeName(file.relPath) || file.relPath;
       // A button only where the shell can actually open the file. Seeing the
       // plot and not being able to get to it was the weakest part of this
       // panel, but a name that looks clickable and does nothing is worse.
       if (ctx.openFile) {
-        const open = node("button", "dash-results-name dash-results-open", file.name);
+        const open = node("button", "dash-results-name dash-results-open", shownName);
         open.type = "button";
-        open.title = `Open ${file.relPath}`;
+        open.title = `Open ${shownPath}`;
         open.addEventListener("click", () => ctx.openFile?.(file.relPath));
         caption.append(open);
       } else {
-        const name = node("span", "dash-results-name", file.name);
-        name.title = file.relPath;
+        const name = node("span", "dash-results-name", shownName);
+        name.title = shownPath;
         caption.append(name);
       }
       const size = formatSize(file.size);
@@ -648,7 +655,7 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
           // run whatever a tool wrote into it.
           const img = node("img", pinned ? "dash-results-figure tall" : "dash-results-figure");
           img.src = url;
-          img.alt = file.name;
+          img.alt = safeName(file.name) || file.name;
           img.loading = "lazy";
           img.addEventListener("error", () => {
             drawnImages.delete(img);

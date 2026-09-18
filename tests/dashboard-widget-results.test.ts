@@ -813,6 +813,22 @@ describe("results widget", () => {
     expect(h.el.querySelector(".dash-results-name")?.textContent).toBe("plot.png");
   });
 
+  it("does not render a filename in an order nobody wrote it in", async () => {
+    // The log panel strips these and the gallery did not, which is one surface
+    // with two answers. A right-to-left override in a filename makes
+    // `a<RLO>gnp.exe` read as `a...exe.png` in every browser, and textContent
+    // does not help: the override applies to text, not to markup.
+    const hostile = `a\u202egnp.exe`;
+    const h = harness();
+    resultsWidget.mount(h.el, h.ctx);
+    await h.setFiles(tree([{ name: hostile, relPath: hostile, type: "file", size: 12 }]));
+    const shown = h.el.querySelector(".dash-results-name");
+    expect(shown?.textContent).not.toContain("\u202e");
+    expect(shown?.getAttribute("title") ?? "").not.toContain("\u202e");
+    // The name is still recognisable, minus the character that lied about it.
+    expect(shown?.textContent).toContain("gnp.exe");
+  });
+
   it("opens the file when its name is clicked", async () => {
     const h = harness();
     resultsWidget.mount(h.el, h.ctx);
