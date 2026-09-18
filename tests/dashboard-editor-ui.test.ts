@@ -255,6 +255,19 @@ describe("reordering and resizing", () => {
     expect(host.getDocument().dashboards[0].panels[0].layout.rows).toBe(1);
   });
 
+  it("keeps the panel focused so the keys can be pressed again", () => {
+    const panel = panelEl("p0");
+    panel.focus();
+    keyOn(panel, { key: "ArrowDown", altKey: true });
+    expect(document.activeElement).toBe(panelEl("p0"));
+    keyOn(panelEl("p0"), { key: "ArrowDown", altKey: true });
+    expect(panelOrder()).toEqual(["p1", "p2", "p0"]);
+    keyOn(panelEl("p0"), { key: "ArrowRight", altKey: true });
+    keyOn(panelEl("p0"), { key: "ArrowDown", altKey: true, shiftKey: true });
+    const moved = host.getDocument().dashboards[0].panels[2];
+    expect(moved.layout).toEqual({ span: 2, rows: 3 });
+  });
+
   it("ignores the arrows without Alt, so a widget's own keys still work", () => {
     keyOn(panelEl("p0"), { key: "ArrowDown" });
     expect(panelOrder()).toEqual(["p0", "p1", "p2"]);
@@ -282,6 +295,29 @@ describe("adding and removing panels", () => {
     expect(cards[0].querySelector("small")?.textContent).toBe("The notebook widget.");
     expect(cards[0].querySelector("em")?.textContent).toBe("Already on this dashboard");
     expect(cards[1].querySelector("em")).toBeNull();
+  });
+
+  it("does not offer a widget this build only registers so old layouts still draw", () => {
+    // `html-sandbox` is registered -- a layout naming it has to render -- but
+    // it is not in KNOWN_WIDGET_TYPES, which is what the picker advertises.
+    registry.register(stubWidget("html-sandbox", { label: "Custom view" }));
+    build(doc("notebook"));
+    startEditing();
+    act("add-panel").click();
+    expect(maybeAct("add-html-sandbox")).toBeNull();
+    expect(maybeAct("add-jobs")).not.toBeNull();
+  });
+
+  it("says so rather than showing an empty picker when nothing is advertised", () => {
+    registry = new WidgetRegistry();
+    registry.register(stubWidget("only-internal"));
+    build(doc("only-internal"));
+    startEditing();
+    act("add-panel").click();
+    expect(root.querySelector(".dash-editor-gallery")).toBeNull();
+    expect(root.querySelector(".dash-editor-sheet-detail")?.textContent).toContain(
+      "no widgets to offer",
+    );
   });
 
   it("adds the chosen widget at the end, closes the picker and focuses the new panel", () => {

@@ -19,6 +19,7 @@
 
 import {
   DASHBOARD_PRESETS,
+  KNOWN_WIDGET_TYPES,
   createDefaultDashboardDocument,
   validateDashboardDocument,
 } from "../../../../../shared/dashboard-contract.js";
@@ -273,18 +274,25 @@ export class DashboardEditorController implements DashboardEditor {
     const up = button("dash-editor-tool", GLYPH_UP, "move-up");
     up.disabled = index <= 0;
     this.label(up, `Move ${name} up`);
-    up.addEventListener("click", () => this.movePanelBy(dashboardId, panel, -1, "move-up"));
+    up.addEventListener("click", () =>
+      this.movePanelBy(dashboardId, panel, -1, { panelId: panel.id, act: "move-up" }),
+    );
 
     const down = button("dash-editor-tool", GLYPH_DOWN, "move-down");
     down.disabled = index < 0 || index >= total - 1;
     this.label(down, `Move ${name} down`);
-    down.addEventListener("click", () => this.movePanelBy(dashboardId, panel, 1, "move-down"));
+    down.addEventListener("click", () =>
+      this.movePanelBy(dashboardId, panel, 1, { panelId: panel.id, act: "move-down" }),
+    );
 
     const wide = panel.layout.span === 2;
     const width = button("dash-editor-tool", wide ? GLYPH_NARROW : GLYPH_WIDE, "toggle-width");
     this.label(width, wide ? `Make ${name} half width` : `Make ${name} full width`);
     width.addEventListener("click", () =>
-      this.setPanelWidth(dashboardId, panel, wide ? 1 : 2, "toggle-width"),
+      this.setPanelWidth(dashboardId, panel, wide ? 1 : 2, {
+        panelId: panel.id,
+        act: "toggle-width",
+      }),
     );
 
     const settings = button("dash-editor-tool", GLYPH_SETTINGS, "settings");
@@ -336,18 +344,26 @@ export class DashboardEditorController implements DashboardEditor {
     }
     if (!event.altKey) return;
     switch (event.key) {
+      // Focus goes back to the panel, not to a button: the whole point of the
+      // keys is pressing them again, and the render in between destroys the
+      // element the browser was focused on.
       case "ArrowUp":
       case "ArrowDown": {
         event.preventDefault();
         const delta = event.key === "ArrowDown" ? 1 : -1;
-        if (event.shiftKey) this.setPanelRows(dashboardId, panel, panel.layout.rows + delta);
-        else this.movePanelBy(dashboardId, panel, delta);
+        if (event.shiftKey) {
+          this.setPanelRows(dashboardId, panel, panel.layout.rows + delta, { panelId: panel.id });
+        } else {
+          this.movePanelBy(dashboardId, panel, delta, { panelId: panel.id });
+        }
         break;
       }
       case "ArrowLeft":
       case "ArrowRight": {
         event.preventDefault();
-        this.setPanelWidth(dashboardId, panel, event.key === "ArrowRight" ? 2 : 1);
+        this.setPanelWidth(dashboardId, panel, event.key === "ArrowRight" ? 2 : 1, {
+          panelId: panel.id,
+        });
         break;
       }
       default:
@@ -361,7 +377,7 @@ export class DashboardEditorController implements DashboardEditor {
     dashboardId: string,
     panel: DashboardPanel,
     delta: number,
-    act = "move-up",
+    focus: PendingFocus | null,
   ): void {
     const doc = this.document();
     if (!doc) return;
@@ -374,7 +390,7 @@ export class DashboardEditorController implements DashboardEditor {
     const moved = next.dashboards.find((d) => d.id === dashboardId);
     const position = moved ? moved.panels.findIndex((p) => p.id === panel.id) + 1 : 0;
     const total = moved ? moved.panels.length : 0;
-    this.pendingFocus = { panelId: panel.id, act };
+    this.pendingFocus = focus;
     // Moving is its own opposite, so it does not spend an Undo slot; the same
     // control in the other direction puts it back.
     this.apply(next, `Moved ${quote(name)}`, { undoable: false });
@@ -385,7 +401,7 @@ export class DashboardEditorController implements DashboardEditor {
     dashboardId: string,
     panel: DashboardPanel,
     span: PanelSpan,
-    act?: string,
+    focus: PendingFocus | null,
   ): void {
     const doc = this.document();
     if (!doc) return;
@@ -395,7 +411,7 @@ export class DashboardEditorController implements DashboardEditor {
       this.announce(`${name} is already ${span === 2 ? "full" : "half"} width`);
       return;
     }
-    if (act) this.pendingFocus = { panelId: panel.id, act };
+    this.pendingFocus = focus;
     this.apply(next, `Resized ${quote(name)}`, { undoable: false });
     this.announce(`${name} is now ${span === 2 ? "full" : "half"} width`);
   }
@@ -404,7 +420,7 @@ export class DashboardEditorController implements DashboardEditor {
     dashboardId: string,
     panel: DashboardPanel,
     rows: number,
-    act?: string,
+    focus: PendingFocus | null,
   ): void {
     const doc = this.document();
     if (!doc) return;
@@ -420,7 +436,7 @@ export class DashboardEditorController implements DashboardEditor {
     }
     const dashboard = next.dashboards.find((d) => d.id === dashboardId);
     const applied = dashboard?.panels.find((p) => p.id === panel.id)?.layout.rows ?? rows;
-    if (act) this.pendingFocus = { panelId: panel.id, act };
+    this.pendingFocus = focus;
     this.apply(next, `Resized ${quote(name)}`, { undoable: false });
     this.announce(`${name} is now ${applied} row${applied === 1 ? "" : "s"} tall`);
   }
@@ -484,14 +500,18 @@ export class DashboardEditorController implements DashboardEditor {
       resetBtn,
     );
 
-    this.hintRow = el("div", "dash-editor-hint");
+    // A disclosure rather than a permanent strip: spelled out it is two lines
+    // of a 400px pane, and it is worth reading once, not on every edit.
+    this.hintRow = el("details", "dash-editor-hint");
     this.hintRow.hidden = true;
-    this.hintRow.append(
+    const hints = el("div", "dash-editor-hint-body");
+    hints.append(
       this.hintSpan("Tab", "to a panel, then"),
       this.hintSpan("Alt", "+ arrows to move and widen"),
       this.hintSpan("Alt+Shift", "+ up/down for height"),
       this.hintSpan("Delete", "to remove"),
     );
+    this.hintRow.append(el("summary", undefined, "Keyboard shortcuts"), hints);
 
     this.noteRow = el("div", "dash-editor-note");
     this.noteRow.hidden = true;
@@ -682,10 +702,20 @@ export class DashboardEditorController implements DashboardEditor {
     if (!active) return;
     this.sheetEl.append(this.sheetHead("Add a panel"));
 
-    const widgets = this.ctx?.host.listWidgets() ?? [];
+    // The registry is the set of widgets that can be DRAWN; `KNOWN_WIDGET_TYPES`
+    // is the set this build is willing to OFFER, and the difference is on
+    // purpose -- a flag-gated widget is registered so an existing layout still
+    // renders, without the picker inviting someone to add one.
+    const widgets = (this.ctx?.host.listWidgets() ?? []).filter((w) =>
+      KNOWN_WIDGET_TYPES.includes(w.type),
+    );
     if (widgets.length === 0) {
       this.sheetEl.append(
-        el("p", "dash-editor-sheet-detail", "No widgets are registered in this build."),
+        el(
+          "p",
+          "dash-editor-sheet-detail",
+          "This build has no widgets to offer. Ask the agent for the view you want instead.",
+        ),
       );
       return;
     }
@@ -945,14 +975,14 @@ export class DashboardEditorController implements DashboardEditor {
     half.setAttribute("aria-pressed", String(panel.layout.span === 1));
     half.addEventListener("click", () => {
       this.sheetFocus = "panel-half";
-      this.setPanelWidth(dashboard.id, panel, 1);
+      this.setPanelWidth(dashboard.id, panel, 1, null);
       this.renderSheet();
     });
     const fullWidth = button("dash-editor-btn", "Full", "panel-full");
     fullWidth.setAttribute("aria-pressed", String(panel.layout.span === 2));
     fullWidth.addEventListener("click", () => {
       this.sheetFocus = "panel-full";
-      this.setPanelWidth(dashboard.id, panel, 2);
+      this.setPanelWidth(dashboard.id, panel, 2, null);
       this.renderSheet();
     });
     widthField.append(half, fullWidth);
@@ -966,7 +996,7 @@ export class DashboardEditorController implements DashboardEditor {
     this.label(shorter, "Make this panel shorter");
     shorter.addEventListener("click", () => {
       this.sheetFocus = "panel-shorter";
-      this.setPanelRows(dashboard.id, panel, panel.layout.rows - 1);
+      this.setPanelRows(dashboard.id, panel, panel.layout.rows - 1, null);
       this.renderSheet();
     });
     const readout = el(
@@ -979,7 +1009,7 @@ export class DashboardEditorController implements DashboardEditor {
     this.label(taller, "Make this panel taller");
     taller.addEventListener("click", () => {
       this.sheetFocus = "panel-taller";
-      this.setPanelRows(dashboard.id, panel, panel.layout.rows + 1);
+      this.setPanelRows(dashboard.id, panel, panel.layout.rows + 1, null);
       this.renderSheet();
     });
     stepper.append(shorter, readout, taller);

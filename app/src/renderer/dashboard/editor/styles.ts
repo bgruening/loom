@@ -109,15 +109,24 @@ export const EDITOR_STYLES = `
 }
 
 .dash-editor-hint {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 12px;
-  padding: 7px 10px;
+  padding: 5px 10px;
   border: 1px solid var(--accent);
   border-radius: var(--radius);
   background: var(--accent-bg);
   font-size: 11.5px;
   color: var(--text);
+}
+
+.dash-editor-hint > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.dash-editor-hint-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 6px;
 }
 
 .dash-editor-hint kbd {
