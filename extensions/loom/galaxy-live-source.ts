@@ -492,8 +492,32 @@ export class GalaxyLiveTicker {
   private historyId: string | null = null;
   private failures = 0;
   private resolved: { id: string; at: number; server: string } | null = null;
+  /**
+   * Everything this ticker asks Galaxy hangs off this, so `stop()` abandons
+   * whatever is in flight. Without it a `session_shutdown` landing on a read
+   * held the loop open for as long as the read took -- and `galaxyGet` is a
+   * bare fetch with no timeout of its own, which against a stalling server
+   * measured 301 seconds before it threw.
+   */
+  private readonly abort = new AbortController();
+  private stopped = false;
 
   constructor(private deps: GalaxyLiveTickerDeps) {}
+
+  /** Stop ticking and abandon anything already in flight. Not reversible. */
+  stop(): void {
+    this.stopped = true;
+    this.abort.abort();
+  }
+
+  /**
+   * The bound on one request: this session, plus this tick's wall clock. The
+   * snapshot applies its own timeout internally and only wants the session
+   * half; the history resolve goes straight to `galaxyGet` and wants both.
+   */
+  private requestSignal(): AbortSignal {
+    return AbortSignal.any([this.abort.signal, AbortSignal.timeout(DEFAULT_TIMEOUT_MS)]);
+  }
 
   /** Minimum spacing for the next attempt, given what the notebook says. */
   private interval(live: boolean): number {
@@ -538,7 +562,7 @@ export class GalaxyLiveTicker {
     // that send the user somewhere completely different. Galaxy answering
     // "you have no histories" is the only real no-history, and that is the
     // null below.
-    const summary = await this.deps.mostRecentHistory();
+    const summary = await this.deps.mostRecentHistory(this.requestSignal());
     if (!summary?.id) return null;
     this.resolved = { id: summary.id, at: this.deps.now(), server: serverUrl };
     return summary.id;
@@ -551,7 +575,7 @@ export class GalaxyLiveTicker {
   async tick(content: string | null): Promise<void> {
     // The poller fires this without awaiting it, so nothing outside stops two
     // ticks overlapping while Galaxy is slow. This does.
-    if (this.running) return;
+    if (this.running || this.stopped) return;
     this.running = true;
     try {
       await this.runTick(content);
@@ -596,12 +620,19 @@ export class GalaxyLiveTicker {
     try {
       historyId = await this.resolveHistoryId(content, cfg.url);
     } catch (err) {
+      // A stop that aborted the request mid-flight is not something to report
+      // or to back off from; the session is over.
+      if (this.stopped) return;
       // Asking Galaxy which history is current failed. That is the same class
       // of problem as the read below failing, and it reads the same way.
       this.failures++;
       this.emit(this.unavailable(classifyError(err), cfg.url, this.deps.now()), this.deps.now());
       return;
     }
+    // The resolve may have come back after the session ended, either because it
+    // was aborted or because it finished first. Either way there is nothing to
+    // draw on and nothing worth asking Galaxy for.
+    if (this.stopped) return;
     if (historyId !== this.historyId) {
       // A different history: the update_time we were comparing against belongs
       // to the old one, and reusing it would suppress the first real read.
@@ -618,8 +649,9 @@ export class GalaxyLiveTicker {
 
     const result = await this.deps.snapshot(historyId, {
       knownUpdateTime: this.knownUpdateTime ?? undefined,
+      signal: this.abort.signal,
     });
-    if (result.aborted) return;
+    if (result.aborted || this.stopped) return;
 
     if (result.unchanged) {
       this.failures = 0;
@@ -703,6 +735,9 @@ export function armGalaxyLivePanel(ctx: ExtensionContext): void {
       console.error("[galaxy-live] widget push failed:", err);
     }
   };
+  // A ticker being replaced must let go of whatever it is waiting on; the new
+  // one is about to ask the same questions.
+  ticker?.stop();
   ticker = new GalaxyLiveTicker({
     snapshot: fetchGalaxyLiveSnapshot,
     config: getGalaxyConfig,
@@ -717,6 +752,9 @@ export function armGalaxyLivePanel(ctx: ExtensionContext): void {
 /** Stop pushing. Called from `session_shutdown`, beside `stopGalaxyPoller()`. */
 export function disarmGalaxyLivePanel(): void {
   armGeneration++;
+  // The generation guard already drops a late push. This is the other half:
+  // stop waiting for the answer at all, so shutdown does not sit behind a read.
+  ticker?.stop();
   ticker = null;
   setPollTickHook(null);
 }

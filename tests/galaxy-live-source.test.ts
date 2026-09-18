@@ -876,6 +876,50 @@ describe("GalaxyLiveTicker cadence", () => {
     expect(none.pushes[0].unavailable).toBe("no-history");
   });
 
+  it("bounds the history resolve and lets go of it on stop", async () => {
+    // `galaxyGet` has no timeout of its own, and this one is not behind the
+    // snapshot's: a stalling server measured 301 s before the bare fetch threw,
+    // and for all of it `running` stayed true and every later tick was dropped.
+    let seen: AbortSignal | undefined;
+    let settle: (() => void) | null = null;
+    const hang = new Promise<void>((r) => {
+      settle = r;
+    });
+    const h = tickerHarness({
+      mostRecentHistory: async (signal?: AbortSignal) => {
+        seen = signal;
+        await hang;
+        return { id: HID, name: "most recent" };
+      },
+    });
+
+    const inFlight = h.ticker.tick("# no binding\n");
+    expect(seen).toBeDefined();
+    expect(seen!.aborted).toBe(false);
+
+    h.ticker.stop();
+    expect(seen!.aborted).toBe(true);
+
+    settle!();
+    await inFlight;
+    // Stopped mid-read: no error payload for a shutdown, and no further asks.
+    expect(h.pushes).toEqual([]);
+    expect(h.snapshot).not.toHaveBeenCalled();
+    h.advance(120_000);
+    await h.ticker.tick(bound);
+    expect(h.snapshot).not.toHaveBeenCalled();
+  });
+
+  it("hands the snapshot something to cancel", async () => {
+    const h = tickerHarness();
+    await h.ticker.tick(bound);
+    const signal = h.snapshot.mock.calls[0][1].signal as AbortSignal | undefined;
+    expect(signal).toBeDefined();
+    expect(signal!.aborted).toBe(false);
+    h.ticker.stop();
+    expect(signal!.aborted).toBe(true);
+  });
+
   it("forgets the previous history's update_time when the binding changes", async () => {
     const h = tickerHarness();
     await h.ticker.tick(`${BINDING("https://usegalaxy.org", "1111111111111111")}`);
