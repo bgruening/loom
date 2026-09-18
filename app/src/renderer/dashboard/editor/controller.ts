@@ -584,8 +584,18 @@ export class DashboardEditorController implements DashboardEditor {
     const entry = this.undo.peek();
     // Outside edit mode the strip is reserved for a change the user did not
     // make, which is the one they need told about and offered a way back from.
+    // A widget saving its own config is not that, so `external-config` is left
+    // for edit mode.
     this.noteRow.hidden = !entry || (!this.editing && entry.source !== "external");
-    if (entry) this.noteText.textContent = entry.label;
+    if (entry) {
+      this.noteText.textContent = entry.label;
+      // The strip names what Undo reverses, which is not always the last thing
+      // that happened -- moving and resizing do not queue -- so the button says
+      // which one it means rather than leaving it to the strip's position.
+      const undoBtn = this.noteRow.querySelector<HTMLElement>('[data-act="undo"]');
+      undoBtn?.setAttribute("aria-label", `Undo: ${entry.label}`);
+      if (undoBtn) undoBtn.title = `Undo: ${entry.label}`;
+    }
   }
 
   private onSelectDashboard(): void {

@@ -668,6 +668,16 @@ describe("changes the editor did not make", () => {
     host.setDocument(next, { persist: false });
   }
 
+  it("names on the button itself which change Undo would reverse", () => {
+    build(doc("notebook", "jobs"));
+    startEditing();
+    tool("p1", "remove").click();
+    // Moving does not queue, so after this the strip still describes the
+    // removal -- the button has to say so rather than read as "the last thing".
+    tool("p0", "move-down").click();
+    expect(act("undo").getAttribute("aria-label")).toBe("Undo: Removed \u201cJobs\u201d");
+  });
+
   it("says what happened rather than that something happened", () => {
     build(doc("notebook"));
     agentAddsAPanel();
