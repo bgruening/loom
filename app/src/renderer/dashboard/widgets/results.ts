@@ -76,8 +76,9 @@ const MAX_LIMIT = 60;
  * The files source reports "not available" before the host has asked the
  * shell, in a shell that has no listing at all, and for the moment after a
  * reset -- and only time tells them apart from in here. A host that marked the
- * second case would be better; `FilesSnapshot` wants an `exists` alongside
- * `available`, and the log panel needs the same thing for the same reason.
+ * shell-has-no-listing case would be better: `FilesSnapshot` wants an `exists`
+ * alongside `available`, and the log panel needs the same thing for the same
+ * reason.
  */
 const LISTING_GRACE_MS = 1200;
 
