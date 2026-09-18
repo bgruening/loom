@@ -21,15 +21,20 @@ describe("presets", () => {
     expect(DASHBOARD_FILENAME).toBe(".loom-dashboard.json");
   });
 
-  it("ships an overview preset of notebook + jobs + plan", () => {
-    const overview = dashboardFromPreset("overview");
-    expect(overview?.panels.map((p) => p.widget)).toEqual(["notebook", "jobs", "plan"]);
+  it("ships a current-analysis preset of notebook + jobs + plan", () => {
+    const preset = dashboardFromPreset("current-analysis");
+    expect(preset?.panels.map((p) => p.widget)).toEqual(["notebook", "jobs", "plan"]);
+  });
+
+  it("marks preset panels as coming from a preset", () => {
+    const preset = dashboardFromPreset("current-analysis")!;
+    expect(preset.panels.every((p) => p.addedBy === "preset")).toBe(true);
   });
 
   it("hands out copies, so a caller cannot mutate the preset", () => {
-    const first = dashboardFromPreset("overview")!;
+    const first = dashboardFromPreset("current-analysis")!;
     first.panels.pop();
-    expect(dashboardFromPreset("overview")!.panels).toHaveLength(3);
+    expect(dashboardFromPreset("current-analysis")!.panels).toHaveLength(3);
   });
 
   it("returns null for a preset that does not exist", () => {
@@ -173,8 +178,8 @@ describe("validateDashboardDocument -- repairs", () => {
     const result = validateDashboardDocument({ version: 1, activeId: "x", dashboards: ["junk"] });
     const doc = expectOk(result);
     expect(doc.dashboards).toHaveLength(1);
-    expect(doc.dashboards[0].id).toBe("overview");
-    expect(doc.activeId).toBe("overview");
+    expect(doc.dashboards[0].id).toBe("current-analysis");
+    expect(doc.activeId).toBe("current-analysis");
   });
 
   it("re-points an activeId that names no dashboard", () => {
@@ -200,6 +205,77 @@ describe("validateDashboardDocument -- repairs", () => {
     const doc = expectOk(validateDashboardDocument(input));
     doc.dashboards[0].panels[0].config.a = 2;
     expect(JSON.stringify(input)).toBe(before);
+  });
+
+  it("preserves panel provenance so agent curation needs no migration later", () => {
+    const doc = expectOk(
+      validateDashboardDocument({
+        version: 1,
+        activeId: "d",
+        dashboards: [
+          {
+            id: "d",
+            title: "D",
+            panels: [
+              {
+                id: "p",
+                widget: "jobs",
+                addedBy: "agent",
+                reason: "you asked about the bwa run",
+                pinned: true,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(doc.dashboards[0].panels[0]).toMatchObject({
+      addedBy: "agent",
+      reason: "you asked about the bwa run",
+      pinned: true,
+    });
+  });
+
+  it("drops provenance it cannot trust rather than passing it through", () => {
+    const result = validateDashboardDocument({
+      version: 1,
+      activeId: "d",
+      dashboards: [
+        {
+          id: "d",
+          title: "D",
+          panels: [{ id: "p", widget: "jobs", addedBy: "root", pinned: "yes", reason: 3 }],
+        },
+      ],
+    });
+    const panel = expectOk(result).dashboards[0].panels[0];
+    expect(panel.addedBy).toBeUndefined();
+    expect(panel.pinned).toBeUndefined();
+    expect(panel.reason).toBeUndefined();
+    expect(result.problems.map((p) => p.path)).toEqual(
+      expect.arrayContaining([
+        "dashboards[0].panels[0].addedBy",
+        "dashboards[0].panels[0].reason",
+        "dashboards[0].panels[0].pinned",
+      ]),
+    );
+  });
+
+  it("caps an over-long provenance reason", () => {
+    const doc = expectOk(
+      validateDashboardDocument({
+        version: 1,
+        activeId: "d",
+        dashboards: [
+          {
+            id: "d",
+            title: "D",
+            panels: [{ id: "p", widget: "jobs", reason: "z".repeat(1000) }],
+          },
+        ],
+      }),
+    );
+    expect(doc.dashboards[0].panels[0].reason).toHaveLength(280);
   });
 
   it("caps a pathological panel count", () => {

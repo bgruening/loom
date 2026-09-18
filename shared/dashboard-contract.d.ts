@@ -23,6 +23,9 @@ export interface DashboardPanelLayout {
   rows: number;
 }
 
+/** Who put this panel here. Recorded, preserved, and not yet rendered. */
+export type PanelOrigin = "user" | "agent" | "preset";
+
 export interface DashboardPanel {
   id: string;
   /** Widget type key. An unrecognised value is preserved, not dropped. */
@@ -31,6 +34,17 @@ export interface DashboardPanel {
   title?: string;
   config: Record<string, unknown>;
   layout: DashboardPanelLayout;
+  /**
+   * Provenance. Carried in v1 so that an agent curating the dashboard later can
+   * say who added a panel and why, and so the user can pin one against being
+   * re-curated away, without a schema migration. The validator preserves these;
+   * the host ignores them.
+   */
+  addedBy?: PanelOrigin;
+  /** Short note on why this panel is here. Capped at 280 characters. */
+  reason?: string;
+  /** Set by the user to mean "leave this one alone". */
+  pinned?: boolean;
 }
 
 export interface Dashboard {
@@ -68,7 +82,7 @@ export const DASHBOARD_PRESETS: readonly DashboardPreset[];
 /** A fresh copy of a preset's dashboard, or null if there is no such preset. */
 export function dashboardFromPreset(presetId: string): Dashboard | null;
 
-/** The document a workspace starts with: one dashboard, the overview preset. */
+/** The document a workspace starts with: one dashboard, the current-analysis preset. */
 export function createDefaultDashboardDocument(): DashboardDocument;
 
 export function serializeDashboardDocument(document: DashboardDocument): string;

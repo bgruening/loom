@@ -29,30 +29,45 @@ export const DASHBOARD_MAX_BYTES = 256 * 1024;
  */
 export const KNOWN_WIDGET_TYPES = ["notebook", "jobs", "plan", "activity", "results"];
 
-const DEFAULT_PRESET_ID = "overview";
+const DEFAULT_PRESET_ID = "current-analysis";
 const MIN_ROWS = 1;
 const MAX_ROWS = 6;
 const DEFAULT_ROWS = 2;
 const MAX_DASHBOARDS = 20;
 const MAX_PANELS = 40;
+const MAX_REASON_CHARS = 280;
+const ADDED_BY = new Set(["user", "agent", "preset"]);
 
 export const DASHBOARD_PRESETS = [
   {
-    id: "overview",
-    label: "Overview",
+    id: "current-analysis",
+    label: "Current analysis",
     description: "The notebook, what Galaxy is running, and where the plan stands.",
     dashboard: {
-      id: "overview",
-      title: "Overview",
+      id: "current-analysis",
+      title: "Current analysis",
       panels: [
         {
           id: "p-notebook",
           widget: "notebook",
           config: { follow: true },
           layout: { span: 2, rows: 3 },
+          addedBy: "preset",
         },
-        { id: "p-jobs", widget: "jobs", config: {}, layout: { span: 1, rows: 2 } },
-        { id: "p-plan", widget: "plan", config: {}, layout: { span: 1, rows: 2 } },
+        {
+          id: "p-jobs",
+          widget: "jobs",
+          config: {},
+          layout: { span: 1, rows: 2 },
+          addedBy: "preset",
+        },
+        {
+          id: "p-plan",
+          widget: "plan",
+          config: {},
+          layout: { span: 1, rows: 2 },
+          addedBy: "preset",
+        },
       ],
     },
   },
@@ -64,9 +79,27 @@ export const DASHBOARD_PRESETS = [
       id: "monitoring",
       title: "Monitoring",
       panels: [
-        { id: "p-jobs", widget: "jobs", config: {}, layout: { span: 2, rows: 2 } },
-        { id: "p-plan", widget: "plan", config: {}, layout: { span: 1, rows: 3 } },
-        { id: "p-activity", widget: "activity", config: {}, layout: { span: 1, rows: 3 } },
+        {
+          id: "p-jobs",
+          widget: "jobs",
+          config: {},
+          layout: { span: 2, rows: 2 },
+          addedBy: "preset",
+        },
+        {
+          id: "p-plan",
+          widget: "plan",
+          config: {},
+          layout: { span: 1, rows: 3 },
+          addedBy: "preset",
+        },
+        {
+          id: "p-activity",
+          widget: "activity",
+          config: {},
+          layout: { span: 1, rows: 3 },
+          addedBy: "preset",
+        },
       ],
     },
   },
@@ -78,12 +111,19 @@ export const DASHBOARD_PRESETS = [
       id: "results",
       title: "Results",
       panels: [
-        { id: "p-results", widget: "results", config: {}, layout: { span: 2, rows: 3 } },
+        {
+          id: "p-results",
+          widget: "results",
+          config: {},
+          layout: { span: 2, rows: 3 },
+          addedBy: "preset",
+        },
         {
           id: "p-notebook",
           widget: "notebook",
           config: { follow: false },
           layout: { span: 2, rows: 3 },
+          addedBy: "preset",
         },
       ],
     },
@@ -114,7 +154,7 @@ export function dashboardFromPreset(presetId) {
   return preset ? clone(preset.dashboard) : null;
 }
 
-/** The document a workspace starts with: one dashboard, the overview preset. */
+/** The document a workspace starts with: one dashboard, the current-analysis preset. */
 export function createDefaultDashboardDocument() {
   const dashboard = dashboardFromPreset(DEFAULT_PRESET_ID);
   return {
@@ -193,6 +233,26 @@ function normalizePanel(raw, path, index, seenIds, problems) {
   } else if (raw.config !== undefined) {
     problems.push(problem(`${path}.config`, `expected an object, got ${describe(raw.config)}`));
   }
+
+  // Provenance. Nothing renders it yet -- it is here so that an agent which
+  // curates the dashboard later can say who added a panel and why, and why the
+  // user pinned it, without a schema migration.
+  if (typeof raw.addedBy === "string" && ADDED_BY.has(raw.addedBy)) {
+    panel.addedBy = raw.addedBy;
+  } else if (raw.addedBy !== undefined) {
+    problems.push(problem(`${path}.addedBy`, "expected user, agent or preset; dropped"));
+  }
+  if (typeof raw.reason === "string" && raw.reason.trim() !== "") {
+    panel.reason = raw.reason.trim().slice(0, MAX_REASON_CHARS);
+  } else if (raw.reason !== undefined) {
+    problems.push(problem(`${path}.reason`, "expected a non-empty string; dropped"));
+  }
+  if (typeof raw.pinned === "boolean") {
+    panel.pinned = raw.pinned;
+  } else if (raw.pinned !== undefined) {
+    problems.push(problem(`${path}.pinned`, "expected a boolean; dropped"));
+  }
+
   return panel;
 }
 
