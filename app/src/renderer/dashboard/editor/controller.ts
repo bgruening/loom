@@ -20,6 +20,8 @@
 import {
   DASHBOARD_PRESETS,
   KNOWN_WIDGET_TYPES,
+  MAX_DASHBOARDS,
+  MAX_PANELS,
   createDefaultDashboardDocument,
   validateDashboardDocument,
 } from "../../../../../shared/dashboard-contract.js";
@@ -36,8 +38,6 @@ import type {
   WidgetDispose,
 } from "../widget-api.js";
 import {
-  MAX_DASHBOARDS,
-  MAX_PANELS,
   MAX_PANEL_ROWS,
   MIN_PANEL_ROWS,
   addPanel,

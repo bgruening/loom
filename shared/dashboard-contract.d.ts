@@ -14,6 +14,17 @@ export const DASHBOARD_MAX_BYTES: number;
  */
 export const KNOWN_WIDGET_TYPES: readonly string[];
 
+/**
+ * Caps the validator enforces by truncating. A caller that would rather refuse
+ * a click than silently drop what it just added reads them from here.
+ */
+export const MAX_DASHBOARDS: number;
+export const MAX_PANELS: number;
+
+/** Panel height bounds, in grid row units. */
+export const MIN_ROWS: number;
+export const MAX_ROWS: number;
+
 export type PanelSpan = 1 | 2;
 
 export interface DashboardPanelLayout {

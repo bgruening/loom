@@ -37,11 +37,17 @@ export const KNOWN_WIDGET_TYPES = [
 ];
 
 const DEFAULT_PRESET_ID = "current-analysis";
-const MIN_ROWS = 1;
-const MAX_ROWS = 6;
+export const MIN_ROWS = 1;
+export const MAX_ROWS = 6;
 const DEFAULT_ROWS = 2;
-const MAX_DASHBOARDS = 20;
-const MAX_PANELS = 40;
+/**
+ * Validation enforces these by truncating and reporting a repair, which is the
+ * right answer for a file off disk. A caller acting on someone's click wants to
+ * refuse and say so instead, so it needs the same numbers rather than its own
+ * copy of them.
+ */
+export const MAX_DASHBOARDS = 20;
+export const MAX_PANELS = 40;
 const MAX_REASON_CHARS = 280;
 const MAX_NAME_CHARS = 200;
 const MAX_WIDGET_TYPE_CHARS = 100;

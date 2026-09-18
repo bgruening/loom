@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  MAX_DASHBOARDS,
-  MAX_PANELS,
   addPanel,
   configurePanel,
   createDashboard,
@@ -18,6 +16,7 @@ import {
   uniqueDashboardId,
   uniquePanelId,
 } from "../app/src/renderer/dashboard/editor/operations.js";
+import { MAX_DASHBOARDS, MAX_PANELS } from "../shared/dashboard-contract.js";
 import {
   DASHBOARD_PRESETS,
   validateDashboardDocument,

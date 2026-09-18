@@ -18,6 +18,10 @@
 import {
   createDefaultDashboardDocument,
   dashboardFromPreset,
+  MAX_DASHBOARDS,
+  MAX_PANELS,
+  MAX_ROWS,
+  MIN_ROWS,
 } from "../../../../../shared/dashboard-contract.js";
 import type {
   Dashboard,
@@ -27,19 +31,9 @@ import type {
   PanelSpan,
 } from "../../../../../shared/dashboard-contract.js";
 
-/** Row heights the schema accepts. Mirrors MIN_ROWS/MAX_ROWS in the contract. */
-export const MIN_PANEL_ROWS = 1;
-export const MAX_PANEL_ROWS = 6;
-
-/**
- * The contract truncates past these and reports it as a repair. The editor
- * refuses instead, so the user is told rather than silently losing the panel
- * they just added. These mirror MAX_DASHBOARDS / MAX_PANELS in
- * `shared/dashboard-contract.js`, which does not export them; if it ever does,
- * import them from there and delete these.
- */
-export const MAX_DASHBOARDS = 20;
-export const MAX_PANELS = 40;
+/** Row heights the schema accepts, under the names the editor already uses. */
+export const MIN_PANEL_ROWS = MIN_ROWS;
+export const MAX_PANEL_ROWS = MAX_ROWS;
 
 const DEFAULT_LAYOUT = { span: 1 as PanelSpan, rows: 2 };
 
