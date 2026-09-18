@@ -194,6 +194,12 @@ function rowBudget(limit: unknown): number {
   return Number.isFinite(n) && n > 0 ? n : 25;
 }
 
+/**
+ * The scrolling part. Everything above it -- the name, the counts and the
+ * staleness line -- is pinned, because a panel four rows tall scrolls, and the
+ * line saying how old these numbers are is the last thing that should be
+ * allowed to disappear below the fold.
+ */
 function renderHistory(
   body: HTMLElement,
   history: GalaxyLiveHistory,
@@ -303,10 +309,10 @@ export function renderGalaxyHistory(
         : `${summary} (newest ${payload.history.items.length})`,
     ),
   );
-  renderHistory(body, payload.history, config);
 
-  // Last, and always: showing numbers nobody has refreshed as if they were live
-  // is the worst thing this surface could do.
+  // Above the list, not below it: showing numbers nobody has refreshed as if
+  // they were live is the worst thing this surface could do, and in a short
+  // panel anything under the list is off-screen.
   const asOf = Date.parse(payload.updatedAt);
   if (Number.isFinite(asOf)) {
     const age = now - asOf;
@@ -314,6 +320,10 @@ export function renderGalaxyHistory(
     if (age > STALE_AFTER_MS) line.classList.add("gx-live-stale");
     body.append(line);
   }
+
+  const scroller = el("div", "gx-live-scroll");
+  renderHistory(scroller, payload.history, config);
+  body.append(scroller);
   root.append(body);
 }
 

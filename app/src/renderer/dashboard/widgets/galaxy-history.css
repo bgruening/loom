@@ -11,8 +11,28 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+  height: 100%;
+  min-height: 0;
   font-size: 12px;
   color: var(--text);
+}
+
+/* Only the list scrolls. The name, the counts and the staleness line stay put,
+   because a panel three rows tall cannot afford to hide the line that says how
+   old these numbers are. */
+.gx-live-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.gx-live-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.gx-live-scroll::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
 }
 
 .gx-live-head {

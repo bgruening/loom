@@ -130,6 +130,16 @@ describe("renderGalaxyHistory", () => {
     expect(pill.textContent).toContain("Failed");
   });
 
+  it("keeps the staleness line out of the part that scrolls", () => {
+    // A panel three grid rows tall scrolls its list. Anything below the list is
+    // off-screen, and the line saying how old these numbers are is the one that
+    // must not be.
+    const root = draw(payload());
+    const checked = root.querySelector(".gx-live-checked")!;
+    expect(checked.closest(".gx-live-scroll")).toBeNull();
+    expect(root.querySelector(".gx-live-list")?.closest(".gx-live-scroll")).toBeTruthy();
+  });
+
   it("always says when Galaxy was last asked", () => {
     // A bar nobody has refreshed in an hour and a bar that has not moved in an
     // hour look identical. This line is the difference.
