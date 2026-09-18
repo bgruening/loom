@@ -57,7 +57,12 @@ interface Harness {
   rows(): HTMLElement[];
 }
 
-function harness(config: Partial<ActivityConfig> = {}): Harness {
+// The widget keeps per-panel state (filter, opened rows, scroll) outside the
+// mount so it survives a remount, keyed by panel id -- so each test needs an id
+// of its own unless it is deliberately testing that memory.
+let panelSeq = 0;
+
+function harness(config: Partial<ActivityConfig> = {}, panelId?: string): Harness {
   const el = document.createElement("div");
   const header = document.createElement("div");
   document.body.append(el, header);
@@ -66,7 +71,7 @@ function harness(config: Partial<ActivityConfig> = {}): Harness {
   const setConfig = vi.fn();
   const fail = vi.fn();
   const ctx = {
-    panelId: "p-activity",
+    panelId: panelId ?? `p-activity-${++panelSeq}`,
     config: { ...activityWidget.defaultConfig, ...config },
     sources: sources.sources,
     header,
@@ -138,15 +143,25 @@ describe("summarizeEvent", () => {
     expect(out.tone).toBe("info");
   });
 
-  it("quotes the prompt back", () => {
-    const out = summarizeEvent(
-      event("user.prompt", { text: "align these reads" }, { source: "user" }),
-    );
-    expect(out.text).toBe("You asked: align these reads");
+  // pi's InputSource is "interactive" | "rpc" | "extension" -- there is no
+  // "user", and reading one made every prompt in Orbit (rpc) and in the
+  // terminal (interactive) render as though somebody else had sent it.
+  it("quotes the prompt back to whoever actually typed it", () => {
+    for (const source of ["rpc", "interactive"]) {
+      expect(summaryOf(event("user.prompt", { text: "align these reads" }, { source }))).toBe(
+        "You asked: align these reads",
+      );
+    }
   });
 
-  it("does not claim the user typed a prompt that came from somewhere else", () => {
-    expect(summaryOf(event("user.prompt", { text: "go on" }, { source: "hook" }))).toBe(
+  it("does not claim the user typed a prompt the brain sent itself", () => {
+    expect(summaryOf(event("user.prompt", { text: "go on" }, { source: "extension" }))).toBe(
+      "Loom followed up: go on",
+    );
+  });
+
+  it("does not guess for a source pi has not shipped yet", () => {
+    expect(summaryOf(event("user.prompt", { text: "go on" }, { source: "telepathy" }))).toBe(
       "A prompt arrived: go on",
     );
   });
@@ -248,6 +263,27 @@ describe("summarizeEvent", () => {
     ).toBe("Allowed write -- you approved it earlier this session");
   });
 
+  it("does not call a skipped or paused run 'running'", () => {
+    const skipped = summarizeEvent(event("poll.transition", { label: "QC", to: "skipped" }));
+    expect(skipped).toEqual({ text: 'Galaxy workflow run "QC" was skipped', tone: "info" });
+    const paused = summarizeEvent(event("poll.transition", { label: "QC", to: "paused" }));
+    expect(paused.tone).toBe("blocked");
+    expect(paused.text).toContain("needs you");
+  });
+
+  it("returns a sentence rather than throwing when reading the payload throws", () => {
+    const payload: Record<string, unknown> = {};
+    Object.defineProperty(payload, "text", {
+      enumerable: true,
+      get() {
+        throw new Error("boom");
+      },
+    });
+    const out = summarizeEvent(event("user.prompt", payload, { source: "rpc" }));
+    expect(out.text).toBe("user.prompt");
+    expect(out.tone).toBe("unknown");
+  });
+
   it("falls back to the raw kind for a kind it has never seen, rather than throwing", () => {
     const out = summarizeEvent(event("galaxy.history_created", { id: "abc" }, { source: "brain" }));
     expect(out).toEqual({ text: "galaxy.history_created (brain)", tone: "unknown" });
@@ -270,15 +306,13 @@ describe("summarizeEvent", () => {
   });
 
   it("caps one entry so a pasted transcript cannot become one enormous row", () => {
-    const out = summarizeEvent(
-      event("user.prompt", { text: "x".repeat(5000) }, { source: "user" }),
-    );
+    const out = summarizeEvent(event("user.prompt", { text: "x".repeat(5000) }, { source: "rpc" }));
     expect(out.text.length).toBeLessThanOrEqual(201);
   });
 
   it("flattens newlines and strips bidi overrides, so a row cannot lie about its order", () => {
     const out = summaryOf(
-      event("user.prompt", { text: "line one\nline two\u202erm -rf /" }, { source: "user" }),
+      event("user.prompt", { text: "line one\nline two\u202erm -rf /" }, { source: "rpc" }),
     );
     expect(out).not.toContain("\n");
     expect(out).not.toContain("\u202e");
@@ -387,6 +421,15 @@ describe("config coercion", () => {
     expect(normalizeMaxEntries("banana")).toBe(200);
     expect(normalizeMaxEntries(undefined)).toBe(200);
     expect(normalizeMaxEntries(12.7)).toBe(12);
+    expect(normalizeMaxEntries("50")).toBe(50);
+  });
+
+  // Every one of these is a finite 0 through `Number()`, which the clamp would
+  // turn into a one-row panel. `"maxEntries": null` is ordinary model output.
+  it("does not read null, an empty string or a boolean as zero", () => {
+    for (const value of [null, "", "   ", false, true, [], {}]) {
+      expect(normalizeMaxEntries(value)).toBe(200);
+    }
   });
 
   it("treats an unusable or empty kinds list as no filter at all", () => {
@@ -410,7 +453,7 @@ describe("config coercion", () => {
 
 describe("buildRows", () => {
   const events = [
-    event("user.prompt", { text: "align these reads" }, { source: "user" }),
+    event("user.prompt", { text: "align these reads" }, { source: "rpc" }),
     event("tool.start", { toolName: "bash" }),
     event("tool.end", { toolName: "bash" }),
   ];
@@ -448,6 +491,18 @@ describe("buildRows", () => {
     const rows = buildRows(many, { maxEntries: 5 });
     expect(rows).toHaveLength(5);
     expect(rows[4].text).toBe("Finished t39");
+  });
+
+  it("keeps a key stable when an older twin falls out of the tail", () => {
+    // Same millisecond, same kind, same source: only the payload tells them
+    // apart, so without a discriminator the survivor is renumbered onto the
+    // departed row's key and inherits whatever the user had opened.
+    const older = event("tool.start", { toolCallId: "c1", toolName: "a" });
+    const newer = event("tool.start", { toolCallId: "c2", toolName: "b" });
+    const before = buildRows([older, newer], {});
+    const after = buildRows([newer], {});
+    expect(after[0].key).toBe(before[1].key);
+    expect(before[0].key).not.toBe(before[1].key);
   });
 
   it("gives two events in the same second distinct keys", () => {
@@ -603,7 +658,7 @@ describe("mounted activity widget", () => {
       event(
         "user.prompt",
         { text: '<img src=x onerror="alert(1)"><b>bold</b>' },
-        { source: "user" },
+        { source: "rpc" },
       ),
     ]);
     expect(h.el.querySelector("img")).toBeNull();
@@ -637,7 +692,7 @@ describe("mounted activity widget", () => {
     const h = harness();
     activityWidget.mount(h.el, h.ctx);
     h.emit([
-      event("user.prompt", { text: "align these reads" }, { source: "user" }),
+      event("user.prompt", { text: "align these reads" }, { source: "rpc" }),
       event("tool.end", { toolName: "bash" }),
     ]);
     const filter = h.header.querySelector("input") as HTMLInputElement;
@@ -747,14 +802,47 @@ describe("mounted activity widget", () => {
     expect(document.head.querySelectorAll("#dash-activity-styles")).toHaveLength(1);
   });
 
-  it("leaves the panel element clean when it is disposed", () => {
+  it("empties its element and stops listening when it is disposed", () => {
     const h = harness();
     const dispose = activityWidget.mount(h.el, h.ctx);
     h.emit([event("tool.end", { toolName: "bash" })]);
+    const scroller = h.scroller();
+    const jump = h.el.querySelector(".dash-activity-jump") as HTMLButtonElement;
     for (const fn of h.cleanups) fn();
     dispose?.();
+
     expect(h.el.textContent).toBe("");
     expect(h.el.classList.contains("dash-activity")).toBe(false);
+    // The scroll listener is registered through ctx.onDispose, so running the
+    // cleanups must have taken it off: a scroll now changes nothing.
+    Object.defineProperty(scroller, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(scroller, "clientHeight", { value: 100, configurable: true });
+    scroller.scrollTop = 0;
+    scroller.dispatchEvent(new Event("scroll"));
+    expect(jump.hidden).toBe(true);
+  });
+
+  it("draws a divider the day the log crosses one, and not otherwise", () => {
+    const h = harness();
+    activityWidget.mount(h.el, h.ctx);
+    h.emit([
+      event("tool.end", { toolName: "a" }, { timestamp: "2026-09-17T09:00:00.000Z" }),
+      event("tool.end", { toolName: "b" }, { timestamp: "2026-09-17T09:00:01.000Z" }),
+      event("tool.end", { toolName: "c" }, { timestamp: "2026-09-18T09:00:00.000Z" }),
+    ]);
+    const days = [...h.el.querySelectorAll(".dash-activity-day")].map((d) => d.textContent);
+    expect(days).toHaveLength(2);
+    expect(days[0]).not.toBe(days[1]);
+  });
+
+  it("says the log went away if the shell stops being able to read it", () => {
+    const h = harness();
+    activityWidget.mount(h.el, h.ctx);
+    h.emit([event("tool.end", { toolName: "bash" })]);
+    expect(h.rows()).toHaveLength(1);
+    h.emit([], false);
+    expect(h.rows()).toHaveLength(0);
+    expect(textOf(h)).toContain("not readable in this window");
   });
 
   it("never asks the host to fail the panel over a hostile log", () => {
@@ -778,11 +866,74 @@ describe("mounted activity widget", () => {
     const scroller = h.scroller();
     Object.defineProperty(scroller, "scrollHeight", { value: 1000, configurable: true });
     Object.defineProperty(scroller, "clientHeight", { value: 100, configurable: true });
+
+    // A real browser clamps scrollTop to 0 when the list is emptied and the
+    // scroll height collapses; happy-dom does not, so asserting on the value
+    // afterwards would pass with no restore at all. Watch for the write.
+    let top = 0;
+    const writes: number[] = [];
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      get: () => top,
+      set: (v: number) => {
+        top = v;
+        writes.push(v);
+      },
+    });
     scroller.scrollTop = 250;
     scroller.dispatchEvent(new Event("scroll"));
+    writes.length = 0;
 
     h.emit([event("tool.end", { toolName: "a" }), event("tool.end", { toolName: "b" })]);
+    expect(writes).toContain(250);
     expect(scroller.scrollTop).toBe(250);
+  });
+
+  it("carries the filter, the opened rows and the reading position across a remount", () => {
+    const events = [
+      event("user.prompt", { text: "align these reads" }, { source: "rpc" }),
+      event("tool.end", { toolName: "bash" }),
+    ];
+    const first = harness({}, "p-shared");
+    activityWidget.mount(first.el, first.ctx);
+    first.emit(events);
+    const filter = first.header.querySelector("input") as HTMLInputElement;
+    filter.value = "align";
+    filter.dispatchEvent(new Event("input"));
+    const opened = first.el.querySelector("details") as HTMLDetailsElement;
+    opened.open = true;
+    opened.dispatchEvent(new Event("toggle"));
+    expect(first.rows()).toHaveLength(1);
+
+    // What a click on the detail toggle does: setConfig, whole dashboard
+    // re-render, every widget remounted onto a fresh element.
+    for (const fn of first.cleanups) fn();
+    const second = harness({}, "p-shared");
+    activityWidget.mount(second.el, second.ctx);
+    second.emit(events);
+
+    expect((second.header.querySelector("input") as HTMLInputElement).value).toBe("align");
+    expect(second.rows()).toHaveLength(1);
+    expect((second.el.querySelector("details") as HTMLDetailsElement).open).toBe(true);
+  });
+
+  it("takes the jump button away when the panel grows enough to show everything", () => {
+    const h = harness();
+    activityWidget.mount(h.el, h.ctx);
+    h.emit([event("tool.end", { toolName: "a" })]);
+    const scroller = h.scroller();
+    const jump = h.el.querySelector(".dash-activity-jump") as HTMLButtonElement;
+    Object.defineProperty(scroller, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(scroller, "clientHeight", { value: 100, configurable: true });
+    scroller.scrollTop = 0;
+    scroller.dispatchEvent(new Event("scroll"));
+    expect(jump.hidden).toBe(false);
+
+    // The panel is now tall enough for the whole list. No scroll event will
+    // arrive to say so, so the redraw has to work it out for itself.
+    Object.defineProperty(scroller, "clientHeight", { value: 1000, configurable: true });
+    h.emit([event("tool.end", { toolName: "a" }), event("tool.end", { toolName: "b" })]);
+    expect(jump.hidden).toBe(true);
   });
 
   it("keeps the count of what it is hiding out of the scrolling list", () => {

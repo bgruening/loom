@@ -13,10 +13,14 @@
  *  - **Nothing from a payload reaches the DOM except through `textContent`.**
  *    A payload carries tool arguments and tool output, which is to say text a
  *    model wrote and text a command printed.
- *  - **A key that looks like a credential is never rendered, only its name.**
- *    The brain redacts before it writes (`redactArgs`, `redactSecrets`), so
- *    this is a second fence, not the first one. Second fences are worth having
- *    where the first one lives in a different process.
+ *  - **A key whose NAME looks like a credential keeps its name and loses its
+ *    value.** That is the whole of the fence, and it is worth being precise
+ *    about what it does not do: it does not scan values, so a key pasted into
+ *    a command string or an `Authorization:` header inside an argument walks
+ *    straight through it. The brain redacts before it writes (`redactArgs`,
+ *    `redactSecrets`) and has the same shape, so this is a second fence on the
+ *    same axis, not a wider one. Second fences are worth having anyway when the
+ *    first one lives in a different process.
  */
 
 import type { ActivityEvent, WidgetDefinition, WidgetDispose } from "../widget-api.js";
@@ -135,7 +139,16 @@ function strList(value: unknown): string[] {
  * by a model, so none of these three can be trusted to be the declared type.
  */
 export function normalizeMaxEntries(value: unknown): number {
-  const n = typeof value === "number" ? value : Number(value);
+  // Only a number, or a string that is one. `Number(null)`, `Number([])` and
+  // `Number(false)` are all a finite 0, which the clamp below would turn into a
+  // one-row panel -- and `"maxEntries": null` is an ordinary thing for a model
+  // to write.
+  const n =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim() !== ""
+        ? Number(value)
+        : NaN;
   if (!Number.isFinite(n)) return DEFAULT_MAX_ENTRIES;
   return Math.min(MAX_ENTRIES_CEILING, Math.max(1, Math.floor(n)));
 }
@@ -263,7 +276,16 @@ function stepsPhrase(steps: string[]): string {
  * take the whole panel down for something that is not an error.
  */
 export function summarizeEvent(event: ActivityEvent): { text: string; tone: ActivityTone } {
-  const out = describe(event, event.payload ?? {});
+  let out: { text: string; tone: ActivityTone };
+  try {
+    out = describe(event, event.payload ?? {});
+  } catch {
+    // Nothing a `JSON.parse` produces can throw on a property read, so this is
+    // for the next caller rather than this one -- but the panel's contract is
+    // that one bad row does not take the log down, and it should hold for
+    // whatever a future source hands over.
+    out = { text: strOf(event.kind) || "event", tone: "unknown" };
+  }
   return { text: truncate(flatten(out.text), SUMMARY_MAX), tone: out.tone };
 }
 
@@ -282,7 +304,16 @@ function describe(
     }
 
     case "user.prompt": {
-      const who = event.source === "" || event.source === "user" ? "You asked" : "A prompt arrived";
+      // `source` is pi's `InputSource`, which is `interactive` (a terminal),
+      // `rpc` (Orbit) or `extension` (the brain prompting itself, e.g. the
+      // Galaxy poller's resume). There is no "user": guessing one here told
+      // every Orbit user that their own message came from somewhere else.
+      const who =
+        event.source === "interactive" || event.source === "rpc" || event.source === ""
+          ? "You asked"
+          : event.source === "extension"
+            ? "Loom followed up"
+            : "A prompt arrived";
       const text = strOf(p.text);
       return { tone: "info", text: text ? `${who}: ${text}` : `${who}, with no text recorded` };
     }
@@ -311,6 +342,9 @@ function describe(
       }
       const word = statusWord(to);
       if (word === "cancelled") return { tone: "info", text: `${subject} was cancelled` };
+      if (word === "skipped") return { tone: "info", text: `${subject} was skipped` };
+      // Not "running": a paused run is waiting on the person, not on Galaxy.
+      if (word === "paused") return { tone: "blocked", text: `${subject} is paused and needs you` };
       return { tone: "running", text: `${subject} is now ${word}${counts}` };
     }
 
@@ -425,7 +459,7 @@ export function redactForDisplay(value: unknown, depth = 0, seen = new WeakSet<o
     let n = 0;
     for (const [key, v] of Object.entries(obj as Record<string, unknown>)) {
       if (n++ >= DETAIL_KEYS_MAX) {
-        put("…", "[more]");
+        put("[truncated]", "more keys not shown");
         break;
       }
       put(key, CREDENTIAL_KEY.test(key) ? HIDDEN : redactForDisplay(v, depth + 1, seen));
@@ -452,9 +486,26 @@ export function formatDetail(event: ActivityEvent): string {
 // -- Row building ------------------------------------------------------------
 
 /**
- * Keys are assigned over the unfiltered list so a row keeps its identity when
- * the filter changes, which is what lets an expanded entry stay expanded across
- * a rebuild. Timestamps repeat within a second, hence the occurrence counter.
+ * The field that actually tells two events written in the same millisecond
+ * apart. Without one, the occurrence counter is all there is, and the counter
+ * is renumbered when an older twin falls out of the 200-event tail -- the
+ * survivor inherits the departed row's place in the expanded set and opens a
+ * disclosure nobody asked for.
+ */
+function discriminator(payload: Record<string, unknown>): string {
+  for (const field of ["toolCallId", "id", "invocationId", "step"]) {
+    const value = payload[field];
+    if (typeof value === "string" && value !== "") return value;
+  }
+  return "";
+}
+
+/**
+ * Keys are assigned over the list before the text filter runs, so a row keeps
+ * its identity while the filter hides its neighbours -- that is what lets an
+ * entry the user opened still be open after they clear the filter. (The `kinds`
+ * filter could not renumber anything either way, since the kind is part of the
+ * key.)
  */
 export function buildRows(
   events: readonly ActivityEvent[],
@@ -469,7 +520,7 @@ export function buildRows(
   const seen = new Map<string, number>();
   const kept: Array<{ event: ActivityEvent; key: string }> = [];
   for (const event of events) {
-    const base = `${event.timestamp}|${event.kind}|${event.source}`;
+    const base = `${event.timestamp}|${event.kind}|${event.source}|${discriminator(event.payload ?? {})}`;
     const n = seen.get(base) ?? 0;
     seen.set(base, n + 1);
     if (kinds && !kinds.has(event.kind)) continue;
@@ -613,6 +664,41 @@ function ensureStyles(): void {
 
 // -- The widget --------------------------------------------------------------
 
+/**
+ * What a panel has to remember across a remount.
+ *
+ * `ctx.setConfig` goes through the host's `setDocument`, which re-renders the
+ * whole dashboard and remounts every widget. So one click on `detail` used to
+ * throw away the filter the user had typed, every entry they had opened and
+ * where they were reading -- none of which is in the document, and none of
+ * which they asked to lose. Keyed by panel id, which is unique within a
+ * dashboard; two dashboards that both name a panel `p-activity` share an entry,
+ * which is worth a great deal less than losing the filter on every click.
+ */
+interface PanelMemory {
+  filter: string;
+  expanded: Set<string>;
+  following: boolean;
+  scrollTop: number;
+}
+
+const panelMemory = new Map<string, PanelMemory>();
+/** A document holds at most 40 panels; this is only here so nothing is unbounded. */
+const PANEL_MEMORY_MAX = 64;
+
+function memoryFor(panelId: string): PanelMemory {
+  const existing = panelMemory.get(panelId);
+  if (existing) return existing;
+  const fresh: PanelMemory = { filter: "", expanded: new Set(), following: true, scrollTop: 0 };
+  panelMemory.set(panelId, fresh);
+  while (panelMemory.size > PANEL_MEMORY_MAX) {
+    const oldest = panelMemory.keys().next().value;
+    if (oldest === undefined) break;
+    panelMemory.delete(oldest);
+  }
+  return fresh;
+}
+
 function span(className: string, text: string): HTMLSpanElement {
   const node = document.createElement("span");
   node.className = className;
@@ -652,13 +738,16 @@ export const activityWidget: WidgetDefinition<ActivityConfig> = {
     jump.hidden = true;
     el.append(trim, scroller, jump);
 
-    // Deliberately not in the panel config: a config write re-renders the whole
-    // dashboard, so persisting this would remount the widget on every keystroke.
-    let filterText = "";
+    // Held outside the mount, not in the panel config: a config write re-renders
+    // the whole dashboard, so persisting the filter would remount the widget on
+    // every keystroke -- and a remount must not lose it either.
+    const memory = memoryFor(ctx.panelId);
+    let filterText = memory.filter;
     // Which rows the user has opened, by the stable key `buildRows` assigns, so
     // an open disclosure survives the rebuild that the next event causes.
-    const expanded = new Set<string>();
-    let following = true;
+    const expanded = memory.expanded;
+    let following = memory.following;
+    let firstDraw = true;
     let latest: readonly ActivityEvent[] = [];
     let latestAvailable = false;
 
@@ -747,12 +836,22 @@ export const activityWidget: WidgetDefinition<ActivityConfig> = {
     const draw = (): void => {
       // Emptying the list collapses the scroll height, and the browser clamps
       // scrollTop to 0 for us. Put the reader back where they were, or this
-      // rebuilds them to the bottom every time the log grows.
-      const wasAt = scroller.scrollTop;
+      // rebuilds them to the bottom every time the log grows. On the first draw
+      // after a remount there is nothing on screen to read the position from,
+      // so it comes out of the panel's memory instead.
+      const wasAt = firstDraw ? memory.scrollTop : scroller.scrollTop;
       list.textContent = "";
       const finish = (): void => {
+        firstDraw = false;
         if (following) scrollToLatest();
         else scroller.scrollTop = wasAt;
+        // Re-read rather than trust the last scroll event: the content may have
+        // shrunk to fit, in which case there is no bottom to be away from and
+        // no scroll event is coming to say so. A panel with no height yet knows
+        // nothing, so it keeps whatever it had.
+        if (scroller.clientHeight > 0) following = isAtBottom(scroller);
+        memory.following = following;
+        memory.scrollTop = scroller.scrollTop;
         paintJump();
       };
 
@@ -790,8 +889,10 @@ export const activityWidget: WidgetDefinition<ActivityConfig> = {
       finish();
     };
 
+    filter.value = filterText;
     filter.addEventListener("input", () => {
       filterText = filter.value;
+      memory.filter = filterText;
       // A new filter is a new list, and the user asked for it: go back to the end.
       following = true;
       draw();
@@ -799,6 +900,8 @@ export const activityWidget: WidgetDefinition<ActivityConfig> = {
 
     const onScroll = (): void => {
       following = isAtBottom(scroller);
+      memory.following = following;
+      memory.scrollTop = scroller.scrollTop;
       paintJump();
     };
     scroller.addEventListener("scroll", onScroll);
@@ -806,6 +909,7 @@ export const activityWidget: WidgetDefinition<ActivityConfig> = {
 
     jump.addEventListener("click", () => {
       following = true;
+      memory.following = true;
       scrollToLatest();
       paintJump();
     });
@@ -816,15 +920,25 @@ export const activityWidget: WidgetDefinition<ActivityConfig> = {
       draw();
     });
 
-    // The panel has no height while its tab is hidden, so the scroll above
-    // lands on a scrollHeight of 0 and the newest entry is not what the user
-    // sees when they switch to the Dashboard tab.
     if (typeof ResizeObserver !== "undefined") {
       let lastHeight = 0;
       const observer = new ResizeObserver(() => {
         const height = scroller.clientHeight;
-        if (height > 0 && lastHeight === 0 && following) scrollToLatest();
+        if (height === 0) return;
+        // The panel has no height while its tab is hidden, so the scroll in
+        // `draw` landed on a scrollHeight of 0 and the newest entry is not what
+        // the user sees when they switch to the Dashboard tab.
+        if (lastHeight === 0) {
+          if (following) scrollToLatest();
+          else scroller.scrollTop = memory.scrollTop;
+        }
+        // Growing the panel can make the whole list fit, and no scroll event
+        // will arrive to say the reader is no longer away from the bottom --
+        // which would leave "Jump to latest" on screen with nothing to do.
+        following = isAtBottom(scroller);
+        memory.following = following;
         lastHeight = height;
+        paintJump();
       });
       observer.observe(scroller);
       ctx.onDispose(() => observer.disconnect());
