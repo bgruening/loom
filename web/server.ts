@@ -627,8 +627,11 @@ wss.on("connection", (socket) => {
         // the agent can write is a second place to plant a symlink, and this
         // write would follow it after the guard on the real name has passed.
         const tmp = `${file}.tmp.${randomBytes(8).toString("hex")}`;
-        writeFileSync(tmp, raw, { flag: "wx" });
+        // The cleanup covers the write as well as the rename: `wx` creates the
+        // file before it writes to it, so a write that fails part-way leaves a
+        // scratch file behind under a random name nothing will ever look for.
         try {
+          writeFileSync(tmp, raw, { flag: "wx" });
           renameSync(tmp, file);
         } catch (err) {
           rmSync(tmp, { force: true });

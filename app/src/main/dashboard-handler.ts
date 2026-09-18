@@ -111,8 +111,12 @@ export function registerDashboardIpc(getCwd: () => string): void {
       // scratch name is a second place to plant a symlink that a following
       // write would go through, after the guard on the real name has passed.
       const tmp = `${abs}.tmp.${randomBytes(8).toString("hex")}`;
-      await fsp.writeFile(tmp, raw, { encoding: "utf8", flag: "wx" });
+      // The cleanup covers the write as well as the rename: `wx` creates the
+      // file before it writes to it, so a write that fails part-way (no space,
+      // I/O error, quota) leaves a scratch file behind that nothing else will
+      // ever look for, under a random name no sweep can match.
       try {
+        await fsp.writeFile(tmp, raw, { encoding: "utf8", flag: "wx" });
         await fsp.rename(tmp, abs);
       } catch (err) {
         await fsp.rm(tmp, { force: true });
