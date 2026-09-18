@@ -235,9 +235,108 @@ describe("dashboard_read", () => {
 
     expect(result.success).toBe(true);
     expect(raw.length).toBeLessThan(MAX_READ_CHARS);
-    // Still useful: the first dashboard and its first panel id are in there.
-    expect((result.summary as string[])[0]).toContain("p-0-0-");
-    expect((result.summary as string[]).at(-1)).toContain("not shown");
+    // Still useful, and this is the part that matters: EVERY dashboard is
+    // named, each losing its own tail. Spending one budget head-first instead
+    // let the first crowded dashboard eat all of it and collapsed the rest into
+    // "9 more not shown" -- and since the document was omitted too, the
+    // response was telling the model to work from a summary that no longer
+    // mentioned seven of its dashboards, through a tool that takes no argument
+    // to ask again with.
+    const summary = result.summary as string[];
+    expect(summary).toHaveLength(10);
+    for (let d = 0; d < 10; d++) expect(summary[d]).toContain(`p-${d}-0-`);
+  });
+
+  it("spends one budget across all the problems, not one per problem", () => {
+    // Twenty problems at a thousand characters each is the cap over again.
+    // Every panel below is malformed in a way the validator reports, and every
+    // one of those reports quotes a long id back.
+    fs.writeFileSync(
+      dashPath,
+      JSON.stringify({
+        version: 1,
+        activeId: "current-analysis",
+        dashboards: [
+          {
+            id: "current-analysis",
+            title: "Current analysis",
+            panels: Array.from({ length: 30 }, (_, i) => ({
+              id: `p-${"q".repeat(300)}-${i}`,
+              widget: "no-such-widget",
+              config: {},
+              layout: { span: 2, rows: 3 },
+            })),
+          },
+        ],
+      }),
+      "utf-8",
+    );
+    return run("dashboard_read").then((result) => {
+      const problems = result.problems as { path: string; message: string }[];
+      const spent = problems.reduce((n, p) => n + p.path.length + p.message.length, 0);
+      // The trailing "N more" line rides on top of the budget, so allow for it.
+      expect(spent).toBeLessThan(2_500);
+      expect(problems.at(-1)?.message).toContain("more problem(s)");
+    });
+  });
+
+  it("omits a document that fits only before it is indented", () => {
+    // The cap has to be measured the way the response is written. The payload
+    // is serialized with two-space indentation, which roughly doubles it, so
+    // comparing the compact form let a document land in front of the model at
+    // about twice the advertised limit. This one is under the cap compact and
+    // over it indented -- which is the whole range the old measure got wrong.
+    // Structure rather than long values, because indentation is what inflates:
+    // three full dashboards are 11,669 characters compact and 25,848 indented.
+    const doc = {
+      version: 1,
+      activeId: "d0",
+      dashboards: Array.from({ length: 3 }, (_, d) => ({
+        id: `d${d}`,
+        title: `Dashboard ${d}`,
+        panels: Array.from({ length: 40 }, (_, i) => ({
+          id: `p-${d}-${i}`,
+          widget: "notebook" as const,
+          config: {},
+          layout: { span: 2 as const, rows: 3 as const },
+          addedBy: "preset" as const,
+        })),
+      })),
+    };
+    expect(JSON.stringify(doc).length).toBeLessThan(MAX_READ_CHARS);
+    expect(JSON.stringify(doc, null, 2).length).toBeGreaterThan(MAX_READ_CHARS);
+
+    seed(doc);
+    return run("dashboard_read").then((result) => {
+      expect(result.document).toBeUndefined();
+      expect(result.documentOmitted).toContain("too large");
+    });
+  });
+
+  it("emits a document that only just fits, and stays under the cap doing it", () => {
+    // The cap is measured against the indented form because that is the form
+    // the response is written in -- comparing the compact one let a document
+    // that just squeaked under arrive at roughly twice the advertised size.
+    const doc = documentWith(
+      Array.from({ length: 12 }, (_, i) => ({
+        id: `p-${i}`,
+        widget: "notebook" as const,
+        config: { note: "n".repeat(60) },
+        layout: { span: 2 as const, rows: 3 as const },
+        addedBy: "preset" as const,
+      })),
+    );
+    const indented = JSON.stringify(doc, null, 2).length;
+    expect(indented).toBeLessThan(MAX_READ_CHARS);
+    expect(JSON.stringify(doc).length).toBeLessThan(indented);
+
+    seed(doc);
+    return run("dashboard_read").then((result) => {
+      // Small enough to be shown in full, and the whole response still fits.
+      expect(result.document).toBeDefined();
+      expect(result.documentOmitted).toBeUndefined();
+      expect(JSON.stringify(result).length).toBeLessThan(MAX_READ_CHARS * 2);
+    });
   });
 
   it("does not quote a 240,000-character activeId back in the diagnostics", async () => {

@@ -64,13 +64,16 @@ export const MAX_READ_CHARS = 20_000;
  * are worse -- one of them quotes the rejected `activeId` back, so a 240,000-
  * character id becomes a 240,000-character diagnostic about a call that failed.
  *
- * Both are capped head-first, because the ids a write needs are what comes
- * first and the tail is repetition.
+ * Each of these is one budget spent across its whole field rather than a
+ * per-entry cap: twenty problems at a thousand characters each is twenty
+ * thousand characters, which is the cap over again.
  */
 const MAX_SUMMARY_CHARS = 4_000;
-const MAX_PROBLEM_CHARS = 1_000;
+const MAX_PROBLEM_CHARS = 2_000;
 const MAX_PROBLEMS = 20;
 const MAX_ERROR_CHARS = 2_000;
+/** No dashboard's line is squeezed below this, however many there are. */
+const MIN_SUMMARY_LINE_CHARS = 200;
 
 /** Keep the head of one string, and say how much was dropped. */
 function capText(text: string, max: number): string {
@@ -94,23 +97,47 @@ function capLines(lines: string[], budget: number, noun: string): string[] {
   return kept;
 }
 
-/** The summary as the model should see it: the ids, and a bound. */
+/**
+ * The summary as the model should see it: every dashboard, and a bound.
+ *
+ * Every dashboard, deliberately. Spending one budget head-first lets a single
+ * crowded dashboard eat all of it and collapses the rest into "9 more not
+ * shown" -- and when the document has been omitted too, the response tells the
+ * model to work from the summary while `dashboard_read` takes no arguments, so
+ * there is no second call that would fetch the rest. Each line gets its share
+ * and loses its own tail instead.
+ */
 function cappedSummary(document: DashboardDocument): string[] {
-  return capLines(summarizeDocument(document), MAX_SUMMARY_CHARS, "dashboard(s)");
+  const lines = summarizeDocument(document);
+  const share = Math.max(
+    MIN_SUMMARY_LINE_CHARS,
+    Math.floor(MAX_SUMMARY_CHARS / Math.max(1, lines.length)),
+  );
+  return capLines(
+    lines.map((line) => capText(line, share)),
+    MAX_SUMMARY_CHARS,
+    "dashboard(s)",
+  );
 }
 
 /**
- * Validation diagnostics as the model should see them. Both fields are capped:
- * a problem's `path` is structural, but its `message` quotes the input.
+ * Validation diagnostics as the model should see them, inside one shared
+ * budget. Both fields are capped: a problem's `path` is structural, but its
+ * `message` quotes the input.
  */
 function cappedProblems(problems: DashboardProblem[]): DashboardProblem[] {
-  const kept = problems.slice(0, MAX_PROBLEMS).map((p) => ({
-    path: capText(p.path, MAX_PROBLEM_CHARS),
-    message: capText(p.message, MAX_PROBLEM_CHARS),
-  }));
-  if (problems.length > MAX_PROBLEMS) {
-    kept.push({ path: "", message: `... ${problems.length - MAX_PROBLEMS} more problem(s)` });
+  const kept: DashboardProblem[] = [];
+  let used = 0;
+  for (const problem of problems.slice(0, MAX_PROBLEMS)) {
+    if (used >= MAX_PROBLEM_CHARS) break;
+    const left = MAX_PROBLEM_CHARS - used;
+    const path = capText(problem.path, left);
+    const message = capText(problem.message, Math.max(0, left - path.length));
+    kept.push({ path, message });
+    used += path.length + message.length;
   }
+  const dropped = problems.length - kept.length;
+  if (dropped > 0) kept.push({ path: "", message: `... ${dropped} more problem(s)` });
   return kept;
 }
 
@@ -1027,7 +1054,11 @@ export function registerDashboardTools(pi: ExtensionAPI): void {
     async execute() {
       const read = await readDashboardDocument();
       if (!read.ok) return toolFailure(read.error);
-      const serialized = JSON.stringify(read.document);
+      // Measured the way it is emitted. The response is written with two-space
+      // indentation a few lines below, which roughly doubles it, so comparing
+      // the compact form against the cap let a document that just squeaked
+      // under land in front of the model at twice the size.
+      const serialized = JSON.stringify(read.document, null, 2);
       const tooBig = serialized.length > MAX_READ_CHARS;
       return {
         content: [
