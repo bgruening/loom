@@ -101,8 +101,12 @@ describe("decodeListResponse", () => {
     });
   });
 
-  it("refuses an ok response with no tree", () => {
-    expect(decodeListResponse({ ok: true, cwd: "/tmp" })).toEqual({
+  it.each([
+    [{ ok: true, cwd: "/tmp" }],
+    [{ ok: true, root: { name: "a", relPath: "", type: "file" } }],
+    [{ ok: true, root: { name: "a", relPath: "", type: "directory", children: "nope" } }],
+  ])("refuses a tree the renderer would choke on: %o", (raw) => {
+    expect(decodeListResponse(raw)).toEqual({
       ok: false,
       error: "the files could not be listed",
     });

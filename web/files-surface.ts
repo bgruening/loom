@@ -64,6 +64,8 @@ export interface FilesSurfaceOptions {
   home?: string;
   /** Whole-tree entry ceiling. Defaults to MAX_TOTAL_ENTRIES. */
   maxEntries?: number;
+  /** Per-directory entry ceiling. Defaults to MAX_ENTRIES_PER_DIR. */
+  maxEntriesPerDir?: number;
 }
 
 export type WebFileReadResult =
@@ -97,7 +99,11 @@ function segmentRefusal(segment: string): string | null {
   if (segment === "" || segment === ".") return null;
   if (segment === "..") return "path leaves the working directory";
   if (segment.startsWith(".")) return "hidden files are not served";
-  if (NOISE_DIRS.has(segment)) return "that directory is not served";
+  // Case-folded, for the reason exec-guard/path-jail.ts folds: a case-insensitive
+  // filesystem makes `Node_Modules` the same directory. The real-path re-check
+  // below catches it on macOS, where realpath canonicalizes case, but Linux's
+  // does not and a caller could use this helper without the re-check.
+  if (NOISE_DIRS.has(segment.toLowerCase())) return "that directory is not served";
   return null;
 }
 
@@ -200,7 +206,10 @@ async function linkTarget(cwdReal: string, abs: string, home: string): Promise<s
 }
 
 interface WalkBudget {
+  /** Entries left to examine across the whole tree. Refused entries count. */
   remaining: number;
+  /** Entries to examine in any one directory. */
+  perDir: number;
 }
 
 async function walkDir(
@@ -214,17 +223,25 @@ async function walkDir(
   if (depth > MAX_DEPTH || budget.remaining <= 0) return [];
   const absDir = path.resolve(cwd, relDir);
 
-  let entries: fs.Dirent[];
+  // `opendir` rather than `readdir`: readdir materializes the whole directory
+  // before any cap applies, so a million-entry directory is a memory spike that
+  // the per-directory cap does not prevent. Streaming means the cap is a real
+  // ceiling on work, not just on what comes back.
+  let dir: fs.Dir;
   try {
-    entries = await fsp.readdir(absDir, { withFileTypes: true });
+    dir = await fsp.opendir(absDir);
   } catch {
     return [];
   }
-  if (entries.length > MAX_ENTRIES_PER_DIR) entries = entries.slice(0, MAX_ENTRIES_PER_DIR);
 
   const out: FileNode[] = [];
-  for (const e of entries) {
-    if (budget.remaining <= 0) break;
+  let seen = 0;
+  for await (const e of dir) {
+    if (seen >= budget.perDir || budget.remaining <= 0) break;
+    seen++;
+    // Refused entries cost budget too. Otherwise a directory of ten thousand
+    // dotfiles is ten thousand free checks at every level of the tree.
+    budget.remaining--;
     const absPath = path.join(absDir, e.name);
     // Same table the read path uses, so the tree never shows something a click
     // would then be refused.
@@ -249,7 +266,6 @@ async function walkDir(
     }
 
     if (isDir) {
-      budget.remaining--;
       out.push({
         name: e.name,
         relPath: childRel,
@@ -257,7 +273,6 @@ async function walkDir(
         children: recurse ? await walkDir(cwd, cwdReal, childRel, depth + 1, home, budget) : [],
       });
     } else if (isFile) {
-      budget.remaining--;
       let size: number | undefined;
       try {
         size = (await fsp.stat(absPath)).size;
@@ -294,6 +309,7 @@ export async function listFilesForWeb(
     const cwdReal = await fsp.realpath(cwd).catch(() => path.resolve(cwd));
     const children = await walkDir(cwd, cwdReal, "", 0, home, {
       remaining: options.maxEntries ?? MAX_TOTAL_ENTRIES,
+      perDir: options.maxEntriesPerDir ?? MAX_ENTRIES_PER_DIR,
     });
     return {
       ok: true,

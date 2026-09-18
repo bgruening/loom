@@ -10,9 +10,11 @@
  * module reaches for `node:fs`. Kept out of `orbit-shim.ts` so it can be tested
  * at all -- the shim opens a WebSocket the moment it is imported.
  *
- * Both decoders treat the response as untrusted. A server older than this bundle
- * answers an unknown channel with `null`, and the renderer must get a refusal it
- * can render rather than a TypeError.
+ * Both decoders treat the response as a shape that may not be there at all: a
+ * server older than this bundle answers an unknown channel with `null`, and the
+ * renderer must get a refusal it can render rather than a TypeError. Neither
+ * walks the tree or the bytes looking for lies -- the producer is our own
+ * server, one file over -- so this is shape tolerance, not validation.
  */
 
 import type { FileNode } from "../app/src/preload/preload.js";
@@ -99,7 +101,11 @@ export function decodeListResponse(raw: unknown): OrbitListResult {
   if (record.ok !== true)
     return { ok: false, error: errorFrom(record, "the files could not be listed") };
   const root = asRecord(record.root);
-  if (!root) return { ok: false, error: "the files could not be listed" };
+  // The renderer walks `children` and reads `name`/`relPath` off every node, so
+  // check the one level that would throw rather than draw wrong.
+  if (!root || root.type !== "directory" || (root.children && !Array.isArray(root.children))) {
+    return { ok: false, error: "the files could not be listed" };
+  }
   return {
     ok: true,
     root: root as unknown as FileNode,

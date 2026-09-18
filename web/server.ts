@@ -637,11 +637,12 @@ wss.on("connection", (socket) => {
     }
     // The read-only file surface. The desktop answers these from the main
     // process; here they are a network surface onto the analysis directory, so
-    // the jail lives in files-surface.ts and is tested on its own. Read the cwd
-    // once, before the await, so a directory switch mid-read cannot redirect it.
+    // the jail lives in files-surface.ts and is tested on its own. It is
+    // anchored on the same `cwd` the brain is spawned in, which `agent:set-cwd`
+    // moves -- so the surface is exactly as wide as the directory this session
+    // is pointed at, and no wider.
     if (channel === "files:list") {
-      const sessionCwd = cwd;
-      void listFilesForWeb(sessionCwd, { remote: IS_REMOTE_MODE }).then(
+      void listFilesForWeb(cwd, { remote: IS_REMOTE_MODE }).then(
         (result) => respond(id, result),
         // Neither of these should reject, but a channel that answers nothing
         // leaves the caller's promise pending for the life of the socket.
@@ -650,9 +651,8 @@ wss.on("connection", (socket) => {
       return;
     }
     if (channel === "files:read") {
-      const sessionCwd = cwd;
       const opts = (args[1] ?? undefined) as { tail?: boolean } | undefined;
-      void readFileForWeb(sessionCwd, args[0], opts, { remote: IS_REMOTE_MODE }).then(
+      void readFileForWeb(cwd, args[0], opts, { remote: IS_REMOTE_MODE }).then(
         (result) => respond(id, result),
         () => respond(id, { ok: false, error: "the file could not be read" }),
       );

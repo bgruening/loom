@@ -109,6 +109,10 @@ function names(root: FileNode): string[] {
   return (root.children ?? []).map((c) => c.name);
 }
 
+function countNodes(node: FileNode): number {
+  return (node.children ?? []).reduce((n, c) => n + 1 + countNodes(c), 0);
+}
+
 async function readText(rel: string, opts?: { tail?: boolean }): Promise<string> {
   const res = await readFileForWeb(cwd, rel, opts, { home: HOME });
   if (!res.ok) throw new Error(`expected a read, got: ${res.error}`);
@@ -225,8 +229,9 @@ describe("listFilesForWeb", () => {
       node = next;
       depth++;
     }
-    expect(depth).toBeLessThanOrEqual(9);
-    expect(depth).toBeGreaterThan(1);
+    // MAX_DEPTH is 8 and the root's own children are depth 1, so the last level
+    // with contents is 9. Exact, so a cap that silently tightened would fail.
+    expect(depth).toBe(9);
   });
 
   // A directory link that points at one of its own ancestors passes the
@@ -240,20 +245,33 @@ describe("listFilesForWeb", () => {
       const res = await listFilesForWeb(loopRoot, { home: HOME });
       expect(res.ok).toBe(true);
       if (!res.ok) return;
-      const count = (node: FileNode): number =>
-        (node.children ?? []).reduce((n, c) => n + 1 + count(c), 0);
-      expect(count(res.root)).toBeLessThan(40);
+      expect(countNodes(res.root)).toBeLessThan(40);
     } finally {
       fs.rmSync(loopRoot, { recursive: true, force: true });
     }
   });
 
-  it("stops at the entry cap", async () => {
-    const res = await listFilesForWeb(cwd, { home: HOME, maxEntries: 3 });
+  it("stops at the whole-tree entry cap, and refused entries cost budget", async () => {
+    // A directory of nothing but refusals still exhausts the ceiling, which is
+    // the point: the cap bounds work, not just the size of the answer.
+    const plain = fs.mkdtempSync(path.join(os.tmpdir(), "files-surface-cap-"));
+    try {
+      for (let i = 0; i < 6; i++) fs.writeFileSync(path.join(plain, `f${i}.txt`), "x\n");
+      const clean = await listFilesForWeb(plain, { home: HOME, maxEntries: 3 });
+      expect(clean.ok && countNodes(clean.root)).toBe(3);
+
+      for (let i = 0; i < 6; i++) fs.writeFileSync(path.join(plain, `.h${i}`), "x\n");
+      const noisy = await listFilesForWeb(plain, { home: HOME, maxEntries: 3 });
+      expect(clean.ok && noisy.ok && countNodes(noisy.root)).toBeLessThanOrEqual(3);
+    } finally {
+      fs.rmSync(plain, { recursive: true, force: true });
+    }
+  });
+
+  it("stops at the per-directory entry cap without stopping the tree", async () => {
+    const res = await listFilesForWeb(cwd, { home: HOME, maxEntriesPerDir: 1 });
     if (!res.ok) throw new Error(res.error);
-    const count = (node: FileNode): number =>
-      (node.children ?? []).reduce((n, c) => n + 1 + count(c), 0);
-    expect(count(res.root)).toBe(3);
+    expect((res.root.children ?? []).length).toBeLessThanOrEqual(1);
   });
 
   it("is unavailable in remote mode", async () => {
@@ -306,8 +324,15 @@ describe("readFileForWeb", () => {
   });
 
   it("refuses a symlink cycle rather than hanging on it", async () => {
+    // Asserting the specific refusal, not just `ok: false` -- a cycle degrading
+    // to "no such file" is exactly the regression this exists to catch.
     const res = await readFileForWeb(cwd, "loop-a", undefined, { home: HOME });
-    expect(res.ok).toBe(false);
+    expect(res).toEqual({ ok: false, error: "path leaves the working directory" });
+  });
+
+  it("refuses a path that reaches through a symlinked directory out of the jail", async () => {
+    const res = await readFileForWeb(cwd, "dir-out/secret.txt", undefined, { home: HOME });
+    expect(res).toEqual({ ok: false, error: "path leaves the working directory" });
   });
 
   // The jail has to hold on the target's name as well as the link's, or an
@@ -369,8 +394,14 @@ describe("readFileForWeb tail", () => {
     const wide = path.join(cwd, "wide.jsonl");
     const line = (n: number) => JSON.stringify({ n, pad: "y".repeat(120) });
     fs.writeFileSync(wide, Array.from({ length: 2000 }, (_, i) => line(i)).join("\n") + "\n");
-    const text = await readText("wide.jsonl", { tail: true });
-    const lines = text.split("\n").filter(Boolean);
+    const res = await readFileForWeb(cwd, "wide.jsonl", { tail: true }, { home: HOME });
+    if (!res.ok) throw new Error(res.error);
+    const raw = Buffer.from(res.bytesBase64, "base64");
+    // The window is bounded however big the file gets: 64 KB read, 200 lines kept.
+    expect(res.size).toBeGreaterThan(200 * 1024);
+    expect(raw.length).toBeLessThanOrEqual(64 * 1024);
+    const lines = raw.toString("utf-8").split("\n").filter(Boolean);
+    expect(lines.length).toBeLessThanOrEqual(200);
     // Every line that comes back parses -- none of them is a fragment.
     for (const l of lines) expect(() => JSON.parse(l)).not.toThrow();
     expect(JSON.parse(lines[lines.length - 1]).n).toBe(1999);
