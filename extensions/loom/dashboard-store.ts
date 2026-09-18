@@ -337,6 +337,17 @@ export async function replaceDashboardDocument(
   const filePath = getDashboardPath();
   if (!filePath) return { ok: false, error: NO_SESSION };
 
+  // Skipping the compare-and-swap is the point here; skipping the lock is not.
+  // Unserialized, this rename lands inside an in-flight update's own check-to-
+  // rename window, and the update -- which has more await points before its
+  // rename -- goes last and silently puts back what the user just reset.
+  return withLayoutLock(filePath, () => replaceLocked(filePath, document));
+}
+
+async function replaceLocked(
+  filePath: string,
+  document: DashboardDocument,
+): Promise<DashboardWriteResult & { undoable?: boolean }> {
   // The size cap is skipped -- that is the point -- but a symlink is still
   // refused, because "the user asked for it" does not extend to a file of
   // theirs somewhere else.
@@ -380,6 +391,15 @@ export type DashboardUndoResult =
 export async function undoDashboardChange(): Promise<DashboardUndoResult> {
   const filePath = getDashboardPath();
   if (!filePath) return { ok: false, error: NO_SESSION };
+  // Same lock as every other write here. The restore is a compare-and-swap, but
+  // an update reading between this revision check and that swap still passes
+  // its own check against the revision undo is about to replace, so both write
+  // and the one that renames last wins -- and the `rm` branch has no swap at
+  // all to save it.
+  return withLayoutLock(filePath, () => undoLocked(filePath));
+}
+
+async function undoLocked(filePath: string): Promise<DashboardUndoResult> {
   if (undoStack.length === 0) {
     return {
       ok: false,
