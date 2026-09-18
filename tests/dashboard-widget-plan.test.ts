@@ -592,6 +592,66 @@ describe("plan widget -- more than one plan", () => {
     expect(has(h, "2. Plot")).toBe(true);
   });
 
+  it("keeps a row open when the current plan changes under it", () => {
+    // A and C are both live, C is current because it is last. The reader opens
+    // B. C then finishes, so A becomes current and B shifts up a slot in the
+    // "other" list. Keying the open state by position in that list would
+    // silently collapse B.
+    const h = harness({ plan: "all" });
+    planWidget.mount(h.el, h.ctx);
+    const before =
+      "## Plan A: Alpha\n\n- [x] a\n- [ ] a2\n\n" +
+      "## Plan B: Beta\n\n- [ ] b\n\n" +
+      "## Plan C: Gamma\n\n- [x] c\n- [ ] c2\n";
+    h.notebook(before);
+    expect(h.el.querySelector(".dash-plan-title")?.textContent).toBe("Plan C: Gamma");
+
+    const rows = (): HTMLButtonElement[] =>
+      Array.from(h.el.querySelectorAll(".dash-plan-older-row"));
+    rows()
+      .find((r) => (r.textContent ?? "").includes("Beta"))!
+      .click();
+    expect(
+      rows()
+        .find((r) => (r.textContent ?? "").includes("Beta"))!
+        .getAttribute("aria-expanded"),
+    ).toBe("true");
+
+    h.notebook(before.replace("- [ ] c2", "- [x] c2"));
+    expect(h.el.querySelector(".dash-plan-title")?.textContent).toBe("Plan A: Alpha");
+    expect(
+      rows()
+        .find((r) => (r.textContent ?? "").includes("Beta"))!
+        .getAttribute("aria-expanded"),
+    ).toBe("true");
+  });
+
+  it("does not hand an open row to a same-named plan when the current plan changes", () => {
+    // The case the position in the key exists for. Two plans titled alike; the
+    // reader opens the first. It then becomes current and leaves the list, and
+    // a key numbered within the filtered list would hand its open state to its
+    // namesake.
+    const h = harness({ plan: "all" });
+    planWidget.mount(h.el, h.ctx);
+    const before =
+      "## Plan A: Twin\n\n- [x] x\n- [ ] x2\n\n" +
+      "## Plan A: Twin\n\n- [ ] y\n\n" +
+      "## Plan C: Last\n\n- [x] z\n- [ ] z2\n";
+    h.notebook(before);
+    const rows = (): HTMLButtonElement[] =>
+      Array.from(h.el.querySelectorAll(".dash-plan-older-row"));
+    expect(rows()).toHaveLength(2);
+    // Newest first, so the first twin in the notebook is the last row.
+    rows()[1].click();
+    expect(rows()[1].getAttribute("aria-expanded")).toBe("true");
+
+    h.notebook(before.replace("- [ ] z2", "- [x] z2"));
+    // The first twin is now current. The remaining twin must not inherit its
+    // open state.
+    const twin = rows().find((r) => (r.textContent ?? "").includes("Twin"))!;
+    expect(twin.getAttribute("aria-expanded")).toBe("false");
+  });
+
   it("tells two same-named plans apart when one is expanded", () => {
     const h = harness({ plan: "all" });
     planWidget.mount(h.el, h.ctx);

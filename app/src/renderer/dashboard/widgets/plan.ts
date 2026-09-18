@@ -443,7 +443,14 @@ function olderPlans(
   showCompleted: boolean,
 ): HTMLElement {
   const wrap = el("div", "dash-plan-older");
-  const others = plans.filter((plan) => plan !== current);
+  // Each entry keeps the position it has in the notebook, not its position in
+  // this filtered list. The open/closed key is built from it, and which plan is
+  // current can change as steps get ticked -- a key numbered within this list
+  // would then shift under the reader, collapsing the row they had open or,
+  // where two plans are titled alike, transferring it to the wrong one.
+  const others = plans
+    .map((plan, index) => ({ plan, index }))
+    .filter((entry) => entry.plan !== current);
   wrap.append(
     el(
       "div",
@@ -453,10 +460,10 @@ function olderPlans(
   );
 
   for (let i = others.length - 1; i >= 0; i--) {
-    const plan = others[i];
+    const { plan, index } = others[i];
     // Plan ids are slugged from the heading and two plans can slug alike, so
-    // the open/closed key carries the position as well.
-    const key = `${i}:${plan.title}`;
+    // the open/closed key carries the notebook position as well.
+    const key = `${index}:${plan.title}`;
     const counts = countSteps(plan.steps);
     // The same verdict the current plan gets, so the two never disagree about
     // what "finished" or "stopped" means.
