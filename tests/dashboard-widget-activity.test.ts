@@ -339,6 +339,25 @@ describe("redaction", () => {
     expect(Object.keys(out).length).toBeLessThanOrEqual(41);
   });
 
+  it("treats a __proto__ key as data, not as a prototype", () => {
+    const payload = JSON.parse('{"__proto__": {"polluted": true}, "normal": 1}');
+    const out = redactForDisplay(payload) as Record<string, unknown>;
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect((out as { polluted?: unknown }).polluted).toBeUndefined();
+    // And the key is still shown, rather than silently vanishing from the record.
+    expect(JSON.stringify(out)).toContain("__proto__");
+    expect(({} as { polluted?: unknown }).polluted).toBeUndefined();
+  });
+
+  it("hides a key called credentials, which the stems alone would miss", () => {
+    const out = redactForDisplay({ credentials: "user:pass" });
+    expect(JSON.stringify(out)).not.toContain("user:pass");
+  });
+
+  it("caps a huge string", () => {
+    expect(truncate("x".repeat(2_000_000), 400).length).toBe(401);
+  });
+
   it("carries values JSON cannot, rather than throwing on them", () => {
     const out = redactForDisplay({ big: BigInt(7), nan: NaN, fn: () => 1 }) as Record<
       string,
@@ -459,6 +478,25 @@ describe("buildRows", () => {
     expect(days[2]).not.toBe(days[0]);
   });
 
+  it("does not serialise the detail of rows the cap is about to throw away", () => {
+    let serialised = 0;
+    const many = Array.from({ length: 50 }, (_, i) => {
+      const payload: Record<string, unknown> = {};
+      Object.defineProperty(payload, "toolName", {
+        enumerable: true,
+        get() {
+          serialised++;
+          return `t${i}`;
+        },
+      });
+      return event("tool.end", payload);
+    });
+    const rows = buildRows(many, { maxEntries: 3 });
+    expect(rows).toHaveLength(3);
+    // Three details formatted, plus one summary read per event to filter on.
+    expect(serialised).toBeLessThan(60);
+  });
+
   it("leaves the detail out entirely when the panel is configured without it", () => {
     expect(buildRows(events, { showDetail: false }).every((r) => r.detail === "")).toBe(true);
     expect(buildRows(events, { showDetail: true }).every((r) => r.detail.length > 0)).toBe(true);
@@ -514,6 +552,19 @@ describe("truncate", () => {
   it("does not split a surrogate pair", () => {
     const out = truncate("ab\u{1F600}cd", 3);
     expect(out).toBe("ab\u{1F600}…");
+  });
+
+  it("still caps a string made entirely of astral characters", () => {
+    // Two code units each, so a code-unit shortcut would read this as already
+    // short enough and hand the whole thing back.
+    const out = truncate("\u{1F600}".repeat(500), 400);
+    expect(Array.from(out)).toHaveLength(401);
+  });
+
+  it("returns a string that is already within the cap untouched", () => {
+    const mixed = "\u{1F600}".repeat(20) + "x".repeat(380);
+    expect(Array.from(mixed)).toHaveLength(400);
+    expect(truncate(mixed, 400)).toBe(mixed);
   });
 });
 

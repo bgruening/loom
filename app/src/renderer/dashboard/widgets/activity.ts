@@ -42,8 +42,16 @@ const DETAIL_DEPTH_MAX = 6;
 const DETAIL_KEYS_MAX = 40;
 /** Within this many pixels of the bottom still counts as "following". */
 const STICK_THRESHOLD_PX = 24;
+/** How many opened entries the widget remembers across a rebuild. */
+const EXPANDED_MAX = 500;
 
-const CREDENTIAL_KEY = /key|token|secret|password|authorization/i;
+/**
+ * Deliberately broader than it needs to be, and one word broader than the
+ * brain's own list in `activity-hooks.ts` (`credential`, which none of the
+ * other stems catch). Over-redacting a field name costs a reader one click
+ * into Galaxy; under-redacting one puts a key in a file people share.
+ */
+const CREDENTIAL_KEY = /key|token|secret|password|authorization|credential/i;
 const HIDDEN = "[hidden]";
 
 const EMPTY_TEXT =
@@ -90,12 +98,19 @@ function flatten(value: string): string {
   return value.replace(UNSAFE_INLINE, " ").replace(/ {2,}/g, " ").trim();
 }
 
-/** Truncates on code points, so a cap never lands inside a surrogate pair. */
+/**
+ * Truncates on code points, so a cap never lands inside a surrogate pair. The
+ * code-unit slice first is not an optimisation detail: one line of the log can
+ * be megabytes of tool output, and expanding all of it into an array of
+ * characters to keep 400 of them costs real time on every redraw. A code point
+ * is at most two code units, so `max * 2` always contains at least `max` of them.
+ */
 export function truncate(value: string, max: number): string {
   if (value.length <= max) return value;
-  const chars = Array.from(value);
-  if (chars.length <= max) return value;
-  return chars.slice(0, max).join("") + "…";
+  const head = Array.from(value.slice(0, max * 2));
+  // `head` is the whole string only when the slice could not have cut it short.
+  if (value.length <= max * 2 && head.length <= max) return value;
+  return head.slice(0, max).join("") + "…";
 }
 
 function strOf(value: unknown): string {
@@ -396,13 +411,24 @@ export function redactForDisplay(value: unknown, depth = 0, seen = new WeakSet<o
       return obj.slice(0, DETAIL_KEYS_MAX).map((v) => redactForDisplay(v, depth + 1, seen));
     }
     const out: Record<string, unknown> = {};
+    // defineProperty rather than assignment: `JSON.parse` makes `__proto__` an
+    // own property, and plain assignment would hand an attacker-chosen object
+    // to the accumulator's prototype and drop the key from the display.
+    const put = (key: string, value: unknown): void => {
+      Object.defineProperty(out, key, {
+        value,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    };
     let n = 0;
     for (const [key, v] of Object.entries(obj as Record<string, unknown>)) {
       if (n++ >= DETAIL_KEYS_MAX) {
-        out["…"] = "[more]";
+        put("…", "[more]");
         break;
       }
-      out[key] = CREDENTIAL_KEY.test(key) ? HIDDEN : redactForDisplay(v, depth + 1, seen);
+      put(key, CREDENTIAL_KEY.test(key) ? HIDDEN : redactForDisplay(v, depth + 1, seen));
     }
     return out;
   } finally {
@@ -450,23 +476,27 @@ export function buildRows(
     kept.push({ event, key: `${base}|${n}` });
   }
 
-  const rows: ActivityRow[] = [];
+  const matched: Array<{ event: ActivityEvent; key: string; text: string; tone: ActivityTone }> =
+    [];
   for (const { event, key } of kept) {
     const { text, tone } = summarizeEvent(event);
     if (needle && !`${text} ${event.kind} ${event.source}`.toLowerCase().includes(needle)) continue;
-    rows.push({
-      key,
-      time: formatEventTime(event.timestamp),
-      day: formatEventDay(event.timestamp),
-      tone,
-      text,
-      detail: withDetail ? formatDetail(event) : "",
-    });
+    matched.push({ event, key, text, tone });
   }
+
+  // Cap before formatting the detail, not after: serialising 200 payloads to
+  // throw 195 of them away is work done on every redraw for nothing.
+  const capped: ActivityRow[] = matched.slice(-max).map(({ event, key, text, tone }) => ({
+    key,
+    time: formatEventTime(event.timestamp),
+    day: formatEventDay(event.timestamp),
+    tone,
+    text,
+    detail: withDetail ? formatDetail(event) : "",
+  }));
 
   // Day labels are decided after the cap, so the first visible row always
   // carries one -- a log whose newest entry is from last Thursday should say so.
-  const capped = rows.slice(-max);
   let previousDay: string | null = null;
   for (const row of capped) {
     const day = row.day;
@@ -608,7 +638,10 @@ export const activityWidget: WidgetDefinition<ActivityConfig> = {
     scroller.className = "dash-activity-scroll";
     const list = document.createElement("div");
     list.className = "dash-activity-list";
-    list.setAttribute("role", "log");
+    // Not role="log": that is an implicit polite live region, and this list is
+    // rebuilt whole on every update, so a screen reader would re-read the
+    // entire log each time anything happened.
+    list.setAttribute("role", "region");
     list.setAttribute("aria-label", "Analysis log");
     scroller.append(list);
 
@@ -687,8 +720,19 @@ export const activityWidget: WidgetDefinition<ActivityConfig> = {
       pre.textContent = row.detail;
       details.append(summary, pre);
       details.addEventListener("toggle", () => {
-        if (details.open) expanded.add(row.key);
-        else expanded.delete(row.key);
+        if (!details.open) {
+          expanded.delete(row.key);
+          return;
+        }
+        expanded.add(row.key);
+        // Bounded rather than pruned to what is on screen: a filter hides rows
+        // for a moment and the user expects them still open when it is cleared.
+        // A Set keeps insertion order, so the oldest one opened goes first.
+        while (expanded.size > EXPANDED_MAX) {
+          const oldest = expanded.values().next().value;
+          if (oldest === undefined) break;
+          expanded.delete(oldest);
+        }
       });
       return details;
     };
