@@ -195,7 +195,6 @@ async function fetchMode(): Promise<"remote" | "desktop"> {
   },
   getAgentStatus: () => Promise.resolve({ status: "stopped", turnActive: false }),
   notebookStatus: () => Promise.resolve({ exists: false, hasContent: false }),
-  loadNotebook: () => Promise.resolve({ ok: false, content: null, path: "" }),
   clearNotebookArtifacts: () => Promise.resolve({ cleared: false }),
   replayChat: () =>
     Promise.resolve({ ok: false, error: "session restore is unavailable in remote mode" }),
@@ -228,9 +227,10 @@ async function fetchMode(): Promise<"remote" | "desktop"> {
   submitFeedback: () =>
     Promise.resolve({ ok: false, error: "feedback is unavailable in remote mode" }),
   readFile: () => Promise.resolve({ ok: false, error: "file read is unavailable in remote mode" }),
-  // Dashboard layout IS available here: the server handles these two channels
-  // against the same session cwd the brain writes notebook.md into, so a layout
-  // persists in the web shell exactly as it does on the desktop.
+  // These three are served by the web server out of the session cwd, so they
+  // behave the same here as on the desktop: the notebook the brain is writing,
+  // and the dashboard layout that sits beside it.
+  loadNotebook: () => invoke("notebook:load"),
   loadDashboard: () => invoke("dashboard:load"),
   saveDashboard: (raw: string) => invoke("dashboard:save", raw),
   checkVersion: () => Promise.resolve(null),

@@ -524,6 +524,20 @@ wss.on("connection", (socket) => {
     // notebook.md. Allowed in remote mode -- it is pane layout, not config, and
     // the renderer is the only thing that reads it. No path argument, so there
     // is nothing to traverse with.
+    // notebook.md is in the session cwd and the server already owns that path.
+    // Without this the web shell shows an empty Notebook tab -- and an empty
+    // dashboard -- until the brain happens to push a widget mid-turn, even
+    // though the file is right there. Same response shape as the Electron
+    // handler so the renderer cannot tell the two apart.
+    if (channel === "notebook:load") {
+      const file = join(cwd, "notebook.md");
+      try {
+        respond(id, { ok: true, content: readFileSync(file, "utf-8"), path: file });
+      } catch {
+        respond(id, { ok: false, content: null, path: file });
+      }
+      return;
+    }
     if (channel === "dashboard:load") {
       const file = join(cwd, DASHBOARD_FILENAME);
       try {

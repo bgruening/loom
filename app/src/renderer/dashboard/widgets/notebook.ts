@@ -48,18 +48,39 @@ export const notebookWidget: WidgetDefinition<NotebookConfig> = {
     followBtn.addEventListener("click", () => ctx.setConfig({ follow: !ctx.config.follow }));
     ctx.header.append(followBtn);
 
+    const scrollToNewest = (): void => {
+      if (ctx.config.follow) scroller.scrollTop = scroller.scrollHeight;
+    };
+
     ctx.subscribe(ctx.sources.notebook, (snapshot) => {
       const markdown = snapshot.markdown.trim();
       if (!markdown) {
         content.innerHTML = "";
-        content.append(Object.assign(document.createElement("p"), { textContent: EMPTY }));
+        const empty = document.createElement("p");
+        empty.textContent = EMPTY;
+        content.append(empty);
         return;
       }
       content.innerHTML = renderMarkdown(snapshot.markdown, notebookMarked);
-      if (ctx.config.follow) scroller.scrollTop = scroller.scrollHeight;
+      scrollToNewest();
     });
 
+    // A panel in a hidden tab has no height, so the scroll above lands on a
+    // scrollHeight of 0 and the newest entry is not what the user sees when
+    // they switch to the Dashboard tab. Catch the moment the panel gains size.
+    let observer: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== "undefined") {
+      let lastHeight = 0;
+      observer = new ResizeObserver(() => {
+        const height = scroller.clientHeight;
+        if (height > 0 && lastHeight === 0) scrollToNewest();
+        lastHeight = height;
+      });
+      observer.observe(scroller);
+    }
+
     return () => {
+      observer?.disconnect();
       el.classList.remove("dash-notebook");
       el.textContent = "";
     };
