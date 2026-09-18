@@ -296,8 +296,10 @@ describe("what gets into the frame", () => {
   });
 
   it("measures the cap in bytes, not characters", () => {
-    // Just under the cap in characters, well over it once encoded.
-    const h = harness({ html: "—".repeat(SANDBOX_MAX_HTML_BYTES - 10) });
+    // Just under the cap in characters, well over it once encoded: U+2014 is
+    // one character and three bytes. Written as an escape so the point of it
+    // is visible rather than looking like stray punctuation.
+    const h = harness({ html: "\u2014".repeat(SANDBOX_MAX_HTML_BYTES - 10) });
     mount(h);
     expect(frameIn(h)).toBeNull();
     h.dispose();
