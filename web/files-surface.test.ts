@@ -3,7 +3,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { listFilesForWeb, readFileForWeb, resolveInJail } from "./files-surface.js";
+import {
+  listFilesForWeb,
+  readFileForWeb,
+  readNotebookForWeb,
+  resolveInJail,
+} from "./files-surface.js";
 import type { FileNode } from "../app/src/preload/preload.js";
 
 // A home the fixtures are not inside, so the sensitive-path policy's
@@ -548,5 +553,69 @@ describe("files:read under a symlink race", () => {
     if (res.ok) {
       expect(Buffer.from(res.bytesBase64!, "base64").toString("utf-8")).toBe("ordinary\n");
     }
+  });
+});
+
+describe("readNotebookForWeb", () => {
+  let root: string;
+  let ws: string;
+
+  beforeAll(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "files-surface-nb-"));
+    ws = path.join(root, "ws");
+    fs.mkdirSync(ws, { recursive: true });
+    fs.writeFileSync(path.join(root, "outside-credentials"), "SECRET=hunter2\n");
+  });
+
+  afterAll(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("reads an ordinary notebook", async () => {
+    fs.writeFileSync(path.join(ws, "notebook.md"), "# Analysis\n");
+    const res = await readNotebookForWeb(ws, { home: root });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.content).toBe("# Analysis\n");
+    fs.rmSync(path.join(ws, "notebook.md"), { force: true });
+  });
+
+  it("refuses a symlink planted at the notebook name", async () => {
+    // This is the whole finding: before the jail, this returned the credential
+    // file's contents, in remote mode too.
+    const link = path.join(ws, "notebook.md");
+    fs.symlinkSync(path.join(root, "outside-credentials"), link);
+    for (const remote of [false, true]) {
+      const res = await readNotebookForWeb(ws, { home: root, remote });
+      expect(res.ok, `remote=${remote}`).toBe(false);
+      if (!res.ok) expect(res.error).toMatch(/leaves the working directory/);
+    }
+    fs.rmSync(link, { force: true });
+  });
+
+  it("still answers in remote mode, because the agent is pinned to this same file", async () => {
+    fs.writeFileSync(path.join(ws, "notebook.md"), "# Remote\n");
+    const res = await readNotebookForWeb(ws, { home: root, remote: true });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.content).toBe("# Remote\n");
+    fs.rmSync(path.join(ws, "notebook.md"), { force: true });
+  });
+
+  it("refuses an oversized notebook rather than truncating it", async () => {
+    const big = path.join(ws, "notebook.md");
+    const fd = fs.openSync(big, "w");
+    try {
+      fs.ftruncateSync(fd, 9 * 1024 * 1024);
+    } finally {
+      fs.closeSync(fd);
+    }
+    const res = await readNotebookForWeb(ws, { home: root });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error).toMatch(/larger than/);
+    fs.rmSync(big, { force: true });
+  });
+
+  it("reports no notebook rather than throwing when there is none", async () => {
+    const res = await readNotebookForWeb(ws, { home: root });
+    expect(res.ok).toBe(false);
   });
 });

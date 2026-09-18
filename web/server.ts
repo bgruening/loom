@@ -39,7 +39,7 @@ import {
   DASHBOARD_MAX_BYTES,
   dashboardRevision,
 } from "../shared/dashboard-contract.js";
-import { listFilesForWeb, readFileForWeb } from "./files-surface.js";
+import { listFilesForWeb, readFileForWeb, readNotebookForWeb } from "./files-surface.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // In dev this file runs from web/; the container bundles it to web/build/ and
@@ -540,12 +540,21 @@ wss.on("connection", (socket) => {
     // though the file is right there. Same response shape as the Electron
     // handler so the renderer cannot tell the two apart.
     if (channel === "notebook:load") {
-      const file = join(cwd, "notebook.md");
-      try {
-        respond(id, { ok: true, content: readFileSync(file, "utf-8"), path: file });
-      } catch {
-        respond(id, { ok: false, content: null, path: file });
-      }
+      // Through the same jail the file surface uses: the filename is fixed, but
+      // the name itself can be a symlink and following one handed the browser
+      // whatever it pointed at. Still answered in remote mode -- notebook.md is
+      // the one file that mode is built around; see readNotebookForWeb.
+      const notebookPath = join(cwd, "notebook.md");
+      void readNotebookForWeb(cwd, { remote: IS_REMOTE_MODE }).then(
+        (res) =>
+          respond(
+            id,
+            res.ok
+              ? { ok: true, content: res.content, path: res.path }
+              : { ok: false, content: null, path: notebookPath },
+          ),
+        () => respond(id, { ok: false, content: null, path: notebookPath }),
+      );
       return;
     }
     // Dashboard layout: one fixed filename in the session cwd, alongside

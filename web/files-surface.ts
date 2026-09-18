@@ -37,6 +37,14 @@ const MAX_PREVIEW_BYTES = 1024 * 1024 * 1024;
 const PREVIEW_LINE_COUNT = 10;
 const PREVIEW_BYTE_BUDGET = 64 * 1024;
 const TAIL_LINE_COUNT = 200;
+/**
+ * The notebook is markdown a person reads; the shells already refuse a layout
+ * file past 256 KB and a notebook is the same order of thing. Generous enough
+ * that no real analysis hits it, small enough that a socket cannot be used to
+ * pull an arbitrary-sized file through this channel.
+ */
+const MAX_NOTEBOOK_BYTES = 8 * 1024 * 1024;
+const NOTEBOOK_FILENAME = "notebook.md";
 
 /**
  * A whole-tree ceiling the desktop does not have. Its per-directory cap still
@@ -463,6 +471,56 @@ async function readCapped(fd: fsp.FileHandle, cap: number, offset = 0): Promise<
   const buf = Buffer.alloc(cap);
   const { bytesRead } = await fd.read(buf, 0, cap, offset);
   return buf.subarray(0, bytesRead);
+}
+
+/**
+ * `notebook:load`. One fixed filename, so there is nothing to traverse with --
+ * but the name can still BE a symlink, and before this went through the jail a
+ * link planted at `notebook.md` returned whatever it pointed at, in remote mode
+ * too. Reproduced against a credential file outside the workspace.
+ *
+ * Deliberately still served in remote mode, unlike `files:read`. That refusal
+ * exists because `files:read` takes an arbitrary path and the container
+ * deployment curates the filesystem away; `notebook.md` is the one file remote
+ * mode is built around -- `web-mode-gate.ts` pins the agent's own read and write
+ * tools to exactly it -- so serving it to the browser is not a wider view than
+ * the agent beside it already has. What remote mode must not do is follow a link
+ * out, and that is what this now refuses.
+ *
+ * Capped, and the cap refuses rather than truncating: a notebook is read to be
+ * displayed whole, and half a notebook shown as if it were the notebook is worse
+ * than an error.
+ */
+export async function readNotebookForWeb(
+  cwd: string,
+  options: FilesSurfaceOptions = {},
+): Promise<{ ok: true; content: string; path: string } | { ok: false; error: string }> {
+  const home = options.home ?? homedir();
+  const abs = path.join(cwd, NOTEBOOK_FILENAME);
+
+  const jailed = resolveInJail(cwd, NOTEBOOK_FILENAME, { home });
+  if (!jailed.ok) return { ok: false, error: jailed.error };
+  const real = await resolveRealWithin(cwd, jailed.abs, home);
+  if (!real.ok) return { ok: false, error: real.error };
+
+  const opened = await openVerified(cwd, real.real, home);
+  if (!opened.ok) return { ok: false, error: opened.error };
+  const { fd, size, verify } = opened;
+  try {
+    if (size > MAX_NOTEBOOK_BYTES) {
+      return { ok: false, error: `notebook.md is larger than ${MAX_NOTEBOOK_BYTES} bytes` };
+    }
+    const buf = await readCapped(fd, MAX_NOTEBOOK_BYTES + 1);
+    if (buf.length > MAX_NOTEBOOK_BYTES) {
+      return { ok: false, error: `notebook.md is larger than ${MAX_NOTEBOOK_BYTES} bytes` };
+    }
+    if (!(await verify())) return { ok: false, error: "path leaves the working directory" };
+    return { ok: true, content: buf.toString("utf-8"), path: abs };
+  } catch {
+    return { ok: false, error: "the notebook could not be read" };
+  } finally {
+    await fd.close().catch(() => {});
+  }
 }
 
 /**
