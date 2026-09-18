@@ -537,7 +537,7 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
     // The listing these images were drawn from. Nothing newer means nothing can
     // have been rewritten under them.
     let imagesDrawnFrom = 0;
-    const drawnImages = new Map<HTMLImageElement, string>();
+    const drawnImages = new Map<HTMLImageElement, ResultFile>();
     ctx.onDispose(() => controller.abort());
 
     const imageUrl = (file: ResultFile): string =>
@@ -661,7 +661,7 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
             drawnImages.delete(img);
             img.remove();
           });
-          drawnImages.set(img, file.relPath);
+          drawnImages.set(img, file);
           entry.append(img);
         }
       } else if (file.kind === "table") {
@@ -774,8 +774,11 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
         if (snapshot.updatedAt <= imagesDrawnFrom) return;
         imagesDrawnFrom = snapshot.updatedAt;
         imageGeneration++;
-        for (const [img, relPath] of drawnImages) {
-          const url = artifactUrl(relPath, `r${imageGeneration}`);
+        for (const [img, file] of drawnImages) {
+          // Through imageUrl, so the key has one shape: a redraw that follows a
+          // tick then lands on the URL the tick already fetched instead of
+          // paying for a third one.
+          const url = imageUrl(file);
           if (url) img.src = url;
         }
       } catch (err) {
