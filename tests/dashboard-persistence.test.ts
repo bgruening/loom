@@ -374,6 +374,10 @@ describe("a layout file that will not parse", () => {
     // The revision it carries is the corrupt file's, so the swap matches and
     // the write lands instead of conflicting forever.
     expect(saveDashboard.mock.calls[0][1]).toBe("r-corrupt");
+    await settle();
+    // And the banner goes: it was promising to replace a file it has now
+    // replaced. Seen stale on screen in the web shell before this.
+    expect(root.querySelector(".dash-banner")?.classList.contains("hidden")).toBe(true);
     dash.stop();
   });
 });

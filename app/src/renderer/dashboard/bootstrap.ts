@@ -152,6 +152,13 @@ export function initDashboard(
       .then((res) => {
         if (res.ok) {
           revision = res.revision ?? null;
+          // The banner explained a state that no longer holds. Both of the ones
+          // a save can be sitting under say something about the file on disk --
+          // that it could not be read, or that somebody else changed it -- and
+          // this write just settled both. Leaving it up means the corrupt-layout
+          // banner is still promising to replace a file it has already
+          // replaced, which I watched it do.
+          host.setBanner("");
           return;
         }
         if (res.conflict) {
