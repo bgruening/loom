@@ -2,10 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { htmlSandboxWidget } from "../app/src/renderer/dashboard/widgets/html-sandbox.js";
 import { DashboardSources } from "../app/src/renderer/dashboard/data-sources.js";
-import {
-  HTML_SANDBOX_FLAG_KEY,
-  HTML_SANDBOX_GLOBAL,
-} from "../app/src/renderer/dashboard/sandbox/flag.js";
+import { __setHtmlSandboxEnabledForTests } from "../app/src/renderer/dashboard/sandbox/flag.js";
 import {
   SANDBOX_FORBIDDEN_TOKENS,
   SANDBOX_MAX_HTML_BYTES,
@@ -173,7 +170,7 @@ async function waitFor(condition: () => boolean, timeoutMs = 2000): Promise<void
 }
 
 function enable(): void {
-  localStorage.setItem(HTML_SANDBOX_FLAG_KEY, "1");
+  __setHtmlSandboxEnabledForTests(true);
 }
 
 /**
@@ -196,12 +193,12 @@ const ORBIT_POLICY = "default-src 'self'; script-src 'self'; frame-src blob:; fo
 beforeEach(() => {
   document.body.innerHTML = "";
   setPagePolicy(ORBIT_POLICY);
-  localStorage.clear();
-  delete (globalThis as Record<string, unknown>)[HTML_SANDBOX_GLOBAL];
+  __setHtmlSandboxEnabledForTests(null);
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  __setHtmlSandboxEnabledForTests(null);
 });
 
 describe("html-sandbox widget contract", () => {
@@ -220,7 +217,7 @@ describe("the flag", () => {
     h.dispose();
   });
 
-  it("is on when local storage says so", () => {
+  it("is on when a test turns it on, so the drawing code stays covered", () => {
     enable();
     const h = harness({ html: "<p>hi</p>" });
     mount(h);
@@ -228,19 +225,26 @@ describe("the flag", () => {
     h.dispose();
   });
 
-  it("lets the shell turn it off over the top of local storage", () => {
-    enable();
-    (globalThis as Record<string, unknown>)[HTML_SANDBOX_GLOBAL] = { htmlSandbox: false };
+  it("cannot be turned on by anything the agent can write", () => {
+    // The whole finding: this used to come from localStorage, which in a
+    // packaged build is one bucket shared by every file:// document -- and the
+    // agent can write an .html that the file viewer offers to open. Setting the
+    // old key, and the old injected global, must now do nothing at all.
+    localStorage.setItem("orbit.experiments.htmlSandbox", "1");
+    (globalThis as Record<string, unknown>).__ORBIT_EXPERIMENTS__ = { htmlSandbox: true };
     const h = harness({ html: "<p>hi</p>" });
     mount(h);
     expect(frameIn(h)).toBeNull();
+    expect(h.el.textContent).toContain("switched off");
     h.dispose();
+    localStorage.clear();
+    delete (globalThis as Record<string, unknown>).__ORBIT_EXPERIMENTS__;
   });
 
   it("badges the panel whether it is on or off", () => {
     for (const on of [false, true]) {
       document.body.innerHTML = "";
-      localStorage.clear();
+      __setHtmlSandboxEnabledForTests(null);
       setPagePolicy(ORBIT_POLICY);
       if (on) enable();
       const h = harness({ html: "<p>hi</p>" });

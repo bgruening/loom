@@ -58,10 +58,15 @@ const MAX_READ_CHARS = 20_000;
  * Whether the agent may create an `html-sandbox` panel.
  *
  * The sandboxed HTML widget is the one piece with a real security surface: the
- * content is written by the model, so a prompt-injected agent authors it. It
- * ships behind a flag, and no such flag exists yet, so there is nothing to
- * consult and nothing to trust -- creating one is refused outright. When the
- * widget lands, this is the single place to read its flag.
+ * content is written by the model, so a prompt-injected agent authors it.
+ *
+ * The widget has landed and the renderer's flag for it is a constant `false`
+ * with no way to turn it on in this build -- deliberately, because a flag that
+ * gates a security boundary cannot live anywhere the agent or the renderer can
+ * write, and the channel that would satisfy that has not been built. So there
+ * is still nothing to consult and nothing to trust, and creating one is refused
+ * outright. If a shell-owned channel ever lands, this is the single place on
+ * the brain side to read it.
  */
 export function sandboxWidgetEnabled(): boolean {
   return false;

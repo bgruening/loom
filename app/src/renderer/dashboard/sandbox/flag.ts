@@ -1,50 +1,56 @@
 /**
  * Whether the agent-authored HTML widget is switched on.
  *
- * Off by default, everywhere, and it stays off until someone decides to ship
- * it. Nothing in the dashboard document can turn it on: the flag deliberately
- * lives outside the one file the agent can write.
+ * **Off, as a constant, and there is no way to turn it on in this build.**
  *
- * The repo's existing experiment flags (`isTeamDispatchEnabled`,
- * `isSessionIndexEnabled`) read an env var first and `~/.loom/config.json`'s
- * `experiments.*` second. The renderer can read neither -- it has no `process`
- * and its config IPC is masked -- so the same two-step shape is kept with the
- * nearest renderer-side equivalents:
+ * It used to read `localStorage["orbit.experiments.htmlSandbox"]`, which put the
+ * flag inside the agent's reach in a packaged desktop build. The renderer is
+ * loaded with `loadFile`, so its origin is `file://`, and every `file://`
+ * document shares one localStorage bucket. The agent can write an `.html` into
+ * the analysis directory without a prompt, the file viewer offers "Open
+ * Externally" on it, and that window is `file://` with no CSP and live scripts.
+ * One click and `localStorage.setItem("orbit.experiments.htmlSandbox", "1")`
+ * turns the feature on for good. The threat model said "nothing the agent can
+ * write can turn it on"; that was the intent and it was not true.
  *
- *   1. `window.__ORBIT_EXPERIMENTS__.htmlSandbox` -- a boolean the shell sets.
- *      Nothing sets it today; wiring it from `LOOM_HTML_SANDBOX` /
- *      `config.experiments.htmlSandbox` through the preload is a main-process
- *      change, which is written up rather than made.
- *   2. `localStorage["orbit.experiments.htmlSandbox"]` -- "1" on, "0" off.
- *      Key shape matches `orbit.artifactCollapsed` and friends in `app.ts`.
- *   3. Default: off.
+ * `window.__ORBIT_EXPERIMENTS__` is no better on its own: nothing sets it, and
+ * anything running in the renderer can. A flag that gates a security boundary
+ * has to come from somewhere neither the agent nor the renderer can write.
  *
- * An explicit `false` or `"0"` at either level wins, so a shell that turns it
- * off cannot be overridden from the page.
+ * **What would have to be built.** The shell would have to resolve
+ * `LOOM_HTML_SANDBOX` / `config.experiments.htmlSandbox` in a process the agent
+ * cannot write to, and hand the answer to the renderer over a channel the page
+ * cannot forge -- the preload bridge in Electron, the socket handshake in the
+ * web shell. That is main-process work and it is deliberately not done here,
+ * because the scripted version of this widget does not work under Orbit's CSP
+ * anyway (see the threat model note) and would need its own origin before any
+ * of this matters.
+ *
+ * Until then this returns false and the widget draws its "switched off" card.
+ * The registry still knows the type, so a layout carrying one of these panels
+ * survives a round trip instead of losing it.
  */
 
-export const HTML_SANDBOX_FLAG_KEY = "orbit.experiments.htmlSandbox";
-export const HTML_SANDBOX_GLOBAL = "__ORBIT_EXPERIMENTS__";
-/** The env var / config key a shell should map onto the global. */
+/** The env var / config key a shell would map onto the flag, when one does. */
 export const HTML_SANDBOX_ENV = "LOOM_HTML_SANDBOX";
 
-interface OrbitExperiments {
-  htmlSandbox?: boolean;
+/**
+ * Test-only override, so the drawing code below the flag stays exercised.
+ *
+ * Deliberately a function call and not a stored value: the hole this replaced
+ * was that the flag lived in `localStorage`, which a *different* `file://`
+ * document -- one the agent wrote and the user opened -- could set, and which
+ * survived a restart. Calling this needs code already running inside the
+ * renderer module graph, which is a bar an attacker who has cleared it has
+ * already won past. Nothing in production calls it.
+ */
+let testOverride: boolean | null = null;
+
+export function __setHtmlSandboxEnabledForTests(value: boolean | null): void {
+  testOverride = value;
 }
 
 export function isHtmlSandboxEnabled(): boolean {
-  const injected = (globalThis as Record<string, unknown>)[HTML_SANDBOX_GLOBAL] as
-    OrbitExperiments | undefined;
-  if (injected && typeof injected.htmlSandbox === "boolean") return injected.htmlSandbox;
-
-  try {
-    const saved = globalThis.localStorage?.getItem(HTML_SANDBOX_FLAG_KEY);
-    if (saved === "1") return true;
-    if (saved === "0") return false;
-  } catch {
-    // Storage can throw outright in a partitioned or restricted context, and
-    // a flag that cannot be read is a flag that is off.
-  }
-
+  if (testOverride !== null) return testOverride;
   return false;
 }
