@@ -608,6 +608,7 @@ interface Harness {
   ctx: WidgetContext<JobsConfig>;
   sources: DashboardSources;
   setConfig: ReturnType<typeof vi.fn>;
+  fail: ReturnType<typeof vi.fn>;
   cleanups: Array<() => void>;
   offs: Array<() => void>;
 }
@@ -620,13 +621,14 @@ function harness(config: Partial<JobsConfig> = {}): Harness {
   const cleanups: Array<() => void> = [];
   const offs: Array<() => void> = [];
   const setConfig = vi.fn();
+  const fail = vi.fn();
   const ctx = {
     panelId: "p-jobs",
     config: { ...jobsWidget.defaultConfig, ...config },
     sources: sources.sources,
     header,
     setConfig,
-    fail: vi.fn(),
+    fail,
     onDispose(fn: () => void) {
       cleanups.push(fn);
     },
@@ -637,7 +639,7 @@ function harness(config: Partial<JobsConfig> = {}): Harness {
       return off;
     },
   } as unknown as WidgetContext<JobsConfig>;
-  return { el, header, ctx, sources, setConfig, cleanups, offs };
+  return { el, header, ctx, sources, setConfig, fail, cleanups, offs };
 }
 
 function teardown(h: Harness, dispose?: (() => void) | void): void {
@@ -847,7 +849,7 @@ describe("mounted jobs widget", () => {
         }),
       ]),
     );
-    expect(h.el.textContent).toContain("One finished run is hidden.");
+    expect(h.el.textContent).toContain("One earlier run is hidden.");
     (h.el.querySelector(".dash-jobs-empty button") as HTMLButtonElement).click();
     expect(h.setConfig).toHaveBeenCalledWith({ show: "all" });
     teardown(h, dispose);
@@ -1041,6 +1043,26 @@ describe("mounted jobs widget", () => {
     // The panel now admits it has not heard from Galaxy, rather than still
     // saying "checked 20 s ago" ten minutes later.
     expect(h.el.textContent).toContain("Can't tell right now");
+    teardown(h, dispose);
+  });
+
+  it("hands a throw from the repaint timer to the host instead of losing it", () => {
+    const h = harness();
+    const dispose = jobsWidget.mount(h.el, h.ctx);
+    // A subscription's throw is caught by the host for us; a timer callback's
+    // is not -- it would vanish into the event loop and the panel would stop
+    // updating with no error card and nothing on screen to say so.
+    (h.ctx.sources as { plan: unknown }).plan = {
+      get() {
+        throw new Error("plan source exploded");
+      },
+      subscribe: () => () => {},
+    };
+    // One tick. The real host's fail() tears the widget down, so a second
+    // tick never happens there; this harness's fail is a bare spy.
+    expect(() => vi.advanceTimersByTime(30_000)).not.toThrow();
+    expect(h.fail).toHaveBeenCalledTimes(1);
+    expect((h.fail.mock.calls[0][0] as Error).message).toBe("plan source exploded");
     teardown(h, dispose);
   });
 

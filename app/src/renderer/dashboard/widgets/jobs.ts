@@ -831,11 +831,12 @@ function emptyCard(hidden: number, onShowAll: () => void): HTMLElement {
     );
     return card;
   }
+  // "Finished" would be wrong for the cancelled and skipped ones in there.
   card.append(
     node(
       "span",
       undefined,
-      hidden === 1 ? "One finished run is hidden." : `${hidden} finished runs are hidden.`,
+      hidden === 1 ? "One earlier run is hidden." : `${hidden} earlier runs are hidden.`,
     ),
   );
   const button = node("button", "dash-panel-btn", "Show everything");
@@ -937,7 +938,18 @@ export const jobsWidget: WidgetDefinition<JobsConfig> = {
     // the notebook stops changing -- which is exactly when staleness matters.
     // Through onDispose, not the returned dispose: a widget that throws never
     // gets to return one, and this interval would outlive the error card.
-    const timer = setInterval(render, TICK_MS);
+    //
+    // The throw has to be handed to ctx.fail by hand. A subscription gets that
+    // for free, but a timer callback that throws just disappears into the event
+    // loop: the panel would quietly stop updating and the host's error card,
+    // which is the whole point of the isolation, would never appear.
+    const timer = setInterval(() => {
+      try {
+        render();
+      } catch (err) {
+        ctx.fail(err);
+      }
+    }, TICK_MS);
     ctx.onDispose(() => clearInterval(timer));
 
     return () => {
