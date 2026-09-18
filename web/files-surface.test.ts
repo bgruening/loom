@@ -640,6 +640,37 @@ describe("a listing that would be enormous", () => {
     }
   });
 
+  it("shows a link back to the cwd without walking the tree again through it", async () => {
+    // Legal, inside the jail, and still nonsense: every directory becomes
+    // reachable by several names, so the results gallery counted 376 files in a
+    // four-file analysis and listed the same plots over and over. Watched in
+    // the web shell.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "files-surface-loopup-"));
+    try {
+      fs.mkdirSync(path.join(root, "figures"));
+      fs.writeFileSync(path.join(root, "figures", "plot.png"), "x");
+      fs.symlinkSync(root, path.join(root, "back"));
+
+      const res = await listFilesForWeb(root, { home: root });
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      const names: string[] = [];
+      const walk = (n: FileNode): void => {
+        names.push(n.relPath);
+        for (const c of n.children ?? []) walk(c);
+      };
+      walk(res.root);
+      // The link is listed...
+      expect(names).toContain("back");
+      // ...and nothing underneath it.
+      expect(names.filter((n) => n.startsWith("back/"))).toEqual([]);
+      // The real one is still there exactly once.
+      expect(names.filter((n) => n.endsWith("plot.png"))).toEqual(["figures/plot.png"]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("a cwd at the filesystem root still contains correctly", async () => {
     // `startsWith(cwdReal + sep)` became startsWith("//") there, which matches
     // nothing, so a listing came back holding a single entry.

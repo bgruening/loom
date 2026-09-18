@@ -304,7 +304,14 @@ async function walkDir(
         const stat = await fsp.stat(absPath);
         isDir = stat.isDirectory();
         isFile = stat.isFile();
-        recurse = isDir;
+        // Show it, but do not walk back up through it. A link pointing at the
+        // cwd or at any directory above it re-lists the whole tree under a new
+        // name, once per level, which is legal and inside the jail and still
+        // nonsense: a four-file analysis reported 376 results, the same plots
+        // over and over, because `figures/` was reachable by several paths.
+        // The byte budget bounds what that costs; this stops it happening.
+        const absReal = await fsp.realpath(absDir).catch(() => absDir);
+        recurse = isDir && !isWithinCwd(absReal, target);
       } catch {
         continue;
       }
