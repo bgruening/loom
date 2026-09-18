@@ -501,9 +501,20 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
 
     const addCaption = (entry: HTMLElement, file: ResultFile): void => {
       const caption = node("div", "dash-results-caption");
-      const name = node("span", "dash-results-name", file.name);
-      name.title = file.relPath;
-      caption.append(name);
+      // A button only where the shell can actually open the file. Seeing the
+      // plot and not being able to get to it was the weakest part of this
+      // panel, but a name that looks clickable and does nothing is worse.
+      if (ctx.openFile) {
+        const open = node("button", "dash-results-name dash-results-open", file.name);
+        open.type = "button";
+        open.title = `Open ${file.relPath}`;
+        open.addEventListener("click", () => ctx.openFile?.(file.relPath));
+        caption.append(open);
+      } else {
+        const name = node("span", "dash-results-name", file.name);
+        name.title = file.relPath;
+        caption.append(name);
+      }
       const size = formatSize(file.size);
       if (size) caption.append(node("span", "dash-results-meta", size));
       if (!pinned) {

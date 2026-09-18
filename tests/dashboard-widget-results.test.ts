@@ -35,6 +35,7 @@ interface Harness {
   ctx: WidgetContext;
   sources: DashboardSources;
   setConfig: ReturnType<typeof vi.fn>;
+  openFile: ReturnType<typeof vi.fn>;
   cleanups: Array<() => void>;
   /** Push a file listing through the real `files` source. */
   setFiles(root: FileNode | null): Promise<void>;
@@ -42,7 +43,7 @@ interface Harness {
 
 function harness(
   config: Record<string, unknown> = {},
-  opts: { available?: boolean } = {},
+  opts: { available?: boolean; canOpenFiles?: boolean } = {},
 ): Harness {
   const el = document.createElement("div");
   const header = document.createElement("div");
@@ -55,12 +56,16 @@ function harness(
   );
   const cleanups: Array<() => void> = [];
   const setConfig = vi.fn();
+  const openFile = vi.fn();
   const ctx = {
     panelId: "p",
     config: { ...resultsWidget.defaultConfig, ...config },
     sources: sources.sources,
     header,
     setConfig,
+    // Optional on the real context, so the default harness has it and one test
+    // takes it away to cover the shell that cannot open anything.
+    openFile: opts.canOpenFiles === false ? undefined : openFile,
     fail: vi.fn(),
     onDispose(fn: () => void) {
       cleanups.push(fn);
@@ -77,6 +82,7 @@ function harness(
     ctx,
     sources,
     setConfig,
+    openFile,
     cleanups,
     async setFiles(next) {
       root = next;
@@ -678,6 +684,26 @@ describe("results widget", () => {
     expect(h.el.querySelector("img")?.getAttribute("src")).toBe(
       "orbit-artifact://cwd/plot.png?v=99",
     );
+  });
+
+  it("opens the file when its name is clicked", async () => {
+    const h = harness();
+    resultsWidget.mount(h.el, h.ctx);
+    await h.setFiles(tree([dir("figures", [file("figures/volcano.png")])]));
+    const open = h.el.querySelector<HTMLButtonElement>(".dash-results-open");
+    expect(open?.textContent).toBe("volcano.png");
+    open?.click();
+    expect(h.openFile).toHaveBeenCalledWith("figures/volcano.png");
+  });
+
+  it("draws a plain caption, not a dead button, where the shell cannot open files", async () => {
+    const h = harness({}, { canOpenFiles: false });
+    resultsWidget.mount(h.el, h.ctx);
+    await h.setFiles(tree([file("plot.png")]));
+    expect(h.el.querySelector(".dash-results-open")).toBeNull();
+    const name = h.el.querySelector(".dash-results-name");
+    expect(name?.tagName).toBe("SPAN");
+    expect(name?.textContent).toBe("plot.png");
   });
 
   it("clears itself and drops its cleanup on dispose", async () => {

@@ -190,6 +190,12 @@ export interface WidgetContext<C extends Record<string, unknown> = Record<string
   onDispose(fn: () => void): void;
   /** Turn this panel into an error card. */
   fail(err: unknown): void;
+  /**
+   * Open a workspace file in whatever file viewer the shell has. Absent where
+   * the shell has none, so a widget must feature-detect rather than assume --
+   * that is the whole reason it is optional rather than a no-op.
+   */
+  openFile?(relPath: string): void;
 }
 
 export interface WidgetDefinition<C extends Record<string, unknown> = Record<string, unknown>> {

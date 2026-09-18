@@ -115,7 +115,9 @@ const artifacts = new ArtifactPanel();
 // replace the whole window with a blank page rather than one broken tab.
 let dashboard: DashboardBootstrap | null = null;
 try {
-  dashboard = initDashboard(artifacts.getDashboardContainer());
+  dashboard = initDashboard(artifacts.getDashboardContainer(), {
+    openFile: (relPath: string) => void openFileFromTree(relPath),
+  });
 } catch (err) {
   console.error("[orbit] the dashboard failed to start:", err);
 }

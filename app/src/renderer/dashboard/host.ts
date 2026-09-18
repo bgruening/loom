@@ -43,6 +43,8 @@ export interface DashboardHostOptions {
   registry?: WidgetRegistry;
   /** Called with the serialized document whenever a change should be saved. */
   persist?: (document: DashboardDocument) => void;
+  /** Wired to whatever the shell already does when the files tree is clicked. */
+  openFile?: (relPath: string) => void;
   /** Overrides the editor from `editor.ts`. For tests; `null` disables it. */
   editor?: DashboardEditor | null;
 }
@@ -81,6 +83,7 @@ export class DashboardHost implements DashboardHostApi {
   private registry: WidgetRegistry;
   private sources: DashboardDataSources;
   private persist?: (document: DashboardDocument) => void;
+  private openFile?: (relPath: string) => void;
 
   private bannerEl: HTMLElement;
   private toolbarEl: HTMLElement;
@@ -98,6 +101,7 @@ export class DashboardHost implements DashboardHostApi {
     this.sources = opts.sources;
     this.registry = opts.registry ?? widgetRegistry;
     this.persist = opts.persist;
+    this.openFile = opts.openFile;
     this.editor = opts.editor !== undefined ? opts.editor : dashboardEditor;
 
     this.root.classList.add("dash-root");
@@ -370,6 +374,15 @@ export class DashboardHost implements DashboardHostApi {
         return off;
       },
       fail,
+      // Left undefined rather than a no-op where the shell has no viewer, so a
+      // widget can tell "nothing will happen" from "something will" and draw a
+      // plain caption instead of a button that does nothing.
+      openFile: this.openFile
+        ? (relPath: string) => {
+            if (disposed) return;
+            this.openFile?.(relPath);
+          }
+        : undefined,
     };
 
     let widgetDispose: WidgetDispose | void;

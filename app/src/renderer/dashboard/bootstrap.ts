@@ -81,7 +81,15 @@ type DashboardShell = {
   }) => Promise<{ ok: true; root: FileNode } | { ok: false; error?: string }>;
 };
 
-export function initDashboard(container: HTMLElement): DashboardBootstrap {
+export interface DashboardInitOptions {
+  /** The shell's own "open this file" action, where it has one. */
+  openFile?: (relPath: string) => void;
+}
+
+export function initDashboard(
+  container: HTMLElement,
+  opts: DashboardInitOptions = {},
+): DashboardBootstrap {
   // Read through a narrow shape rather than the full OrbitAPI: the web shim
   // casts, so a method it never implemented is `undefined` at runtime however
   // the type reads. Every call below is guarded.
@@ -156,6 +164,7 @@ export function initDashboard(container: HTMLElement): DashboardBootstrap {
 
   const host = new DashboardHost(container, {
     sources: sources.sources,
+    openFile: opts.openFile,
     persist: (doc) => {
       // A change made while the startup load is still in flight wins: otherwise
       // the load lands after it, puts the disk version back on screen, and the

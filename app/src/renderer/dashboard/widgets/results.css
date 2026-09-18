@@ -39,6 +39,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  text-align: left;
   font-family: var(--font, monospace);
   color: var(--text);
 }
@@ -91,4 +92,21 @@
 .dash-results-entry:hover .dash-results-pin,
 .dash-results-pin:focus-visible {
   opacity: 1;
+}
+
+/* The same caption, as a button, where the shell can open the file. Styled as
+   text rather than as a control: it sits in a row of file names, and a row of
+   buttons would read as the panel's own chrome. */
+.dash-results-open {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.dash-results-open:hover,
+.dash-results-open:focus-visible {
+  color: var(--accent-hover, var(--accent));
+  text-decoration: underline;
 }

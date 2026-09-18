@@ -49,8 +49,11 @@ beforeEach(() => {
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 
+let openFile: ReturnType<typeof vi.fn>;
+
 function makeHost(persist?: (d: DashboardDocument) => void): DashboardHost {
-  return new DashboardHost(root, { sources: sources.sources, registry, persist });
+  openFile = vi.fn();
+  return new DashboardHost(root, { sources: sources.sources, registry, persist, openFile });
 }
 
 describe("rendering", () => {
@@ -340,10 +343,40 @@ describe("lifecycle", () => {
     });
     sources.setNotebook("after dispose");
     kept!.setConfig({ sneaky: true });
+    kept!.openFile?.("figures/plot.png");
     kept!.fail(new Error("too late"));
 
     expect(late).toBe(0);
+    expect(openFile).not.toHaveBeenCalled();
     expect(host.getDocument()).toEqual(before);
+  });
+
+  it("passes openFile straight through while the panel is alive", () => {
+    let kept: Parameters<WidgetDefinition["mount"]>[1] | undefined;
+    registry.register(
+      stubWidget("a", (_el, ctx) => {
+        kept = ctx;
+      }),
+    );
+    const host = makeHost();
+    host.setDocument(doc("a"), { persist: false });
+    kept!.openFile?.("figures/plot.png");
+    expect(openFile).toHaveBeenCalledWith("figures/plot.png");
+    host.dispose();
+  });
+
+  it("leaves openFile undefined where the shell has no viewer, rather than a no-op", () => {
+    let kept: Parameters<WidgetDefinition["mount"]>[1] | undefined;
+    registry.register(
+      stubWidget("a", (_el, ctx) => {
+        kept = ctx;
+      }),
+    );
+    // A widget feature-detects on this, so "absent" has to mean absent.
+    const host = new DashboardHost(root, { sources: sources.sources, registry });
+    host.setDocument(doc("a"), { persist: false });
+    expect(kept!.openFile).toBeUndefined();
+    host.dispose();
   });
 
   it("clears the container and stops updates on dispose", () => {
