@@ -528,15 +528,13 @@ export class GalaxyLiveTicker {
     ) {
       return cached.id;
     }
-    let summary: GalaxyHistorySummary | null;
-    try {
-      summary = await this.deps.mostRecentHistory();
-    } catch {
-      // Galaxy unreachable, or the key is bad. The snapshot call below would
-      // say the same thing with a better message, so let the caller report the
-      // absence of a history rather than inventing a second error path.
-      return null;
-    }
+    // Deliberately not caught here. Returning null for a failed lookup would
+    // report "this analysis is not attached to a Galaxy history yet" when the
+    // truth is that Galaxy did not answer or rejected the key -- two sentences
+    // that send the user somewhere completely different. Galaxy answering
+    // "you have no histories" is the only real no-history, and that is the
+    // null below.
+    const summary = await this.deps.mostRecentHistory();
     if (!summary?.id) return null;
     this.resolved = { id: summary.id, at: this.deps.now(), server: serverUrl };
     return summary.id;
@@ -547,8 +545,8 @@ export class GalaxyLiveTicker {
    * null when there is no notebook to read. Never throws.
    */
   async tick(content: string | null): Promise<void> {
-    // A slow Galaxy must not let ticks stack: the poller awaits this, but an
-    // immediate tick at session start can overlap the first interval tick.
+    // The poller fires this without awaiting it, so nothing outside stops two
+    // ticks overlapping while Galaxy is slow. This does.
     if (this.running) return;
     this.running = true;
     try {
@@ -560,6 +558,21 @@ export class GalaxyLiveTicker {
     }
   }
 
+  /** The payload for "Galaxy answered, and there is nothing to draw". */
+  private unavailable(
+    reason: NonNullable<GalaxyLivePayload["unavailable"]>,
+    serverUrl: string | undefined,
+    now: number,
+  ): GalaxyLivePayload {
+    return {
+      version: GALAXY_LIVE_SCHEMA_VERSION,
+      serverHost: serverHostOf(serverUrl),
+      history: null,
+      unavailable: reason,
+      updatedAt: new Date(now).toISOString(),
+    };
+  }
+
   private async runTick(content: string | null): Promise<void> {
     const now = this.deps.now();
     const cfg = this.deps.config();
@@ -567,16 +580,7 @@ export class GalaxyLiveTicker {
       // No credentials is a steady state, not a failure: say it once and stop
       // asking. The fingerprint check means a disconnected session costs one
       // push for the whole session.
-      this.emit(
-        {
-          version: GALAXY_LIVE_SCHEMA_VERSION,
-          serverHost: null,
-          history: null,
-          unavailable: "not-configured",
-          updatedAt: new Date(now).toISOString(),
-        },
-        now,
-      );
+      this.emit(this.unavailable("not-configured", undefined, now), now);
       return;
     }
 
@@ -584,7 +588,16 @@ export class GalaxyLiveTicker {
     if (now - this.lastAttemptAt < this.interval(live)) return;
     this.lastAttemptAt = now;
 
-    const historyId = await this.resolveHistoryId(content, cfg.url);
+    let historyId: string | null;
+    try {
+      historyId = await this.resolveHistoryId(content, cfg.url);
+    } catch (err) {
+      // Asking Galaxy which history is current failed. That is the same class
+      // of problem as the read below failing, and it reads the same way.
+      this.failures++;
+      this.emit(this.unavailable(classifyError(err), cfg.url, this.deps.now()), this.deps.now());
+      return;
+    }
     if (historyId !== this.historyId) {
       // A different history: the update_time we were comparing against belongs
       // to the old one, and reusing it would suppress the first real read.
@@ -592,16 +605,10 @@ export class GalaxyLiveTicker {
       this.historyId = historyId;
     }
     if (!historyId) {
-      this.emit(
-        {
-          version: GALAXY_LIVE_SCHEMA_VERSION,
-          serverHost: serverHostOf(cfg.url),
-          history: null,
-          unavailable: "no-history",
-          updatedAt: new Date(now).toISOString(),
-        },
-        now,
-      );
+      // Galaxy answered and said there is no history here. Not a failure, so
+      // no backoff: the user creating one should show up on the next tick.
+      this.failures = 0;
+      this.emit(this.unavailable("no-history", cfg.url, now), now);
       return;
     }
 

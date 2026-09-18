@@ -13,7 +13,7 @@ import {
   type GalaxyLiveTickerDeps,
   type SnapshotResult,
 } from "../extensions/loom/galaxy-live-source.js";
-import { GalaxyApiError } from "../extensions/loom/galaxy-api.js";
+import { GalaxyApiError, type GalaxyHistorySummary } from "../extensions/loom/galaxy-api.js";
 import {
   armGalaxyLivePanel,
   disarmGalaxyLivePanel,
@@ -658,6 +658,66 @@ describe("GalaxyLiveTicker cadence", () => {
     await h.ticker.tick("# no binding here\n");
     expect(h.snapshot).not.toHaveBeenCalled();
     expect(h.pushes[0].unavailable).toBe("no-history");
+  });
+
+  it.each([
+    [401, "unauthorized"],
+    [403, "forbidden"],
+    [500, "unreachable"],
+  ])(
+    "reports a %i while asking which history is current as %s, not as 'no history'",
+    async (status, expected) => {
+      // Telling someone their analysis is not attached to a history, when the
+      // truth is that Galaxy rejected their key, sends them to fix the wrong
+      // thing. The two sentences are not interchangeable.
+      const h = tickerHarness({
+        mostRecentHistory: async () => {
+          throw new GalaxyApiError(status, "", "err");
+        },
+      });
+      await h.ticker.tick("# no binding here\n");
+      expect(h.snapshot).not.toHaveBeenCalled();
+      expect(h.pushes[0].unavailable).toBe(expected);
+    },
+  );
+
+  it("reports a dead network while resolving as unreachable", async () => {
+    const h = tickerHarness({
+      mostRecentHistory: async () => {
+        throw new Error("fetch failed");
+      },
+    });
+    await h.ticker.tick("# no binding here\n");
+    expect(h.pushes[0].unavailable).toBe("unreachable");
+  });
+
+  it("backs off after a failed resolve, and not after an honest empty answer", async () => {
+    // Counted on the resolve call itself: the pushes are identical either way,
+    // because a repeated failure de-duplicates, so only the request count can
+    // tell a widened gap from an unwidened one.
+    const deadResolve = vi.fn(async (): Promise<GalaxyHistorySummary | null> => {
+      throw new Error("fetch failed");
+    });
+    const dead = tickerHarness({ mostRecentHistory: deadResolve });
+    await dead.ticker.tick("# no binding\n");
+    dead.advance(20_000);
+    await dead.ticker.tick(INVOCATION("in_progress"));
+    // One failure widened the gap past the 15s active cadence.
+    expect(deadResolve).toHaveBeenCalledTimes(1);
+    dead.advance(15_000);
+    await dead.ticker.tick(INVOCATION("in_progress"));
+    expect(deadResolve).toHaveBeenCalledTimes(2);
+
+    const emptyResolve = vi.fn(async (): Promise<GalaxyHistorySummary | null> => null);
+    const none = tickerHarness({ mostRecentHistory: emptyResolve });
+    await none.ticker.tick("# no binding\n");
+    none.advance(20_000);
+    await none.ticker.tick(INVOCATION("in_progress"));
+    // Galaxy answering "you have no histories" is not a failure, so the next
+    // active tick still asks -- a history created in between shows up at once.
+    expect(emptyResolve).toHaveBeenCalledTimes(2);
+    expect(none.snapshot).not.toHaveBeenCalled();
+    expect(none.pushes[0].unavailable).toBe("no-history");
   });
 
   it("forgets the previous history's update_time when the binding changes", async () => {
