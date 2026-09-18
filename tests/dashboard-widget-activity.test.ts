@@ -487,6 +487,9 @@ describe("redaction", () => {
     expect(text).not.toContain("sup3rs3cret");
     expect(text).not.toContain("t0kenv4lue");
     expect(text).not.toContain("t0keninline");
+    // Whatever the name introduces, of whatever type.
+    const structured = redactForDisplay({ args: ["--secret", { value: "n3sted" }] });
+    expect(JSON.stringify(structured)).not.toContain("n3sted");
     // The shape of the command still reads, which is the point of showing it.
     expect(text).toContain("--api-key");
     expect(text).toContain("upload");

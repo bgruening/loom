@@ -514,14 +514,16 @@ export function redactForDisplay(
       const items: unknown[] = [];
       let hideNext = false;
       for (const v of obj.slice(0, DETAIL_KEYS_MAX)) {
-        if (typeof v !== "string") {
-          hideNext = false;
-          items.push(redactForDisplay(v, depth + 1, seen, budget));
-          continue;
-        }
+        // Whatever the name introduces, of whatever type. An argv value is a
+        // string, but blanking a structured element here costs a reader one
+        // click and showing one could cost them a key.
         if (hideNext) {
           hideNext = false;
           items.push(HIDDEN);
+          continue;
+        }
+        if (typeof v !== "string") {
+          items.push(redactForDisplay(v, depth + 1, seen, budget));
           continue;
         }
         const token = redactToken(v);
