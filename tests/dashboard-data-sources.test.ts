@@ -186,6 +186,28 @@ describe("DashboardSources", () => {
     expect(sources.sources.activity.get().available).toBe(false);
   });
 
+  it("discards a pulled read that was in flight when the directory changed", async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const bytes = new TextEncoder().encode('{"kind":"from_the_old_workspace"}');
+    const sources = new DashboardSources({
+      readFile: async () => {
+        await gate;
+        return { ok: true, bytes };
+      },
+    });
+
+    const inFlight = sources.refreshActivity();
+    sources.reset();
+    release!();
+    await inFlight;
+
+    expect(sources.sources.activity.get().events).toEqual([]);
+    expect(sources.sources.activity.get().available).toBe(false);
+  });
+
   it("clears every source on a cwd switch", () => {
     const sources = new DashboardSources();
     sources.setNotebook(NOTEBOOK);

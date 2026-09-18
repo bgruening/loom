@@ -252,6 +252,12 @@ export class DashboardSources {
   private session = new MutableSource<SessionSnapshot>(emptySession());
 
   readonly sources: DashboardDataSources;
+  /**
+   * Bumped by `reset()`. A pulled read that was already in flight against the
+   * previous analysis directory checks this before applying its result, so a
+   * slow file read cannot land the old workspace's data in the new one.
+   */
+  private generation = 0;
 
   constructor(private api: DashboardShellApi = {}) {
     this.sources = {
@@ -282,6 +288,7 @@ export class DashboardSources {
   /** Re-read the activity log tail. No-op where the shell has no file read. */
   async refreshActivity(): Promise<void> {
     if (typeof this.api.readFile !== "function") return;
+    const generation = this.generation;
     let events: ActivityEvent[] = [];
     let available = false;
     try {
@@ -293,12 +300,14 @@ export class DashboardSources {
     } catch {
       /* no activity log yet, or no file surface at all */
     }
+    if (generation !== this.generation) return;
     this.activity.set({ events, available, updatedAt: Date.now() });
   }
 
   /** Re-read the workspace file tree. No-op where the shell has no listing. */
   async refreshFiles(): Promise<void> {
     if (typeof this.api.listFiles !== "function") return;
+    const generation = this.generation;
     let root: FileNode | null = null;
     let available = false;
     try {
@@ -310,11 +319,13 @@ export class DashboardSources {
     } catch {
       /* no file surface */
     }
+    if (generation !== this.generation) return;
     this.files.set({ root, available, updatedAt: Date.now() });
   }
 
   /** Called on a cwd switch or /new so a new analysis does not inherit the old one's data. */
   reset(): void {
+    this.generation++;
     const updatedAt = Date.now();
     this.notebook.set({ markdown: "", path: null, updatedAt });
     this.invocations.set({ invocations: [], updatedAt });

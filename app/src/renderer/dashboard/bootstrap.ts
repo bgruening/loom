@@ -59,6 +59,9 @@ export function initDashboard(container: HTMLElement): DashboardBootstrap {
 
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let pending: DashboardDocument | null = null;
+  // Same guard the notebook loader in app.ts uses: a load for the directory we
+  // just left must not apply its document over the one we are switching to.
+  let loadSeq = 0;
 
   const cancelPendingSave = (): void => {
     if (saveTimer) clearTimeout(saveTimer);
@@ -93,6 +96,7 @@ export function initDashboard(container: HTMLElement): DashboardBootstrap {
    * parse bug is worse than showing them the default for one session.
    */
   const load = async (): Promise<void> => {
+    const seq = ++loadSeq;
     host.setBanner("");
     if (typeof shell.loadDashboard !== "function") return;
     let res: { ok: true; raw: string | null } | { ok: false; error: string };
@@ -102,6 +106,7 @@ export function initDashboard(container: HTMLElement): DashboardBootstrap {
       console.error("[dashboard] load failed:", err);
       return;
     }
+    if (seq !== loadSeq) return;
     if (!res.ok) {
       host.setBanner(`Could not read the saved dashboard: ${res.error}`);
       return;
