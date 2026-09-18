@@ -59,6 +59,13 @@ function invocation(over: Partial<Invocation> = {}): Invocation {
   };
 }
 
+/**
+ * A live `loom-job` exactly as the brain writes it: no `galaxy_state` and no
+ * `last_polled_at`. `galaxy_job_record` writes neither, and the non-terminal
+ * branch of `tickJobs` only writes them for the one-off server_verified
+ * upgrade -- so inventing them in a fixture would hide the shape every real
+ * in-flight tool run actually has.
+ */
 function job(over: Partial<DashboardJob> = {}): DashboardJob {
   return {
     jobId: "job-1",
@@ -68,8 +75,7 @@ function job(over: Partial<DashboardJob> = {}): DashboardJob {
     toolId: "bwa_mem",
     submittedAt: ago(20 * MINUTE),
     status: "in_progress",
-    galaxyState: "running",
-    lastPolledAt: ago(30_000),
+    serverVerified: true,
     ...over,
   };
 }
@@ -184,10 +190,29 @@ describe("state folding", () => {
     expect(foldJobState("skipped", "running")).toBe("skipped");
   });
 
-  it("falls back to queued for an in-flight job Galaxy has not been asked about", () => {
-    expect(foldJobState("in_progress", null)).toBe("queued");
-    expect(describeRun(jobRowFor({ galaxyState: undefined, lastPolledAt: undefined }), NOW)).toBe(
-      "Submitted. Waiting for Galaxy's first answer.",
+  it("does not claim a live tool run has not started, which is its normal shape", () => {
+    // galaxy_job_record writes no galaxy_state and no last_polled_at, and the
+    // non-terminal poll does not add them, so this is what EVERY in-flight tool
+    // run looks like for its whole life. Reading it as "queued" told the user a
+    // two-hour job was still waiting to start.
+    expect(foldJobState("in_progress", null)).toBe("unknown");
+    const row = jobRowFor({});
+    expect(row.galaxyState).toBeNull();
+    expect(row.lastPolledAt).toBeNull();
+    expect(row.live).toBe(true);
+    expect(row.stale).toBe(false);
+    expect(describeRun(row, NOW)).toBe(
+      "Still going on Galaxy. Nothing more has been written down about it yet.",
+    );
+    // And it does not claim nobody is asking, because tickJobs is asking every
+    // fifteen seconds -- it just only writes the answer down when it changes.
+    expect(metaLine(row, NOW)).toContain("no change yet");
+    expect(metaLine(row, NOW)).not.toContain("not checked yet");
+  });
+
+  it("says a job is queued only when Galaxy actually said so", () => {
+    expect(describeRun(jobRowFor({ galaxyState: "queued" }), NOW)).toBe(
+      "Waiting for Galaxy to start it.",
     );
   });
 
@@ -200,6 +225,18 @@ describe("state folding", () => {
     expect(foldInvocationState("in_progress")).toBe("running");
     expect(foldInvocationState("completed")).toBe("finished");
     expect(foldInvocationState("failed")).toBe("failed");
+  });
+
+  it("tells a workflow the user cancelled apart from one that broke", () => {
+    // The block has no cancelled status, so checkInvocations writes both as
+    // failed and only the summary says which.
+    expect(
+      foldInvocationState("failed", "Workflow cancelled: 5 job(s) finished before it stopped"),
+    ).toBe("cancelled");
+    expect(foldInvocationState("failed", "Workflow failed: 2 job(s) errored, 10 succeeded")).toBe(
+      "failed",
+    );
+    expect(foldInvocationState("failed", null)).toBe("failed");
   });
 
   it("gives every state a word and a glyph, so colour is never the only signal", () => {
@@ -218,7 +255,7 @@ describe("state folding", () => {
       expect(stateWord(state), state).toBeTruthy();
       expect(stateGlyph(state), state).toBeTruthy();
     }
-    expect(stateWord("nonsense" as RunState)).toBe("Working");
+    expect(stateWord("nonsense" as RunState)).toBe("In progress");
     expect(stateGlyph("nonsense" as RunState)).toBe("?");
   });
 });
@@ -345,7 +382,7 @@ describe("staleness", () => {
   it("does not call a running job stale, because its timestamp is not a heartbeat", () => {
     // tickJobs polls a running job every 15s but only writes on a transition,
     // so last_polled_at freezes at the first poll for the whole run.
-    const row = jobRowFor({ lastPolledAt: ago(2 * HOUR) });
+    const row = jobRowFor({ galaxyState: "running", lastPolledAt: ago(2 * HOUR) });
     expect(row.live).toBe(true);
     expect(row.stale).toBe(false);
     expect(describeRun(row, NOW)).toContain("Running");
@@ -363,6 +400,32 @@ describe("plain-language status", () => {
   it("uses the singular for one failed job", () => {
     const row = rowFor({ status: "in_progress", completedJobs: 7, failedJobs: 1, totalJobs: 12 });
     expect(describeRun(row, NOW)).toBe("1 job has failed. 7 finished, 4 still going.");
+  });
+
+  it("does not raise the alarm about something the user did on purpose", () => {
+    // Cancelling a workflow deletes its jobs, and Galaxy scores a deleted job
+    // in the same counter as an errored one, so the counters alone would make
+    // every cancel look like a failure.
+    const cancelled = rowFor({
+      status: "failed",
+      summary: "Workflow cancelled: 5 job(s) finished before it stopped",
+      completedJobs: 5,
+      failedJobs: 7,
+      totalJobs: 12,
+    });
+    expect(cancelled.state).toBe("cancelled");
+    expect(needsAttention(cancelled)).toBe(false);
+    expect(isActiveRun(cancelled)).toBe(false);
+    expect(attentionMessage([cancelled])).toBe("");
+    // A real failure with the same counters still shouts.
+    const broken = rowFor({
+      status: "failed",
+      summary: "Workflow failed: 7 job(s) errored, 5 succeeded",
+      completedJobs: 5,
+      failedJobs: 7,
+      totalJobs: 12,
+    });
+    expect(needsAttention(broken)).toBe(true);
   });
 
   it("says what happened for every terminal outcome", () => {
@@ -385,6 +448,29 @@ describe("plain-language status", () => {
     expect(describeRun(jobRowFor({ status: "failed" }), NOW)).toBe(
       "Failed. Ask the agent what Galaxy reported.",
     );
+  });
+
+  it("does not invent job errors for a workflow Galaxy refused to schedule", () => {
+    // checkInvocations fails the block on inv.state === "failed" with every job
+    // counter at zero, so "0 of 12 jobs errored" would be nonsense.
+    const row = rowFor({ status: "failed", totalJobs: 12, completedJobs: 5, failedJobs: 0 });
+    expect(describeRun(row, NOW)).toBe(
+      "Failed. No job errored on its own, so Galaxy stopped the workflow.",
+    );
+    expect(needsAttention(row)).toBe(true);
+    expect(attentionMessage([row, { ...row, id: "other" }])).toBe("2 runs failed.");
+  });
+
+  it("does not call a run with failed jobs in it a clean finish", () => {
+    // A hand-edited block can say completed and still carry failed jobs; the
+    // row is drawn red either way, so the sentence must not disagree with it.
+    const row = rowFor({ status: "completed", totalJobs: 12, completedJobs: 9, failedJobs: 3 });
+    expect(needsAttention(row)).toBe(true);
+    expect(describeRun(row, NOW)).toBe("Finished, but 3 of 12 jobs failed.");
+  });
+
+  it("does not tell a single tool run that its job counts are missing", () => {
+    expect(describeRun(jobRowFor({ galaxyState: "running" }), NOW)).toBe("Running on Galaxy.");
   });
 
   it("admits it has no counts rather than drawing a zero bar", () => {
@@ -594,6 +680,14 @@ describe("the Galaxy link", () => {
     expect(new URL(url as string).origin).toBe("https://usegalaxy.org");
   });
 
+  it("cannot grow a path segment, though a dotted id makes a dead link", () => {
+    // encodeURIComponent leaves a dot alone, so `..` normalizes away. It stays
+    // inside the origin and the configured prefix, which is what matters.
+    const url = galaxyRunUrl(rowFor({ invocationId: "..", galaxyServerUrl: "https://x.org/gx" }));
+    expect(url).toBe("https://x.org/gx/workflows/");
+    expect(new URL(url as string).origin).toBe("https://x.org");
+  });
+
   it("shows the host, not the whole URL, in the meta line", () => {
     expect(rowFor({ galaxyServerUrl: "https://usegalaxy.eu/" }).serverHost).toBe("usegalaxy.eu");
     expect(rowFor({ galaxyServerUrl: "not a url" }).serverHost).toBe("not a url");
@@ -640,6 +734,21 @@ function harness(config: Partial<JobsConfig> = {}): Harness {
     },
   } as unknown as WidgetContext<JobsConfig>;
   return { el, header, ctx, sources, setConfig, fail, cleanups, offs };
+}
+
+/** One live workflow, with a knob for the counter that moves between pushes. */
+function liveInvocationBlock(completed = 7): string {
+  return invocationBlock({
+    invocation_id: "inv-1",
+    galaxy_server_url: "https://usegalaxy.org",
+    notebook_anchor: "plan-a-step-3",
+    label: "Count features",
+    submitted_at: ago(2 * HOUR),
+    status: "in_progress",
+    total_jobs: 12,
+    completed_jobs: completed,
+    last_polled_at: ago(20_000),
+  });
 }
 
 function teardown(h: Harness, dispose?: (() => void) | void): void {
@@ -1094,6 +1203,81 @@ describe("mounted jobs widget", () => {
     );
     teardown(h, dispose);
     expect(h.el.textContent).toBe("");
+  });
+
+  it("really hides the failure strip, not just its hidden property", () => {
+    // display:flex is an author rule and beats the UA [hidden] rule, so the
+    // property alone proves nothing. The host has its own [hidden] rule, but
+    // this harness mounts outside it -- which is exactly the gap.
+    const h = harness();
+    const dispose = jobsWidget.mount(h.el, h.ctx);
+    const alert = h.el.querySelector(".dash-jobs-alert") as HTMLElement;
+    expect(alert.hidden).toBe(true);
+    expect(getComputedStyle(alert).display).toBe("none");
+    teardown(h, dispose);
+  });
+
+  it("hides the state glyph from a screen reader, since the word says it", () => {
+    const h = harness();
+    const dispose = jobsWidget.mount(h.el, h.ctx);
+    h.sources.setNotebook(notebookWith([liveInvocationBlock()]));
+    const glyph = h.el.querySelector(".dash-jobs-glyph") as HTMLElement;
+    expect(glyph.getAttribute("aria-hidden")).toBe("true");
+    expect((h.el.querySelector(".dash-jobs-state") as HTMLElement).textContent).toContain(
+      "Running",
+    );
+    teardown(h, dispose);
+  });
+
+  it("gives the header controls a name and says which way the toggle is set", () => {
+    const h = harness();
+    const dispose = jobsWidget.mount(h.el, h.ctx);
+    const button = h.header.querySelector("button") as HTMLButtonElement;
+    expect(button.getAttribute("aria-label")).toBe("Show every run");
+    expect(button.getAttribute("aria-pressed")).toBe("false");
+    h.sources.setNotebook(notebookWith([liveInvocationBlock()]));
+    expect(h.header.querySelector(".dash-jobs-count")?.getAttribute("aria-label")).toBe(
+      "1 run is still going",
+    );
+    teardown(h, dispose);
+
+    const all = harness({ show: "all" });
+    const disposeAll = jobsWidget.mount(all.el, all.ctx);
+    expect(all.header.querySelector("button")?.getAttribute("aria-pressed")).toBe("true");
+    teardown(all, disposeAll);
+  });
+
+  it("puts keyboard focus back where it was after a rebuild", () => {
+    // The poller rewrites the notebook every fifteen seconds while a workflow
+    // is live. Without this a keyboard user gets fifteen seconds per attempt to
+    // reach the Galaxy link.
+    const h = harness();
+    const dispose = jobsWidget.mount(h.el, h.ctx);
+    h.sources.setNotebook(notebookWith([liveInvocationBlock(7)]));
+    const link = h.el.querySelector("a.dash-jobs-link") as HTMLAnchorElement;
+    link.focus();
+    expect(document.activeElement).toBe(link);
+    h.sources.setNotebook(notebookWith([liveInvocationBlock(8)]));
+    const rebuilt = h.el.querySelector("a.dash-jobs-link") as HTMLAnchorElement;
+    expect(rebuilt).not.toBe(link);
+    expect(document.activeElement).toBe(rebuilt);
+    teardown(h, dispose);
+  });
+
+  it("does not spring a disclosure back open after the user closed it", () => {
+    const h = harness();
+    const dispose = jobsWidget.mount(h.el, h.ctx);
+    h.sources.setNotebook(notebookWith([liveInvocationBlock(7)]));
+    const open = (): HTMLDetailsElement => h.el.querySelector("details") as HTMLDetailsElement;
+    open().open = true;
+    open().dispatchEvent(new Event("toggle"));
+    h.sources.setNotebook(notebookWith([liveInvocationBlock(8)]));
+    expect(open().open).toBe(true);
+    open().open = false;
+    open().dispatchEvent(new Event("toggle"));
+    h.sources.setNotebook(notebookWith([liveInvocationBlock(9)]));
+    expect(open().open).toBe(false);
+    teardown(h, dispose);
   });
 
   it("adds its stylesheet once, however many panels mount it", () => {

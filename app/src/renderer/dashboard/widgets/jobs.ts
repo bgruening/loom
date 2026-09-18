@@ -167,20 +167,35 @@ export function foldJobState(status: DashboardJob["status"], galaxyState: string
   if (status === "cancelled") return "cancelled";
   if (status === "skipped") return "skipped";
   if (status !== "in_progress") return "unknown";
-  if (!galaxyState) return "queued";
+  // No recorded state is the NORMAL shape of a live tool run, not an edge case:
+  // galaxy_job_record writes neither galaxy_state nor last_polled_at, and
+  // tickJobs only writes them on a terminal transition. Reading that as
+  // "queued" told the user a two-hour job had not started yet, for two hours.
+  if (!galaxyState) return "unknown";
   return GALAXY_JOB_STATE[galaxyState.toLowerCase()] ?? "unknown";
 }
 
 /**
- * `loom-invocation` has three statuses and no fourth for a cancel: a workflow
- * the user stopped is written `failed`, with a summary that begins "Workflow
- * cancelled". That summary is rendered verbatim beneath the state so the row
- * explains itself, but the word above it still reads Failed. Fixing that
- * properly is a brain-side change to `InvocationYaml["status"]`.
+ * The one thing on disk that separates a workflow the user stopped from one
+ * that broke. `loom-invocation` has three statuses and no fourth for a cancel,
+ * so checkInvocations writes `status: failed` for both and distinguishes them
+ * only in the summary it writes alongside.
+ *
+ * Reading that summary couples this panel to a sentence in the brain, which is
+ * not free. It is worth it because the alternative is the loudest surface in
+ * the product raising a red alarm about something the user did on purpose, and
+ * a surface that cries wolf is not a surface anyone reads. The coupling is
+ * fail-soft: if the wording changes the row just goes back to saying Failed.
+ * The real fix is a `cancelled` value on `InvocationYaml["status"]`.
  */
-export function foldInvocationState(status: Invocation["status"]): RunState {
+const CANCELLED_SUMMARY = /^\s*workflow cancelled\b/i;
+
+export function foldInvocationState(
+  status: Invocation["status"],
+  summary: string | null = null,
+): RunState {
   if (status === "completed") return "finished";
-  if (status === "failed") return "failed";
+  if (status === "failed") return CANCELLED_SUMMARY.test(summary ?? "") ? "cancelled" : "failed";
   if (status === "in_progress") return "running";
   return "unknown";
 }
@@ -236,7 +251,8 @@ export function findStep(plans: PlanSection[], anchor: string): RunRow["step"] {
 }
 
 function invocationRow(inv: Invocation, plans: PlanSection[], now: number): RunRow {
-  const state = foldInvocationState(inv.status);
+  const summary = inv.summary?.trim() || null;
+  const state = foldInvocationState(inv.status, summary);
   const done = count(inv.completedJobs);
   const failed = count(inv.failedJobs);
   // A hand-edited block can claim 12 total and 14 done. Believe the parts.
@@ -263,7 +279,7 @@ function invocationRow(inv: Invocation, plans: PlanSection[], now: number): RunR
     step: findStep(plans, inv.notebookAnchor),
     submittedAt,
     lastPolledAt,
-    summary: inv.summary?.trim() || null,
+    summary,
     galaxyState: null,
     toolId: null,
     unconfirmed: inv.serverVerified === false,
@@ -304,8 +320,16 @@ function jobRow(job: DashboardJob, plans: PlanSection[], now: number): RunRow {
   };
 }
 
-/** Does this row deserve the user's attention right now? */
+/**
+ * Does this row deserve the user's attention right now?
+ *
+ * A cancelled run never does, however its counters read. Cancelling a workflow
+ * deletes its jobs, and rollUpInvocationJobs scores `deleted` alongside `error`
+ * in the same failed_jobs counter -- so without this exception every deliberate
+ * cancel arrives here dressed as a failure.
+ */
 export function needsAttention(row: RunRow): boolean {
+  if (row.state === "cancelled" || row.state === "skipped") return false;
   return row.state === "failed" || row.jobs.failed > 0;
 }
 
@@ -356,7 +380,7 @@ const STATE_WORD: Readonly<Record<RunState, string>> = {
   failed: "Failed",
   cancelled: "Cancelled",
   skipped: "Skipped",
-  unknown: "Working",
+  unknown: "In progress",
 };
 
 /**
@@ -441,25 +465,33 @@ export function describeRun(row: RunRow, now: number): string {
 
   switch (row.state) {
     case "failed":
-      if (row.jobs.total > 1) {
+      if (row.kind === "job") return "Failed. Ask the agent what Galaxy reported.";
+      if (row.jobs.failed > 0 && row.jobs.total > 1) {
         return `Failed -- ${row.jobs.failed} of ${row.jobs.total} jobs errored, ${row.jobs.done} succeeded.`;
       }
-      return "Failed. Ask the agent what Galaxy reported.";
+      if (row.jobs.failed > 0) return "Failed -- its job errored.";
+      // Galaxy can fail an invocation without any job failing, by refusing to
+      // schedule it. "0 of 12 jobs errored" would be nonsense there.
+      return "Failed. No job errored on its own, so Galaxy stopped the workflow.";
     case "running":
       if (row.jobs.failed > 0) {
         return `${plural(row.jobs.failed, "job has", "jobs have")} failed. ${row.jobs.done} finished, ${remaining} still going.`;
       }
       if (counts) return `Running -- ${counts}.`;
+      // A single tool run has no job counts and never will; saying Galaxy has
+      // not reported them implies something is missing that is not.
+      if (row.kind === "job") return "Running on Galaxy.";
       return "Running. Galaxy has not reported any job counts yet.";
     case "queued":
-      return row.lastPolledAt === null
-        ? "Submitted. Waiting for Galaxy's first answer."
-        : "Waiting for Galaxy to start it.";
+      return "Waiting for Galaxy to start it.";
     case "stopping":
       return "Stopping. Galaxy is still shutting this down.";
     case "paused":
       return "Paused -- it needs you before it can carry on.";
     case "finished":
+      if (row.jobs.failed > 0) {
+        return `Finished, but ${row.jobs.failed} of ${row.jobs.total} jobs failed.`;
+      }
       if (row.jobs.total > 1) return `Finished -- all ${row.jobs.total} jobs succeeded.`;
       return "Finished.";
     case "cancelled":
@@ -467,6 +499,9 @@ export function describeRun(row: RunRow, now: number): string {
     case "skipped":
       return "Skipped. Its step's condition was not met.";
     default:
+      if (row.kind === "job" && row.galaxyState === null) {
+        return "Still going on Galaxy. Nothing more has been written down about it yet.";
+      }
       return "Still going. Galaxy reported a state this version does not recognise.";
   }
 }
@@ -490,8 +525,12 @@ export function attentionMessage(rows: RunRow[]): string {
     }
     return `"${name}"${where} failed.`;
   }
-  const jobs = bad.reduce((sum, row) => sum + Math.max(1, row.jobs.failed), 0);
-  return `${plural(jobs, "job", "jobs")} failed across ${plural(bad.length, "run", "runs")}.`;
+  // A workflow Galaxy refused to schedule fails with no job errors at all, so
+  // counting jobs there would invent them.
+  const jobs = bad.reduce((sum, row) => sum + row.jobs.failed, 0);
+  return jobs > 0
+    ? `${plural(jobs, "job", "jobs")} failed across ${plural(bad.length, "run", "runs")}.`
+    : `${plural(bad.length, "run", "runs")} failed.`;
 }
 
 /**
@@ -499,8 +538,10 @@ export function attentionMessage(rows: RunRow[]): string {
  * `workflows/invocations/:invocationId/:tab?` and `jobs/:jobId/view`.
  *
  * The server URL comes out of the notebook, so it is treated as hostile: only
- * http(s) survives, and the id is encoded, which turns any `../` into `%2F` and
- * keeps the path under the server we were handed.
+ * http(s) survives, and the id is encoded, so a `/` in it becomes `%2F` and it
+ * can never grow a second path segment. `encodeURIComponent` leaves a dot
+ * alone, so an id of `..` still normalizes away to the prefix -- a dead link,
+ * not an escape, since the origin and any configured path prefix both hold.
  */
 export function galaxyRunUrl(row: RunRow): string | null {
   if (!row.serverUrl || !row.id) return null;
@@ -566,6 +607,11 @@ const STYLE = `
   background: var(--error-bg); color: var(--text); font-size: 12px; line-height: 1.45;
 }
 .dash-jobs-alert-glyph { color: var(--jobs-failed); font-weight: 700; flex-shrink: 0; }
+/* display:flex above is an author rule and beats the UA stylesheet's
+   [hidden] { display: none }, so without this the strip never hides. It works
+   in the real pane only because the dashboard host has its own [hidden] rule;
+   this widget should not need the host to be there. */
+.dash-jobs-alert[hidden] { display: none; }
 .dash-jobs-rows { display: flex; flex-direction: column; }
 .dash-jobs-row { padding: 7px 0; border-bottom: 1px solid var(--border-subtle); }
 .dash-jobs-row:first-child { padding-top: 0; }
@@ -716,7 +762,10 @@ export function metaLine(row: RunRow, now: number): string {
   if (started) bits.push(row.live ? `started ${started}` : `submitted ${started}`);
   const checked = formatAgo(row.lastPolledAt, now);
   if (checked) bits.push(`checked ${checked}`);
-  else if (row.live) bits.push("not checked yet");
+  // An invocation is stamped on every poll, so a missing stamp really does mean
+  // nobody has asked. A job is only stamped when something changed, so the same
+  // gap means the opposite -- we have been asking and the answer is the same.
+  else if (row.live) bits.push(row.kind === "job" ? "no change yet" : "not checked yet");
   if (row.serverHost) bits.push(row.serverHost);
   if (row.unconfirmed) bits.push("unconfirmed by Galaxy");
   return bits.join(" · ");
@@ -774,7 +823,11 @@ function renderRow(row: RunRow, now: number, compact: boolean, openIds: Set<stri
   // longer vouch for.
   const shownState = row.stale ? "unknown" : row.state;
   const state = node("div", `dash-jobs-state state-${shownState}`);
-  state.append(node("span", "dash-jobs-glyph", stateGlyph(shownState)));
+  const glyph = node("span", "dash-jobs-glyph", stateGlyph(shownState));
+  // The word beside it says the same thing; "black circle Running" does not
+  // help anyone listening to this.
+  glyph.setAttribute("aria-hidden", "true");
+  state.append(glyph);
   state.append(document.createTextNode(row.stale ? "Can't tell" : stateWord(row.state)));
   item.append(state);
 
@@ -791,6 +844,7 @@ function renderRow(row: RunRow, now: number, compact: boolean, openIds: Set<stri
     const href = galaxyRunUrl(row);
     if (href) {
       const link = node("a", "dash-jobs-link", "Open in Galaxy ↗");
+      link.dataset.focusKey = `link:${row.id}`;
       link.href = href;
       link.target = "_blank";
       link.rel = "noopener noreferrer";
@@ -805,7 +859,9 @@ function renderRow(row: RunRow, now: number, compact: boolean, openIds: Set<stri
       if (details.open) openIds.add(row.id);
       else openIds.delete(row.id);
     });
-    details.append(node("summary", undefined, "Details"));
+    const summary = node("summary", undefined, "Details");
+    summary.dataset.focusKey = `details:${row.id}`;
+    details.append(summary);
     const list = node("dl");
     for (const [term, value] of detailRows(row, now)) {
       list.append(node("dt", undefined, term));
@@ -816,6 +872,23 @@ function renderRow(row: RunRow, now: number, compact: boolean, openIds: Set<stri
   }
 
   return item;
+}
+
+/** The `data-focus-key` of whatever inside `root` has focus, if anything does. */
+function focusedKeyIn(root: HTMLElement): string | null {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement) || !root.contains(active)) return null;
+  return active.dataset.focusKey ?? null;
+}
+
+function restoreFocus(root: HTMLElement, key: string | null): void {
+  if (!key) return;
+  for (const candidate of root.querySelectorAll<HTMLElement>("[data-focus-key]")) {
+    if (candidate.dataset.focusKey === key) {
+      candidate.focus({ preventScroll: true });
+      return;
+    }
+  }
 }
 
 function emptyCard(hidden: number, onShowAll: () => void): HTMLElement {
@@ -840,6 +913,7 @@ function emptyCard(hidden: number, onShowAll: () => void): HTMLElement {
     ),
   );
   const button = node("button", "dash-panel-btn", "Show everything");
+  button.dataset.focusKey = "show-all";
   button.type = "button";
   button.addEventListener("click", onShowAll);
   card.append(button);
@@ -880,6 +954,10 @@ export const jobsWidget: WidgetDefinition<JobsConfig> = {
       config.show === "all"
         ? "Showing every run. Click to show only what is running or failed."
         : "Showing what is running or failed. Click to show every run.";
+    // "all" on its own is not an accessible name, and a toggle has to say which
+    // way it is set. The title is a tooltip and AT does not reliably read it.
+    showBtn.setAttribute("aria-label", "Show every run");
+    showBtn.setAttribute("aria-pressed", String(config.show === "all"));
     showBtn.classList.toggle("active", config.show === "all");
     showBtn.addEventListener("click", () =>
       ctx.setConfig({ show: config.show === "all" ? "active" : "all" }),
@@ -908,25 +986,41 @@ export const jobsWidget: WidgetDefinition<JobsConfig> = {
       const failing = rows.filter(needsAttention).length;
       badge.textContent = String(failing > 0 ? failing : active);
       badge.className = `dash-jobs-count${failing > 0 ? " bad" : active === 0 ? " zero" : ""}`;
-      badge.title =
+      const badgeText =
         failing > 0
           ? `${plural(failing, "run needs", "runs need")} your attention`
           : `${plural(active, "run is", "runs are")} still going`;
+      badge.title = badgeText;
+      // Otherwise its accessible name is a bare digit.
+      badge.setAttribute("aria-label", badgeText);
+
+      // The whole list is rebuilt on every notebook push, and the poller
+      // rewrites the notebook every fifteen seconds while a workflow is live.
+      // Anything the user was in the middle of has to survive that: the
+      // disclosures are handled by openIds, and these two are the rest of it.
+      // Without the focus restore a keyboard user gets fifteen seconds per
+      // attempt to reach the Galaxy link.
+      const focusKey = focusedKeyIn(body);
+      const scrollTop = container.scrollTop;
 
       body.textContent = "";
       if (shown.length === 0) {
         body.append(emptyCard(rows.length, () => ctx.setConfig({ show: "all" })));
-        return;
+      } else {
+        const list = node("div", "dash-jobs-rows");
+        for (const row of shown.slice(0, config.limit)) {
+          list.append(renderRow(row, now, config.compact, openIds));
+        }
+        body.append(list);
+
+        const hidden = shown.length - Math.min(shown.length, config.limit);
+        if (hidden > 0) body.append(node("p", "dash-jobs-more", `${hidden} more not shown.`));
       }
 
-      const list = node("div", "dash-jobs-rows");
-      for (const row of shown.slice(0, config.limit)) {
-        list.append(renderRow(row, now, config.compact, openIds));
-      }
-      body.append(list);
-
-      const hidden = shown.length - Math.min(shown.length, config.limit);
-      if (hidden > 0) body.append(node("p", "dash-jobs-more", `${hidden} more not shown.`));
+      restoreFocus(body, focusKey);
+      // After the focus restore, which can scroll on its own in some browsers
+      // however politely it is asked not to.
+      container.scrollTop = scrollTop;
     };
 
     ctx.subscribe(ctx.sources.invocations, (next) => {
