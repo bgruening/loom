@@ -68,6 +68,9 @@ export function getDashboardPath(): string | null {
   return path.join(path.dirname(notebook), DASHBOARD_FILENAME);
 }
 
+const CHANGED_SINCE =
+  "The dashboard has changed since that edit, so undoing it would discard the newer layout. Nothing was changed.";
+
 const NO_SESSION =
   "No analysis directory yet -- the dashboard file lives beside notebook.md, and this session has no notebook.";
 
@@ -79,14 +82,14 @@ const NO_SESSION =
  * planted at this name would turn a background layout save into a write to
  * whatever it points at.
  */
-async function refuseSymlink(filePath: string): Promise<string | null> {
+async function refuseSymlink(filePath: string, checkSize = true): Promise<string | null> {
   try {
     const st = await fsp.lstat(filePath);
     if (st.isSymbolicLink()) {
       return `${DASHBOARD_FILENAME} is a symbolic link; refusing to read or write through it.`;
     }
-    if (st.isFile() && st.size > DASHBOARD_MAX_BYTES) {
-      return `${DASHBOARD_FILENAME} is larger than ${DASHBOARD_MAX_BYTES} bytes; refusing to read it.`;
+    if (checkSize && st.isFile() && st.size > DASHBOARD_MAX_BYTES) {
+      return `${DASHBOARD_FILENAME} is larger than ${DASHBOARD_MAX_BYTES} bytes; refusing to read it. /dashboard reset will replace it.`;
     }
   } catch {
     // Missing is fine -- that is the no-file-yet case.
@@ -111,8 +114,17 @@ async function readRaw(filePath: string): Promise<string | null> {
   }
 }
 
-function unreadable(err: unknown): string {
-  return `Could not read ${DASHBOARD_FILENAME}: ${err instanceof Error ? err.message : String(err)}`;
+/**
+ * Describe a filesystem failure without the filesystem's own words.
+ *
+ * An errno message carries the absolute path, and for a failed rename it also
+ * carries the scratch filename, which is the one thing about this writer worth
+ * keeping to ourselves. Every other message here names only the basename; these
+ * should too.
+ */
+function fsFailure(verb: string, err: unknown): string {
+  const code = (err as NodeJS.ErrnoException)?.code;
+  return `Could not ${verb} ${DASHBOARD_FILENAME}${code ? ` (${code})` : ""}.`;
 }
 
 /** Read and validate the layout, falling back to the default document. */
@@ -127,7 +139,7 @@ export async function readDashboardDocument(): Promise<DashboardReadResult> {
   try {
     raw = await readRaw(filePath);
   } catch (err) {
-    return { ok: false, error: unreadable(err) };
+    return { ok: false, error: fsFailure("read", err) };
   }
   if (raw === null) {
     return {
@@ -181,6 +193,13 @@ type UndoEntry = { path: string; previous: string | null; wrote: string };
 const undoStack: UndoEntry[] = [];
 
 function pushUndo(entry: UndoEntry): void {
+  // A new analysis directory makes every older entry unreachable -- undo only
+  // ever acts on the file it is looking at -- and keeping them around means the
+  // first undo someone types in the new directory pops a stranger's entry and
+  // reports a change they never made.
+  for (let i = undoStack.length - 1; i >= 0; i--) {
+    if (undoStack[i].path !== entry.path) undoStack.splice(i, 1);
+  }
   undoStack.push(entry);
   if (undoStack.length > MAX_UNDO_DEPTH) undoStack.shift();
 }
@@ -189,7 +208,12 @@ export function undoDepth(): number {
   return undoStack.length;
 }
 
-/** Session boundary: the stack describes a directory we may no longer be in. */
+/**
+ * Drop the whole stack. `pushUndo` already discards entries for another
+ * directory, so nothing in the product needs this; it is here so a test can
+ * start from a known state, and so a future session_start hook has somewhere
+ * obvious to call.
+ */
 export function resetDashboardUndo(): void {
   undoStack.length = 0;
 }
@@ -263,10 +287,7 @@ export async function updateDashboardDocument(
     try {
       outcome = await swapInto(filePath, text, current.revision);
     } catch (err) {
-      return {
-        ok: false,
-        error: `Could not write ${DASHBOARD_FILENAME}: ${err instanceof Error ? err.message : String(err)}`,
-      };
+      return { ok: false, error: fsFailure("write", err) };
     }
     if (outcome === "conflict") continue;
 
@@ -281,6 +302,61 @@ export async function updateDashboardDocument(
     ok: false,
     error: "The dashboard file kept changing while it was being updated; nothing was written.",
   };
+}
+
+/**
+ * Replace the layout outright, without reading what is there first.
+ *
+ * The one path that must survive a file the reader refuses -- over the size
+ * cap, or corrupt beyond repair -- because it is the documented way out of
+ * exactly that state. There is no compare-and-swap here by design: the caller
+ * is a user typing `/dashboard reset`, which means "whatever is there, I want
+ * the default", and a conflict check would just refuse them again.
+ *
+ * Undo still works when the old file can be held in memory. When it cannot, the
+ * change is recorded as un-undoable rather than as "there was no file", because
+ * the latter would have undo delete a file it never created.
+ */
+export async function replaceDashboardDocument(
+  document: DashboardDocument,
+): Promise<DashboardWriteResult & { undoable?: boolean }> {
+  const filePath = getDashboardPath();
+  if (!filePath) return { ok: false, error: NO_SESSION };
+
+  // The size cap is skipped -- that is the point -- but a symlink is still
+  // refused, because "the user asked for it" does not extend to a file of
+  // theirs somewhere else.
+  const refusal = await refuseSymlink(filePath, false);
+  if (refusal) return { ok: false, error: refusal };
+
+  const text = serializeDashboardDocument(document);
+  if (Buffer.byteLength(text, "utf-8") > DASHBOARD_MAX_BYTES) {
+    return {
+      ok: false,
+      error: `That layout is larger than ${DASHBOARD_MAX_BYTES} bytes; nothing was written.`,
+    };
+  }
+
+  let previous: string | null = null;
+  let undoable = true;
+  try {
+    previous = await readRaw(filePath);
+  } catch {
+    undoable = false;
+  }
+
+  const tmp = tmpPathFor(filePath);
+  try {
+    await fsp.writeFile(tmp, text, { encoding: "utf-8", flag: "wx" });
+    await fsp.rename(tmp, filePath);
+  } catch (err) {
+    await fsp.rm(tmp, { force: true }).catch(() => {});
+    return { ok: false, error: fsFailure("write", err) };
+  }
+
+  const revision = dashboardRevision(text) as string;
+  if (undoable) pushUndo({ path: filePath, previous, wrote: revision });
+  return { ok: true, document, path: filePath, revision, undoable };
 }
 
 export type DashboardUndoResult =
@@ -300,24 +376,32 @@ export async function undoDashboardChange(): Promise<DashboardUndoResult> {
   const refusal = await refuseSymlink(filePath);
   if (refusal) return { ok: false, error: refusal };
 
+  // An entry for another directory can only be here if the notebook moved
+  // mid-session; it can never apply again, and popping it one at a time would
+  // report a stranger's change to whoever types undo next.
+  while (undoStack.length > 0 && undoStack[undoStack.length - 1].path !== filePath) {
+    undoStack.pop();
+  }
+  if (undoStack.length === 0) {
+    return {
+      ok: false,
+      error: "Nothing to undo -- no dashboard change has been made in this analysis.",
+    };
+  }
+
   const entry = undoStack[undoStack.length - 1];
   // Only undo a change that is still the last thing to have happened here. If
-  // the user rearranged the pane afterwards, or the analysis directory moved,
-  // this entry describes a file that no longer exists in that state and
-  // restoring it would throw away work nobody asked us to touch.
+  // the user rearranged the pane afterwards, restoring this would throw away
+  // work nobody asked us to touch.
   let currentRevision: string | null;
   try {
     currentRevision = dashboardRevision(await readRaw(filePath));
   } catch (err) {
-    return { ok: false, error: unreadable(err) };
+    return { ok: false, error: fsFailure("read", err) };
   }
-  if (entry.path !== filePath || currentRevision !== entry.wrote) {
+  if (currentRevision !== entry.wrote) {
     undoStack.pop();
-    return {
-      ok: false,
-      error:
-        "The dashboard has changed since that edit, so undoing it would discard the newer layout. Nothing was changed.",
-    };
+    return { ok: false, error: CHANGED_SINCE };
   }
 
   const previous = entry.previous;
@@ -325,19 +409,17 @@ export async function undoDashboardChange(): Promise<DashboardUndoResult> {
     if (previous === null) {
       await fsp.rm(filePath, { force: true });
     } else {
-      const tmp = tmpPathFor(filePath);
-      await fsp.writeFile(tmp, previous, { encoding: "utf-8", flag: "wx" });
-      try {
-        await fsp.rename(tmp, filePath);
-      } finally {
-        await fsp.rm(tmp, { force: true }).catch(() => {});
+      // Through the same compare-and-swap a normal write uses, so the revision
+      // is re-checked after staging rather than before: checking only up front
+      // leaves a window the width of a whole writeFile for someone else's save
+      // to land and be clobbered by the undo.
+      if ((await swapInto(filePath, previous, entry.wrote)) === "conflict") {
+        undoStack.pop();
+        return { ok: false, error: CHANGED_SINCE };
       }
     }
   } catch (err) {
-    return {
-      ok: false,
-      error: `Could not restore ${DASHBOARD_FILENAME}: ${err instanceof Error ? err.message : String(err)}`,
-    };
+    return { ok: false, error: fsFailure("restore", err) };
   }
 
   undoStack.pop();

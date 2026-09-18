@@ -27,9 +27,9 @@ import {
   isProtectedPanel,
   presetLines,
   provenanceViolations,
+  commitDashboardChange,
   reassertProvenance,
   registerDashboardTools,
-  sandboxWidgetEnabled,
   widgetCatalogLines,
 } from "../extensions/loom/dashboard-tools";
 import {
@@ -113,6 +113,10 @@ describe("registration", () => {
   });
 
   it("tells the model in the write tool's description that it acts only when asked", () => {
+    // Weak on purpose: "only when asked" has no code path to test, because the
+    // whole mechanism IS the sentence in the description. This guards against
+    // someone tidying it away, nothing more -- the tests below carry the
+    // enforcement that does exist.
     const description = tools().get("dashboard_update")!.description;
     expect(description).toContain("Only when the user asks");
     expect(description).toContain("on your own");
@@ -216,7 +220,9 @@ describe("dashboard_update -- the happy paths", () => {
     const added = panels.find((p) => p.widget === "jobs" && p.addedBy === "agent");
     expect(added).toBeTruthy();
     expect(added!.reason).toBe("you asked to watch the alignment run");
-    expect(added!.id).toBe("p-jobs-2"); // the preset already ships a p-jobs
+    // The preset already ships a p-jobs, and the new panel must not land on it.
+    expect(added!.id).not.toBe("p-jobs");
+    expect(new Set(panels.map((p) => p.id)).size).toBe(panels.length);
   });
 
   it("honours position, so 'next to the plan' means next to the plan", async () => {
@@ -361,7 +367,6 @@ describe("dashboard_update -- what it refuses", () => {
   });
 
   it("refuses the sandboxed HTML widget while its flag is off", async () => {
-    expect(sandboxWidgetEnabled()).toBe(false);
     const result = await run("dashboard_update", {
       reason: "why",
       actions: [{ action: "add_panel", widget: "html-sandbox", config: '{"html":"<b>hi</b>"}' }],
@@ -876,5 +881,216 @@ describe("what the model is told", () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain("something to change");
     expect(fs.readFileSync(dashPath, "utf-8")).toBe(before);
+  });
+});
+
+describe("the caps the validator enforces by truncating", () => {
+  const filler = (id: string) => ({
+    id,
+    widget: "jobs" as const,
+    config: {},
+    layout: { span: 1 as const, rows: 2 },
+    addedBy: "agent" as const,
+  });
+
+  it("refuses to add to a full dashboard rather than pushing a panel off the end", async () => {
+    // The validator keeps the FIRST 40, so an insert at the top is what
+    // destroys something -- and it used to come back as a successful add.
+    seed(documentWith(Array.from({ length: 40 }, (_, i) => filler(`p-a${i}`))));
+    const before = fs.readFileSync(dashPath, "utf-8");
+    const result = await run("dashboard_update", {
+      reason: "you asked for the plan too",
+      actions: [{ action: "add_panel", widget: "plan", position: 0 }],
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("full");
+    expect(fs.readFileSync(dashPath, "utf-8")).toBe(before);
+  });
+
+  it("refuses to announce a dashboard the cap would drop", async () => {
+    seed({
+      version: 1,
+      activeId: "d0",
+      dashboards: Array.from({ length: 20 }, (_, i) => ({
+        id: `d${i}`,
+        title: `D${i}`,
+        panels: [],
+      })),
+    });
+    const result = await run("dashboard_update", {
+      reason: "you asked for a monitoring view",
+      actions: [{ action: "create_dashboard", preset: "monitoring", title: "Long run" }],
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("dashboards");
+    expect(onDisk().dashboards.some((d) => d.id === "monitoring")).toBe(false);
+  });
+});
+
+describe("input the schema promised but the model did not send", () => {
+  it("refuses rather than throwing, whatever arrives", async () => {
+    const offSchema: Record<string, unknown>[] = [
+      { reason: 42, actions: [{ action: "add_panel", widget: "jobs" }] },
+      { reason: "r", actions: "boom" },
+      { reason: "r", document: 42 },
+      { reason: "r", actions: [null] },
+      { reason: "r", actions: [{ action: 7 }] },
+    ];
+    for (const params of offSchema) {
+      const result = await run("dashboard_update", params);
+      expect(result.success, JSON.stringify(params)).toBe(false);
+      expect(typeof result.error).toBe("string");
+    }
+    expect(fs.existsSync(dashPath)).toBe(false);
+  });
+
+  it("takes a null title as 'clear it' rather than crashing", async () => {
+    seed(
+      documentWith([
+        {
+          id: "p-jobs",
+          widget: "jobs",
+          title: "Old title",
+          config: {},
+          layout: { span: 1, rows: 2 },
+          addedBy: "agent",
+        },
+      ]),
+    );
+    const result = await run("dashboard_update", {
+      reason: "you asked to make it taller",
+      actions: [{ action: "update_panel", panelId: "p-jobs", title: null, rows: 4 }],
+    });
+    expect(result.success).toBe(true);
+    expect(onDisk().dashboards[0].panels[0].layout.rows).toBe(4);
+  });
+
+  it("accepts a config sent as an object instead of JSON text", async () => {
+    // The schema asks for text because a free-form object is not portable
+    // across providers, but a model that sends the object is not wrong.
+    const result = await run("dashboard_update", {
+      reason: "you asked it to stop scrolling",
+      actions: [{ action: "add_panel", widget: "notebook", config: { follow: false } }],
+    });
+    expect(result.success).toBe(true);
+    const added = onDisk().dashboards[0].panels.find((p) => p.addedBy === "agent");
+    expect(added!.config).toEqual({ follow: false });
+  });
+});
+
+describe("panels the user pinned keep their place", () => {
+  const pinned = {
+    id: "p-pinned",
+    widget: "notebook" as const,
+    config: {},
+    layout: { span: 2 as const, rows: 3 },
+    addedBy: "user" as const,
+    pinned: true,
+  };
+
+  it("will not insert above one, however the model numbers the position", async () => {
+    seed(documentWith([pinned]));
+    const result = await run("dashboard_update", {
+      reason: "you asked to watch the run",
+      actions: [{ action: "add_panel", widget: "jobs", position: 0 }],
+    });
+    expect(result.success).toBe(true);
+    expect(onDisk().dashboards[0].panels.map((p) => p.id)).toEqual(["p-pinned", "p-jobs"]);
+  });
+
+  it("will not move one of its own above one either", async () => {
+    seed(
+      documentWith([
+        pinned,
+        {
+          id: "p-jobs",
+          widget: "jobs",
+          config: {},
+          layout: { span: 1, rows: 2 },
+          addedBy: "agent",
+        },
+      ]),
+    );
+    await run("dashboard_update", {
+      reason: "you asked for the jobs on top",
+      actions: [{ action: "move_panel", panelId: "p-jobs", position: 0 }],
+    });
+    expect(onDisk().dashboards[0].panels.map((p) => p.id)).toEqual(["p-pinned", "p-jobs"]);
+  });
+
+  it("still lets the agent reorder above a panel the user merely placed", async () => {
+    seed(
+      documentWith([
+        { ...pinned, id: "p-theirs", pinned: false },
+        {
+          id: "p-jobs",
+          widget: "jobs",
+          config: {},
+          layout: { span: 1, rows: 2 },
+          addedBy: "agent",
+        },
+      ]),
+    );
+    const result = await run("dashboard_update", {
+      reason: "you asked for the jobs on top",
+      actions: [{ action: "move_panel", panelId: "p-jobs", position: 0 }],
+    });
+    // Reordering a protected panel past another is refused; there is only one
+    // here, so displacing it is allowed -- placing is not pinning.
+    expect(result.success).toBe(true);
+    expect(onDisk().dashboards[0].panels.map((p) => p.id)).toEqual(["p-jobs", "p-theirs"]);
+  });
+});
+
+describe("what a refusal says", () => {
+  it("records the reason on a panel the agent is allowed to change", async () => {
+    seed(
+      documentWith([
+        {
+          id: "p-jobs",
+          widget: "jobs",
+          config: {},
+          layout: { span: 1, rows: 2 },
+          addedBy: "agent",
+          reason: "the original reason",
+        },
+      ]),
+    );
+    await run("dashboard_update", {
+      reason: "you asked to make it taller",
+      actions: [{ action: "update_panel", panelId: "p-jobs", rows: 5 }],
+    });
+    // The tool description promises this; it has to be true.
+    expect(onDisk().dashboards[0].panels[0].reason).toBe("you asked to make it taller");
+  });
+
+  it("never hands the model a filesystem path or the scratch filename", async () => {
+    fs.mkdirSync(dashPath); // a directory where the file should be: rename will fail
+    const result = await run("dashboard_update", {
+      reason: "why",
+      actions: [{ action: "add_panel", widget: "jobs" }],
+    });
+    expect(result.success).toBe(false);
+    expect(String(result.error)).not.toContain(tmpDir);
+    expect(String(result.error)).not.toContain(".tmp.");
+    expect(String(result.error)).toContain(".loom-dashboard.json");
+  });
+
+  it("checks the widget allowlist even for a change the user typed", async () => {
+    // `asUser` relaxes provenance, not what this build can draw -- the day a
+    // preset carries a flag-gated widget, the slash command must refuse too.
+    const outcome = await commitDashboardChange(
+      () => ({
+        ok: true,
+        document: documentWith([
+          { id: "p-x", widget: "html-sandbox", config: {}, layout: { span: 1, rows: 2 } },
+        ]),
+        notes: ["n"],
+      }),
+      { asUser: true },
+    );
+    expect(outcome.ok).toBe(false);
+    expect(outcome.ok === false && outcome.error).toContain("feature flag");
+    expect(fs.existsSync(dashPath)).toBe(false);
   });
 });

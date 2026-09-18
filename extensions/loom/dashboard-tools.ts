@@ -214,8 +214,16 @@ export function reassertProvenance(
         else panel.addedBy = existing.addedBy;
         if (existing.pinned === undefined) delete panel.pinned;
         else panel.pinned = existing.pinned;
-        if (existing.reason === undefined) delete panel.reason;
-        else panel.reason = existing.reason;
+        // The reason is the one provenance field the agent may legitimately
+        // refresh -- it is the sentence the user reads to decide whether the
+        // panel belongs there -- but only on a panel that is the agent's to
+        // change at all. On a protected one it is the user's words.
+        if (isProtectedPanel(existing)) {
+          if (existing.reason === undefined) delete panel.reason;
+          else panel.reason = existing.reason;
+        } else if (panel.reason === undefined && existing.reason !== undefined) {
+          panel.reason = existing.reason;
+        }
       } else {
         panel.addedBy = "agent";
         panel.reason = reason;
@@ -247,6 +255,36 @@ export function introducedWidgetTypes(
   return [...introduced];
 }
 
+/**
+ * What the validator had to throw away to fit its own caps.
+ *
+ * The build step produces a well-formed document either way -- the action path
+ * from typed inputs, the document path from an already-validated one -- so a
+ * panel or dashboard that comes out the far side missing was truncated at the
+ * 20-dashboard or 40-panel ceiling, not repaired. Counts rather than ids,
+ * because the validator also renames duplicates and a by-id comparison would
+ * call that a loss.
+ *
+ * It matters because truncation keeps the FIRST N: an insert at position 0 into
+ * a full dashboard pushes the last panel off the end, and the model would
+ * otherwise be told its add succeeded.
+ */
+export function truncatedByValidation(
+  proposed: DashboardDocument,
+  validated: DashboardDocument,
+): string | null {
+  if (validated.dashboards.length < proposed.dashboards.length) {
+    return `this layout already holds the most dashboards a layout can have (${validated.dashboards.length}), so the new one would not fit`;
+  }
+  const count = (document: DashboardDocument): number =>
+    document.dashboards.reduce((total, d) => total + d.panels.length, 0);
+  const kept = count(validated);
+  if (kept < count(proposed)) {
+    return `that dashboard is full (${kept} panels), so adding to it would push another panel off the end`;
+  }
+  return null;
+}
+
 /** Refuse a widget type the agent is not allowed to create. */
 export function unsupportedWidgetMessage(type: string): string | null {
   if (creatableWidgetTypes().includes(type)) return null;
@@ -262,17 +300,25 @@ export function unsupportedWidgetMessage(type: string): string | null {
 // Actions
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * One change, as the model sent it.
+ *
+ * Every field is `unknown` on purpose. The schema asks for strings and
+ * integers, but nothing between the model and this function enforces that, and
+ * a `null` where a string was promised must come back as a refusal the model
+ * can read rather than as a TypeError out of the tool.
+ */
 export type DashboardAction = {
-  action: string;
-  dashboardId?: string;
-  panelId?: string;
-  widget?: string;
-  title?: string;
-  config?: string;
-  span?: number;
-  rows?: number;
-  position?: number;
-  preset?: string;
+  action?: unknown;
+  dashboardId?: unknown;
+  panelId?: unknown;
+  widget?: unknown;
+  title?: unknown;
+  config?: unknown;
+  span?: unknown;
+  rows?: unknown;
+  position?: unknown;
+  preset?: unknown;
 };
 
 export type ApplyResult =
@@ -287,8 +333,8 @@ function cloneDocument(document: DashboardDocument): DashboardDocument {
   return JSON.parse(JSON.stringify(document)) as DashboardDocument;
 }
 
-function findDashboard(document: DashboardDocument, id: string | undefined): Dashboard | null {
-  const wanted = (id ?? document.activeId).trim();
+function findDashboard(document: DashboardDocument, id: unknown): Dashboard | null {
+  const wanted = asText(id) || document.activeId;
   return document.dashboards.find((d) => d.id === wanted) ?? null;
 }
 
@@ -320,10 +366,48 @@ function uniqueDashboardId(document: DashboardDocument, base: string): string {
   return `${slug}-${n}`;
 }
 
+/**
+ * A model-supplied string field, or "" for anything else.
+ *
+ * The schema says these are strings, but nothing between the model and here
+ * enforces that: a `null` title or a numeric reason arrives as-is and used to
+ * take `.trim()` with it, throwing out of `execute` instead of coming back as
+ * something the model could correct.
+ */
+function asText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/** Whether the model supplied this field at all, ignoring how badly. */
+function given(value: unknown): boolean {
+  return value !== undefined && value !== null;
+}
+
+function asInteger(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.round(value);
+  if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) {
+    return Math.round(Number(value));
+  }
+  return undefined;
+}
+
 type ParsedConfig = { ok: true; config: Record<string, unknown> } | { ok: false; error: string };
 
-function parseConfig(raw: string | undefined): ParsedConfig {
-  if (raw === undefined || raw.trim() === "") return { ok: true, config: {} };
+function isConfigObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseConfig(raw: unknown): ParsedConfig {
+  if (raw === undefined || raw === null) return { ok: true, config: {} };
+  // The schema asks for JSON text because a free-form object parameter is not
+  // portable across every provider's function-calling schema, but a model that
+  // sends the object itself is being reasonable and should not be punished for
+  // it.
+  if (isConfigObject(raw)) return { ok: true, config: raw };
+  if (typeof raw !== "string") {
+    return { ok: false, error: 'config must be a JSON object, e.g. {"follow":false}' };
+  }
+  if (raw.trim() === "") return { ok: true, config: {} };
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -333,28 +417,39 @@ function parseConfig(raw: string | undefined): ParsedConfig {
       error: `config is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+  if (!isConfigObject(parsed)) {
     return { ok: false, error: 'config must be a JSON object, e.g. {"follow":false}' };
   }
-  return { ok: true, config: parsed as Record<string, unknown> };
+  return { ok: true, config: parsed };
 }
 
-function clampRows(rows: number | undefined): number {
-  if (rows === undefined || !Number.isFinite(rows)) return 2;
-  return Math.min(6, Math.max(1, Math.round(rows)));
+function clampRows(rows: unknown): number {
+  const value = asInteger(rows);
+  return value === undefined ? 2 : Math.min(6, Math.max(1, value));
 }
 
-function clampPosition(position: number | undefined, length: number): number {
-  if (position === undefined || !Number.isFinite(position)) return length;
-  return Math.min(length, Math.max(0, Math.round(position)));
+/**
+ * Where an insert lands, clamped to the grid and to the panels the user pinned.
+ *
+ * `pinned` is the user saying "leave this one alone", and a panel that keeps
+ * its contents but loses the top-left slot has not been left alone. So an agent
+ * insert never goes above a pinned panel, however the model numbers it. Panels
+ * merely placed by the user are not protected this way -- they did not ask for
+ * a fixed spot, and a dashboard that can only ever grow at the bottom is worse.
+ */
+function clampPosition(position: unknown, panels: DashboardPanel[]): number {
+  const floor = panels.reduce((last, panel, i) => (panel.pinned === true ? i + 1 : last), 0);
+  const value = asInteger(position);
+  if (value === undefined) return panels.length;
+  return Math.min(panels.length, Math.max(floor, value));
 }
 
 type Located = { dashboard: Dashboard; panel: DashboardPanel; index: number } | { error: string };
 
 function locatePanel(document: DashboardDocument, action: DashboardAction): Located {
-  const panelId = (action.panelId ?? "").trim();
+  const panelId = asText(action.panelId);
   if (!panelId) return { error: `${action.action} needs a panelId.` };
-  const wanted = action.dashboardId?.trim();
+  const wanted = asText(action.dashboardId) || undefined;
   if (wanted && !document.dashboards.some((d) => d.id === wanted)) {
     return { error: `no dashboard "${wanted}". Have: ${dashboardIds(document)}.` };
   }
@@ -388,6 +483,7 @@ export function applyDashboardActions(
   actions: DashboardAction[],
   reason: string,
 ): ApplyResult {
+  if (!Array.isArray(actions)) return fail("actions must be a list of changes.");
   if (actions.length === 0) return fail("No actions given.");
   if (actions.length > MAX_ACTIONS) {
     return fail(`${actions.length} actions in one call; at most ${MAX_ACTIONS}.`);
@@ -398,13 +494,18 @@ export function applyDashboardActions(
 
   for (const [index, action] of actions.entries()) {
     const at = `actions[${index}]`;
-    switch (action.action) {
+    if (action === null || typeof action !== "object") {
+      return fail(`${at}: expected an object describing one change.`);
+    }
+    switch (asText(action.action)) {
       case "add_panel": {
         const dashboard = findDashboard(next, action.dashboardId);
         if (!dashboard) {
-          return fail(`${at}: no dashboard "${action.dashboardId}". Have: ${dashboardIds(next)}.`);
+          return fail(
+            `${at}: no dashboard "${asText(action.dashboardId)}". Have: ${dashboardIds(next)}.`,
+          );
         }
-        const widget = (action.widget ?? "").trim();
+        const widget = asText(action.widget);
         if (!widget) return fail(`${at}: add_panel needs a widget type.`);
         const config = parseConfig(action.config);
         if (!config.ok) return fail(`${at}: ${config.error}`);
@@ -412,12 +513,13 @@ export function applyDashboardActions(
           id: uniquePanelId(dashboard, widget),
           widget,
           config: config.config,
-          layout: { span: action.span === 2 ? 2 : 1, rows: clampRows(action.rows) },
+          layout: { span: asInteger(action.span) === 2 ? 2 : 1, rows: clampRows(action.rows) },
           addedBy: "agent",
           reason,
         };
-        if (action.title && action.title.trim()) panel.title = action.title.trim();
-        const insertAt = clampPosition(action.position, dashboard.panels.length);
+        const title = asText(action.title);
+        if (title) panel.title = title;
+        const insertAt = clampPosition(action.position, dashboard.panels);
         dashboard.panels.splice(insertAt, 0, panel);
         notes.push(`added ${widget} as "${panel.id}" in "${dashboard.id}"`);
         break;
@@ -435,32 +537,34 @@ export function applyDashboardActions(
         const found = locatePanel(next, action);
         if ("error" in found) return fail(`${at}: ${found.error}`);
         if (
-          action.widget === undefined &&
-          action.title === undefined &&
-          action.config === undefined &&
-          action.span === undefined &&
-          action.rows === undefined
+          !given(action.widget) &&
+          !given(action.title) &&
+          !given(action.config) &&
+          !given(action.span) &&
+          !given(action.rows)
         ) {
           // Reporting "updated" for a call that changed nothing would have the
           // model tell the user their dashboard moved when it did not.
           return fail(`${at}: update_panel needs something to change.`);
         }
         const panel = found.panel;
-        if (action.widget && action.widget.trim()) panel.widget = action.widget.trim();
-        if (action.title !== undefined) {
-          const title = action.title.trim();
+        const newWidget = asText(action.widget);
+        if (newWidget) panel.widget = newWidget;
+        if (given(action.title)) {
+          const title = asText(action.title);
           if (title) panel.title = title;
           else delete panel.title;
         }
-        if (action.config !== undefined) {
+        if (given(action.config)) {
           const config = parseConfig(action.config);
           if (!config.ok) return fail(`${at}: ${config.error}`);
           // Merge: a model changing one setting should not silently drop the
           // rest of a panel's config.
           panel.config = { ...panel.config, ...config.config };
         }
-        if (action.span !== undefined) panel.layout.span = action.span === 2 ? 2 : 1;
-        if (action.rows !== undefined) panel.layout.rows = clampRows(action.rows);
+        if (given(action.span)) panel.layout.span = asInteger(action.span) === 2 ? 2 : 1;
+        if (given(action.rows)) panel.layout.rows = clampRows(action.rows);
+        panel.reason = reason;
         notes.push(`updated "${panel.id}" in "${found.dashboard.id}"`);
         break;
       }
@@ -468,16 +572,18 @@ export function applyDashboardActions(
       case "move_panel": {
         const found = locatePanel(next, action);
         if ("error" in found) return fail(`${at}: ${found.error}`);
-        if (action.position === undefined) return fail(`${at}: move_panel needs a position.`);
+        if (asInteger(action.position) === undefined) {
+          return fail(`${at}: move_panel needs a position.`);
+        }
         const [panel] = found.dashboard.panels.splice(found.index, 1);
-        const to = clampPosition(action.position, found.dashboard.panels.length);
+        const to = clampPosition(action.position, found.dashboard.panels);
         found.dashboard.panels.splice(to, 0, panel);
         notes.push(`moved "${panel.id}" to position ${to} in "${found.dashboard.id}"`);
         break;
       }
 
       case "create_dashboard": {
-        const fromPreset = action.preset?.trim();
+        const fromPreset = asText(action.preset) || undefined;
         let dashboard: Dashboard;
         if (fromPreset) {
           const preset = dashboardFromPreset(fromPreset);
@@ -490,10 +596,10 @@ export function applyDashboardActions(
         } else {
           dashboard = { id: "", title: "", panels: [] };
         }
-        const title = (action.title ?? dashboard.title ?? "").trim();
+        const title = asText(action.title) || asText(dashboard.title);
         if (!title) return fail(`${at}: create_dashboard needs a title or a preset.`);
         dashboard.title = title;
-        dashboard.id = uniqueDashboardId(next, action.dashboardId ?? fromPreset ?? title);
+        dashboard.id = uniqueDashboardId(next, asText(action.dashboardId) || fromPreset || title);
         next.dashboards.push(dashboard);
         notes.push(`created dashboard "${dashboard.id}"`);
         break;
@@ -502,7 +608,9 @@ export function applyDashboardActions(
       case "switch_dashboard": {
         const dashboard = findDashboard(next, action.dashboardId);
         if (!dashboard) {
-          return fail(`${at}: no dashboard "${action.dashboardId}". Have: ${dashboardIds(next)}.`);
+          return fail(
+            `${at}: no dashboard "${asText(action.dashboardId)}". Have: ${dashboardIds(next)}.`,
+          );
         }
         next.activeId = dashboard.id;
         notes.push(`showing "${dashboard.id}"`);
@@ -511,7 +619,7 @@ export function applyDashboardActions(
 
       default:
         return fail(
-          `${at}: unknown action "${action.action}". Use add_panel, remove_panel, update_panel, move_panel, create_dashboard or switch_dashboard.`,
+          `${at}: unknown action "${asText(action.action)}". Use add_panel, remove_panel, update_panel, move_panel, create_dashboard or switch_dashboard.`,
         );
     }
   }
@@ -546,9 +654,14 @@ type Refusal = { error: string; problems?: DashboardProblem[] };
  */
 export async function commitDashboardChange(
   build: (current: DashboardDocument, exists: boolean) => ApplyResult,
-  options: { enforceProvenance?: boolean; reason?: string } = {},
+  options: { asUser?: boolean; reason?: string } = {},
 ): Promise<CommitOutcome> {
-  const enforce = options.enforceProvenance !== false;
+  // `asUser` means a person typed this, so the panels they placed are theirs to
+  // discard. It does NOT relax the widget allowlist: whether this build can
+  // draw a widget is a fact about the build, not about who asked, and a preset
+  // that one day carries a flag-gated widget must not install it through the
+  // slash command either.
+  const enforce = options.asUser !== true;
   const buildReason = options.reason ?? "";
   // A holder rather than plain locals: the callback below runs inside the
   // store's retry loop, and what it learns has to survive back out here.
@@ -586,15 +699,23 @@ export async function commitDashboardChange(
     seen.problems = [...(built.problems ?? []), ...validated.problems];
     seen.notes = built.notes;
 
-    if (enforce) {
-      for (const type of introducedWidgetTypes(current, validated.document)) {
-        const message = unsupportedWidgetMessage(type);
-        if (message) {
-          seen.refusal = { error: `${message} Nothing was changed.` };
-          return { ok: false, error: seen.refusal.error };
-        }
-      }
+    const truncated = truncatedByValidation(proposed, validated.document);
+    if (truncated) {
+      seen.refusal = {
+        error: `Nothing was changed: ${truncated}. Remove something first.`,
+      };
+      return { ok: false, error: seen.refusal.error };
+    }
 
+    for (const type of introducedWidgetTypes(current, validated.document)) {
+      const message = unsupportedWidgetMessage(type);
+      if (message) {
+        seen.refusal = { error: `${message} Nothing was changed.` };
+        return { ok: false, error: seen.refusal.error };
+      }
+    }
+
+    if (enforce) {
       const violations = provenanceViolations(current, validated.document);
       if (violations.length > 0) {
         seen.refusal = {
@@ -823,11 +944,19 @@ export function registerDashboardTools(pi: ExtensionAPI): void {
       ),
     }),
     async execute(_toolCallId, params) {
-      const reason = (params.reason ?? "").trim();
-      const actions = (params.actions ?? []) as DashboardAction[];
-      const documentText = params.document;
-
+      const raw = params as Record<string, unknown>;
+      const reason = asText(raw.reason);
       if (!reason) return toolFailure("reason is required: say why the user wants this change.");
+
+      if (given(raw.actions) && !Array.isArray(raw.actions)) {
+        return toolFailure("actions must be a list of changes.");
+      }
+      if (given(raw.document) && typeof raw.document !== "string") {
+        return toolFailure("document must be the whole layout as JSON text.");
+      }
+      const actions = (Array.isArray(raw.actions) ? raw.actions : []) as DashboardAction[];
+      const documentText = typeof raw.document === "string" ? raw.document : undefined;
+
       if (actions.length > 0 && documentText !== undefined) {
         return toolFailure("Pass either actions or document, not both.");
       }

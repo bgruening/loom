@@ -286,3 +286,75 @@ describe("/dashboard in the terminal", () => {
     expect(text).toContain("no notebook");
   });
 });
+
+describe("/dashboard reset is the escape hatch, so it must not need the old file", () => {
+  function oversize(): void {
+    fs.writeFileSync(
+      dashPath,
+      JSON.stringify({ version: 1, activeId: "d", dashboards: [], pad: "z".repeat(300_000) }),
+      "utf-8",
+    );
+  }
+
+  it("replaces a layout too large for anything else to read", async () => {
+    oversize();
+    const { text } = await dash();
+    expect(text).toContain("larger than");
+
+    const reset = await dash("reset");
+    expect(reset.level).toBe("info");
+    expect(reset.text).toContain("reset to the default layout");
+    expect(onDisk().dashboards[0].panels.map((p) => p.id)).toEqual([
+      "p-notebook",
+      "p-jobs",
+      "p-plan",
+    ]);
+  });
+
+  it("can still put the oversized one back", async () => {
+    oversize();
+    const before = fs.readFileSync(dashPath, "utf-8");
+    await dash("reset");
+    await dash("undo");
+    expect(fs.readFileSync(dashPath, "utf-8")).toBe(before);
+  });
+
+  it("still refuses a symlink, because the user did not ask for a file of theirs", async () => {
+    fs.writeFileSync(path.join(tmpDir, "secret.json"), "untouched", "utf-8");
+    fs.symlinkSync(path.join(tmpDir, "secret.json"), dashPath);
+    const { text, level } = await dash("reset");
+    expect(level).toBe("error");
+    expect(text).toContain("symbolic link");
+    expect(fs.readFileSync(path.join(tmpDir, "secret.json"), "utf-8")).toBe("untouched");
+  });
+});
+
+describe("undo after the analysis directory changes", () => {
+  it("undoes this analysis's change, not a leftover from the last one", async () => {
+    await agentAdds("jobs", "in the first analysis");
+    const firstDir = tmpDir;
+
+    const secondDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-dashboard-command-2-"));
+    try {
+      fs.writeFileSync(path.join(secondDir, "notebook.md"), "# notebook\n", "utf-8");
+      setNotebookPath(path.join(secondDir, "notebook.md"));
+      const secondDash = path.join(secondDir, DASHBOARD_FILENAME);
+
+      await agentAdds("plan", "in the second analysis");
+      expect(fs.existsSync(secondDash)).toBe(true);
+
+      // The first undo here must undo THIS analysis, not report a change the
+      // user never made in it.
+      const { text } = await dash("undo");
+      expect(text).toContain("default layout");
+      expect(fs.existsSync(secondDash)).toBe(false);
+
+      const again = await dash("undo");
+      expect(again.text).toContain("Nothing to undo");
+      // And the other analysis was never touched.
+      expect(fs.existsSync(path.join(firstDir, DASHBOARD_FILENAME))).toBe(true);
+    } finally {
+      fs.rmSync(secondDir, { recursive: true, force: true });
+    }
+  });
+});

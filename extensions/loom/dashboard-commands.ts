@@ -28,7 +28,11 @@ import {
   logDashboardChange,
   summarizeDocument,
 } from "./dashboard-tools";
-import { readDashboardDocument, undoDashboardChange } from "./dashboard-store";
+import {
+  readDashboardDocument,
+  replaceDashboardDocument,
+  undoDashboardChange,
+} from "./dashboard-store";
 
 const USAGE =
   "Usage: /dashboard (show the layout) | /dashboard preset <name> | /dashboard reset | /dashboard undo";
@@ -103,7 +107,7 @@ async function applyPreset(ctx: ExtensionContext, presetId: string): Promise<voi
       next.activeId = preset.id;
       return { ok: true, document: next, notes: [`applied the ${preset.id} preset`] };
     },
-    { enforceProvenance: false },
+    { asUser: true },
   );
 
   if (!outcome.ok) {
@@ -121,28 +125,29 @@ async function applyPreset(ctx: ExtensionContext, presetId: string): Promise<voi
   );
 }
 
+/**
+ * The documented way out of a layout nothing else can cope with, so it must not
+ * depend on being able to read that layout: a file past the size cap, or
+ * corrupt in a way the validator refuses, is exactly when someone types this.
+ * That means no compare-and-swap either -- "whatever is there, give me the
+ * default" has nothing to conflict with.
+ */
 async function resetLayout(ctx: ExtensionContext): Promise<void> {
-  let discarded = "";
-  const outcome = await commitDashboardChange(
-    (current) => {
-      discarded = discardNote(current);
-      return {
-        ok: true,
-        document: createDefaultDashboardDocument(),
-        notes: ["reset to the default layout"],
-      };
-    },
-    { enforceProvenance: false },
-  );
+  const before = await readDashboardDocument();
+  const discarded = before.ok ? discardNote(before.document) : "";
 
+  const outcome = await replaceDashboardDocument(createDefaultDashboardDocument());
   if (!outcome.ok) {
     ctx.ui.notify(outcome.error, "error");
     return;
   }
-  logDashboardChange(outcome.path, outcome.notes, "/dashboard reset");
+  logDashboardChange(outcome.path, ["reset to the default layout"], "/dashboard reset");
   ctx.ui.notify(
     ["Dashboard reset to the default layout.", ...summarizeDocument(outcome.document)].join("\n") +
       discarded +
+      (outcome.undoable === false
+        ? "\nThe layout it replaced was too large to hold, so this one cannot be undone."
+        : "") +
       `\n${landedLine()}`,
     "info",
   );
