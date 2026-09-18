@@ -402,9 +402,15 @@ describe("plan widget -- hostile and odd input", () => {
     h.notebook(stray);
     // Whatever the host makes of a stray CR, the panel must make the same
     // thing of it: a step the plan panel shows and the notebook panel does not
-    // is worse than both of them being wrong the same way.
-    const hostSteps = parsePlanSections(stray)[0]?.steps ?? [];
-    expect(h.el.querySelectorAll(".dash-row-item").length).toBe(hostSteps.length);
+    // is worse than both of them being wrong the same way. Asserting against
+    // the parser alone proves nothing, because the parser is what feeds the
+    // widget and both sides move together -- so the count is written down.
+    // As it happens the host drops the line: `.` does not match a lone CR, so
+    // the step pattern never anchors. Written down rather than derived, so a
+    // change on either side of the boundary has to be looked at.
+    expect(parsePlanSections(stray)[0]?.steps ?? []).toHaveLength(0);
+    expect(h.el.querySelectorAll(".dash-row-item")).toHaveLength(0);
+    expect(has(h, "No steps written down yet")).toBe(true);
   });
 
   it("drops no step when the heading carries no routing tag", () => {
@@ -783,13 +789,26 @@ describe("plan widget -- lifecycle", () => {
     expect(h.header.querySelectorAll("button")).toHaveLength(0);
   });
 
-  it("never writes to the notebook", () => {
+  it("asks the host to persist a header change rather than acting on it itself", () => {
+    // The old shape of this test asserted that clicking around left the
+    // notebook source untouched, which no widget could fail: `DataSource`
+    // exposes only get/subscribe, so there is nothing to write through. What
+    // is worth pinning is that the two header buttons go through setConfig --
+    // the host owns persistence -- and that idly opening an older plan does
+    // not, because reading should never write to the layout file.
     const h = harness({ plan: "all" });
     planWidget.mount(h.el, h.ctx);
     h.notebook(TWO_PLANS);
+
     h.buttons().forEach((b) => b.click());
+    expect(h.setConfig.mock.calls.map(([patch]) => patch)).toEqual([
+      { showCompleted: false },
+      { plan: "latest" },
+    ]);
+
+    h.setConfig.mockClear();
     (h.el.querySelector(".dash-plan-older-row") as HTMLButtonElement | null)?.click();
-    expect(h.sources.sources.notebook.get().markdown).toBe(TWO_PLANS);
+    expect(h.setConfig).not.toHaveBeenCalled();
   });
 
   it("shows the empty state before anything has been pushed, and says nothing else", () => {

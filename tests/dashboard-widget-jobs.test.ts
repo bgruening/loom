@@ -299,21 +299,32 @@ describe("state folding", () => {
   });
 
   it("gives every state a word and a glyph, so colour is never the only signal", () => {
-    const states: RunState[] = [
-      "running",
-      "queued",
-      "stopping",
-      "paused",
-      "finished",
-      "failed",
-      "cancelled",
-      "skipped",
-      "unknown",
-    ];
-    for (const state of states) {
-      expect(stateWord(state), state).toBeTruthy();
-      expect(stateGlyph(state), state).toBeTruthy();
+    // Written out rather than looped over `toBeTruthy`: the point of the glyphs
+    // is that the panel is legible in greyscale and to someone who cannot
+    // separate red from green, and a truthiness check over a Record whose keys
+    // TypeScript already guarantees passes just as happily with the ✓ and the ✕
+    // swapped. Every pair below is the one a reader has to be able to rely on.
+    const vocabulary: Record<RunState, [string, string]> = {
+      running: ["Running", "●"],
+      queued: ["Waiting for Galaxy", "○"],
+      stopping: ["Stopping", "◐"],
+      paused: ["Paused", "⏸"],
+      finished: ["Finished", "✓"],
+      failed: ["Failed", "✕"],
+      cancelled: ["Cancelled", "⊘"],
+      skipped: ["Skipped", "⊘"],
+      unknown: ["In progress", "?"],
+    };
+    for (const [state, [word, glyph]] of Object.entries(vocabulary) as Array<
+      [RunState, [string, string]]
+    >) {
+      expect(stateWord(state), state).toBe(word);
+      expect(stateGlyph(state), state).toBe(glyph);
     }
+    // The three that must never be confused for one another are also the three
+    // that share a colour family in the stylesheet.
+    const distinct = new Set([stateGlyph("finished"), stateGlyph("failed"), stateGlyph("running")]);
+    expect(distinct.size).toBe(3);
     expect(stateWord("nonsense" as RunState)).toBe("In progress");
     expect(stateGlyph("nonsense" as RunState)).toBe("?");
   });
