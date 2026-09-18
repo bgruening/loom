@@ -275,6 +275,11 @@ export class DashboardHost implements DashboardHostApi {
   ): WidgetDispose | null {
     const unsubscribes: Unsubscribe[] = [];
     let failed = false;
+    // A widget that keeps `ctx` past its dispose -- in a timer, an await, a
+    // stray callback -- would otherwise re-subscribe to a source nobody will
+    // ever unsubscribe it from, or re-render the dashboard from a panel that
+    // no longer exists.
+    let disposed = false;
 
     const teardown = (): void => {
       while (unsubscribes.length) {
@@ -288,7 +293,7 @@ export class DashboardHost implements DashboardHostApi {
     };
 
     const fail = (err: unknown): void => {
-      if (failed) return;
+      if (failed || disposed) return;
       failed = true;
       console.error(`[dashboard] widget "${def.type}" failed:`, err);
       teardown();
@@ -303,12 +308,16 @@ export class DashboardHost implements DashboardHostApi {
       config: { ...def.defaultConfig, ...panel.config },
       sources: this.sources,
       header: actions,
-      setConfig: (patch) => this.updatePanelConfig(panel.id, patch),
+      setConfig: (patch) => {
+        if (disposed) return;
+        this.updatePanelConfig(panel.id, patch);
+      },
       subscribe: <T>(
         source: DataSource<T>,
         listener: (value: T) => void,
         opts?: { immediate?: boolean },
       ): Unsubscribe => {
+        if (disposed) return () => {};
         const guarded = (value: T): void => {
           if (failed) return;
           try {
@@ -334,6 +343,7 @@ export class DashboardHost implements DashboardHostApi {
     }
 
     return () => {
+      disposed = true;
       teardown();
       try {
         widgetDispose?.();

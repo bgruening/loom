@@ -240,6 +240,31 @@ describe("lifecycle", () => {
     expect(updates).toBe(1);
   });
 
+  it("neutralizes a context a widget kept past its own dispose", () => {
+    let kept: Parameters<WidgetDefinition["mount"]>[1] | undefined;
+    let late = 0;
+    registry.register(
+      stubWidget("a", (_el, ctx) => {
+        kept = ctx;
+      }),
+    );
+    const host = makeHost();
+    host.setDocument(doc("a"), { persist: false });
+    const before = host.getDocument();
+    host.dispose();
+
+    // Everything the stale context can reach must now be inert.
+    kept!.subscribe(kept!.sources.notebook, () => {
+      late++;
+    });
+    sources.setNotebook("after dispose");
+    kept!.setConfig({ sneaky: true });
+    kept!.fail(new Error("too late"));
+
+    expect(late).toBe(0);
+    expect(host.getDocument()).toEqual(before);
+  });
+
   it("clears the container and stops updates on dispose", () => {
     let updates = 0;
     registry.register(
