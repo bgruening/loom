@@ -493,14 +493,45 @@ describe("results widget", () => {
     expect(h.el.querySelector("img")).toBeNull();
   });
 
-  it("says so instead of drawing a lie once waiting has not helped", () => {
+  it("says what it actually knows once waiting has not helped", () => {
     vi.useFakeTimers();
     try {
       const h = harness({}, { available: false });
       resultsWidget.mount(h.el, h.ctx);
       vi.advanceTimersByTime(2000);
-      expect(h.el.querySelector(".dash-results-empty")?.textContent).toContain("cannot list");
+      const text = h.el.querySelector(".dash-results-empty")?.textContent ?? "";
+      expect(text).toContain("Nothing has been listed for this analysis");
+      // Not "this shell cannot list the analysis folder": the same window's
+      // File pane lists it, and a directory with nothing in it yet looks
+      // exactly like a shell with no listing from in here.
+      expect(text).not.toContain("cannot list the analysis folder");
       expect(h.el.querySelector("img")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("goes back to looking when the listing is reset for a new analysis", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      resultsWidget.mount(h.el, h.ctx);
+      // Spend the first grace period, so the latch is the thing under test
+      // rather than a timer that has not fired yet.
+      vi.advanceTimersByTime(2000);
+      await h.setFiles(tree([file("plot.png")]));
+      expect(h.el.querySelector("img")).not.toBeNull();
+
+      // What /new and every cwd switch do. The grace used to be a one-way
+      // latch, so the reset went straight to a claim about the shell on a
+      // window that had just finished listing a folder.
+      h.sources.reset();
+      expect(h.el.querySelector(".dash-results-empty")?.textContent).toContain("Looking for");
+
+      vi.advanceTimersByTime(2000);
+      expect(h.el.querySelector(".dash-results-empty")?.textContent).toContain(
+        "Nothing has been listed",
+      );
     } finally {
       vi.useRealTimers();
     }

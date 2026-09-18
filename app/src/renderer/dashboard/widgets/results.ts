@@ -72,9 +72,11 @@ const MAX_GLOB_VARIANTS = 16;
 const MAX_LIMIT = 60;
 /**
  * How long a listing may take before the panel stops saying it is looking.
- * The files source reports "not available" both before the host has asked the
- * shell and in a shell that has no listing at all, and only time tells them
- * apart from in here. A host that marked the second case would be better.
+ * The files source reports "not available" before the host has asked the
+ * shell, in a shell that has no listing at all, and for the moment after a
+ * reset -- and only time tells them apart from in here. A host that marked the
+ * second case would be better; `FilesSnapshot` wants an `exists` alongside
+ * `available`, and the log panel needs the same thing for the same reason.
  */
 const LISTING_GRACE_MS = 1200;
 
@@ -492,6 +494,8 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
     // a console rather than a card in the user's face.
     let warnedAboutReads = false;
     let graceExpired = false;
+    let wasAvailable = false;
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
     ctx.onDispose(() => controller.abort());
 
     const config = readResultsConfig(ctx.config);
@@ -608,10 +612,16 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
     };
 
     const draw = (snapshot: FilesSnapshot): void => {
-      // `available: false` covers two different things: the host has not asked
-      // the shell yet, and the shell has no listing to give. Announcing "this
-      // shell cannot list the analysis folder" while a large workspace is still
-      // being walked is a lie the desktop user would see on every startup.
+      // `available: false` covers three different things: the host has not
+      // asked the shell yet, the shell has no listing to give, and the source
+      // was just reset for a new analysis. Announcing anything about the shell
+      // while a large workspace is still being walked is a lie the desktop user
+      // would see on every startup, so a fresh `false` buys a grace period --
+      // including a `false` that arrives after a `true`, which is what /new and
+      // every cwd switch produce and what used to walk straight past a latch
+      // that only ever expired once.
+      if (wasAvailable && !snapshot.available) armGrace();
+      wasAvailable = snapshot.available;
       const listing = snapshot.available ? "on" : graceExpired ? "off" : "pending";
       const files = collectResultFiles(snapshot.root);
       const pinnedFile = pinned ? (files.find((f) => f.relPath === config.path) ?? null) : null;
@@ -653,7 +663,12 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
             "dash-results-empty",
             listing === "pending"
               ? "Looking for the files in this analysis."
-              : "This shell cannot list the analysis folder yet, so results cannot be shown here.",
+              : // Which of the three it is, the panel cannot tell -- and it is
+                // the shell's own File pane that would say otherwise, so the
+                // old wording claimed a missing capability on a window that
+                // reads files perfectly well.
+                "Nothing has been listed for this analysis. Either nothing has been written yet, " +
+                  "or this window cannot list the folder.",
           ),
         );
         return;
@@ -672,14 +687,19 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
       for (const file of selection.shown) list.append(renderEntry(file, token));
     };
 
-    const graceTimer = setTimeout(() => {
-      graceExpired = true;
-      const snapshot = ctx.sources.files.get();
-      if (snapshot.available) return;
-      signature = "";
-      draw(snapshot);
-    }, LISTING_GRACE_MS);
+    function armGrace(): void {
+      clearTimeout(graceTimer);
+      graceExpired = false;
+      graceTimer = setTimeout(() => {
+        graceExpired = true;
+        const snapshot = ctx.sources.files.get();
+        if (snapshot.available) return;
+        signature = "";
+        draw(snapshot);
+      }, LISTING_GRACE_MS);
+    }
     ctx.onDispose(() => clearTimeout(graceTimer));
+    armGrace();
 
     ctx.subscribe(ctx.sources.files, draw);
 

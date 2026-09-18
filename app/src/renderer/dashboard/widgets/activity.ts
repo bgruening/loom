@@ -103,9 +103,17 @@ function redactToken(token: string): { text: string; hideNext: boolean } {
 const EMPTY_TEXT =
   "Nothing yet. Every step the agent takes -- a command, a Galaxy run finishing, a decision it " +
   "had to make -- lands here as it happens.";
+/**
+ * `available: false` means three things at once -- the shell has no file read,
+ * the read failed, and activity.jsonl does not exist yet -- and the third is
+ * what every brand-new analysis looks like. Naming the first was a false claim
+ * about the window on the common path, made in the same window whose File pane
+ * was reading files at that moment. Until the source separates them this says
+ * only what is true of all three.
+ */
 const UNAVAILABLE_TEXT =
-  "The analysis log is not readable in this window, so there is nothing to show. It is being " +
-  "written to activity.jsonl next to the notebook either way.";
+  "Nothing to show from the analysis log yet -- either nothing has been written, or this window " +
+  "cannot read it. It is being written to activity.jsonl next to the notebook either way.";
 const NO_MATCH_TEXT = "Nothing in the log matches that filter.";
 
 export type ActivityTone = "info" | "ok" | "failed" | "running" | "blocked" | "unknown";

@@ -730,11 +730,19 @@ describe("truncate", () => {
 // -- mounted behaviour -------------------------------------------------------
 
 describe("mounted activity widget", () => {
-  it("says the log is not readable here instead of drawing an empty log", () => {
+  it("does not claim the window cannot read a log that simply does not exist yet", () => {
+    // `available: false` is what a brand-new analysis looks like -- the read
+    // returned "no such file" -- in the same window whose File pane is reading
+    // files perfectly well, so naming a missing capability was wrong on the
+    // common path. The panel says what is true of every case it cannot tell
+    // apart, and still says where the log is being written.
     const h = harness();
     activityWidget.mount(h.el, h.ctx);
     h.emit([], false);
-    expect(textOf(h)).toContain("not readable in this window");
+    expect(textOf(h)).toContain("Nothing to show from the analysis log yet");
+    expect(textOf(h)).toContain("either nothing has been written, or this window cannot read it");
+    expect(textOf(h)).toContain("activity.jsonl");
+    expect(textOf(h)).not.toContain("not readable in this window");
     expect(h.rows()).toHaveLength(0);
   });
 
@@ -938,7 +946,7 @@ describe("mounted activity widget", () => {
     expect(h.rows()).toHaveLength(1);
     h.emit([], false);
     expect(h.rows()).toHaveLength(0);
-    expect(textOf(h)).toContain("not readable in this window");
+    expect(textOf(h)).toContain("Nothing to show from the analysis log yet");
   });
 
   it("never asks the host to fail the panel over a hostile log", () => {
