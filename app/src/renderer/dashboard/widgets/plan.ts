@@ -34,10 +34,28 @@ type PlanConfig = {
 const EMPTY = "No plan yet -- ask Loom to draft one.";
 
 /**
+ * Which earlier plans each panel has open, by panel id.
+ *
+ * Not in the config, because idly opening an old plan should not write to
+ * disk, and not in the closure, because `setConfig` re-mounts the widget: both
+ * header buttons would otherwise silently collapse everything the reader had
+ * opened. Bounded by the 40 panels a document may hold.
+ */
+const openedByPanel = new Map<string, Set<string>>();
+
+function openedFor(panelId: string): Set<string> {
+  let set = openedByPanel.get(panelId);
+  if (!set) {
+    set = new Set<string>();
+    openedByPanel.set(panelId, set);
+  }
+  return set;
+}
+
+/**
  * The four routing tags the notebook schema defines, in the words of someone
  * who has to decide whether to leave the laptop open. Definitions follow
- * `docs/agent/galaxy-routing.md`; an unrecognised tag is shown as written
- * rather than guessed at.
+ * `docs/agent/galaxy-routing.md`.
  */
 const ROUTING_WORDS: Record<string, string> = {
   galaxy: "Runs on Galaxy",
@@ -85,9 +103,16 @@ function percent(part: number, whole: number): number {
   return Math.max(0, Math.min(100, (part / whole) * 100));
 }
 
+/**
+ * Only the four tags the schema defines become a sentence. The host's heading
+ * parser reads any trailing `[word]` as routing, so `## Plan A: Call variants
+ * on [chrM]` arrives here as routing "chrm" -- saying `Routed "chrm"` would
+ * present a chromosome name to a non-developer as a routing decision. An
+ * unrecognised tag draws no line at all.
+ */
 function routingSentence(routing: string | null): string | null {
   if (!routing) return null;
-  return ROUTING_WORDS[routing.toLowerCase()] ?? `Routed "${routing}"`;
+  return ROUTING_WORDS[routing.toLowerCase()] ?? null;
 }
 
 /**
@@ -100,9 +125,12 @@ function stepRouting(routing: string | null): string | null {
   const trimmed = routing.trim();
   if (!trimmed) return null;
   if (/^local$/i.test(trimmed)) return "On this computer";
-  const galaxy = trimmed.match(/^galaxy\b\s*(.*)$/i);
-  if (galaxy) return galaxy[1] ? `On Galaxy ${galaxy[1]}` : "On Galaxy";
-  return trimmed;
+  const galaxy = trimmed.match(/^galaxy\b(\s*)(.*)$/i);
+  if (!galaxy) return trimmed;
+  if (!galaxy[2]) return "On Galaxy";
+  // `Galaxy, then local` has no gap after the word, so inserting one would
+  // render "On Galaxy , then local".
+  return galaxy[1] ? `On Galaxy ${galaxy[2]}` : `On ${trimmed}`;
 }
 
 function plural(n: number, one: string, many: string): string {
@@ -124,11 +152,15 @@ function summarize(counts: PlanCounts): { text: string; state: string; glyph: st
   if (counts.failed > 0) {
     const what = `${counts.failed} ${plural(counts.failed, "step", "steps")} failed`;
     const left = counts.total - counts.done - counts.failed;
-    const text = left > 0 ? `${what} -- ${left} still to do` : `Finished, but ${what}`;
+    let text: string;
+    if (left > 0) text = `${what} -- ${left} still to do`;
+    // Nothing pending is not the same as finished: every step can have failed.
+    else if (counts.done === 0) text = `${what} -- nothing done`;
+    else text = `Finished, but ${what}`;
     return { text, state: "state-failed", glyph: "✕" };
   }
   if (counts.done >= counts.total) {
-    const what = `all ${counts.total} ${plural(counts.total, "step", "steps")} done`;
+    const what = counts.total === 1 ? "the only step is done" : `all ${counts.total} steps done`;
     return { text: `Finished -- ${what}`, state: "state-done", glyph: "✓" };
   }
   if (counts.done === 0) {
@@ -151,11 +183,16 @@ function summarize(counts: PlanCounts): { text: string; state: string; glyph: st
  * no plans at all. Rather than keep a second parser in step with the host's,
  * re-run the host's own on normalised text. Delete this once `data-sources.ts`
  * splits on `/\r?\n/` -- the source will then be right and the branch is dead.
+ *
+ * Only CRLF pairs are touched. A lone carriage return inside a line -- pasted
+ * terminal output in a step detail, say -- is left exactly where it is, so
+ * this produces the same sections the fixed parser would and the panel can
+ * never disagree with the notebook beside it about what a step says.
  */
 function plansFor(snapshot: PlanSnapshot, ctx: WidgetContext<PlanConfig>): PlanSection[] {
   const markdown = ctx.sources.notebook.get().markdown;
-  if (!markdown.includes("\r")) return snapshot.plans;
-  return parsePlanSections(markdown.replace(/\r\n?/g, "\n"));
+  if (!markdown.includes("\r\n")) return snapshot.plans;
+  return parsePlanSections(markdown.replace(/\r\n/g, "\n"));
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -214,28 +251,27 @@ function stepRow(step: PlanStep): HTMLElement {
   const meta: string[] = [look.word];
   const routing = stepRouting(step.routing);
   if (routing) meta.push(routing);
-  if (meta.length > 0) main.append(el("div", "dash-meta", meta.join(" · ")));
+  main.append(el("div", "dash-meta", meta.join(" · ")));
 
   row.append(main);
   return row;
 }
 
 /**
- * What to do next, or what went wrong. A failure outranks a pending step:
- * pointing someone at step 4 while step 3 is broken is the wrong instruction.
+ * One callout: a failure, or the next thing to do.
+ *
+ * Both get drawn when a plan has both, failure first. A `- [!]` is sticky --
+ * the notebook schema has no way to clear one, and a plan routinely carries an
+ * old failure and keeps going -- so a failure must not stand in for the next
+ * step, and a pending step must not hide a failure.
  */
-function calloutFor(steps: PlanStep[]): HTMLElement | null {
-  const failed = steps.find((step) => step.status === "failed");
-  const next = steps.find((step) => step.status === "pending");
-  const step = failed ?? next;
-  if (!step) return null;
-
+function calloutFor(step: PlanStep, kind: "failed" | "next"): HTMLElement {
+  const failed = kind === "failed";
   const box = el("div", "dash-plan-next");
   if (failed) box.classList.add("is-failed");
 
-  const look = STEP_LOOK[step.status];
   const head = el("div", "dash-plan-next-head");
-  head.append(stateChip(look));
+  head.append(stateChip(STEP_LOOK[step.status]));
   head.append(el("span", "dash-plan-next-label", failed ? "Needs you" : "Next"));
   box.append(head);
 
@@ -244,8 +280,15 @@ function calloutFor(steps: PlanStep[]): HTMLElement | null {
   const routing = stepRouting(step.routing);
   if (routing) box.append(el("div", "dash-meta", routing));
   if (step.detail) box.append(el("div", "dash-plan-next-detail", step.detail));
-  if (!failed && step.verification) {
+  // What still has to become true. On a failed step that is the clearest thing
+  // the notebook has about what went wrong, so it is not suppressed there.
+  if (step.verification) {
     box.append(el("div", "dash-plan-next-detail", `Done when: ${step.verification}`));
+  }
+  // A "Needs you" box with nothing in it but a step number is a call to action
+  // with no action in it.
+  if (failed && !step.detail && !step.verification) {
+    box.append(el("div", "dash-plan-next-detail", "The notebook does not say what went wrong."));
   }
   return box;
 }
@@ -289,10 +332,7 @@ export const planWidget: WidgetDefinition<PlanConfig> = {
     ensureStyles();
     root.classList.add("dash-plan");
 
-    // Which earlier plans the reader has opened. Kept here rather than in the
-    // config so that idly looking at an old plan does not write to disk; a
-    // remount is the only thing that forgets it.
-    const opened = new Set<string>();
+    const opened = openedFor(ctx.panelId);
 
     const showCompleted = ctx.config.showCompleted !== false;
     const scope: PlanConfig["plan"] = ctx.config.plan === "all" ? "all" : "latest";
@@ -318,6 +358,14 @@ export const planWidget: WidgetDefinition<PlanConfig> = {
     scopeBtn.hidden = true;
 
     ctx.header.append(completedBtn, scopeBtn);
+    // Through onDispose, not the returned dispose: that one only owns `root`,
+    // and a widget that fails never gets to return one at all. The host does
+    // rebuild the header slot per render, but relying on that is relying on
+    // host internals the widget is told not to reach for.
+    ctx.onDispose(() => {
+      completedBtn.remove();
+      scopeBtn.remove();
+    });
 
     const body = el("div", "dash-plan-body");
     root.append(body);
@@ -325,7 +373,10 @@ export const planWidget: WidgetDefinition<PlanConfig> = {
     const draw = (snapshot: PlanSnapshot): void => {
       body.textContent = "";
       const plans = plansFor(snapshot, ctx);
-      scopeBtn.hidden = plans.length < 2;
+      // Hidden with one plan, because "all" and "latest" then draw the same
+      // thing -- but never hidden while the config says "all", or a layout
+      // written when there were two plans could not be turned back.
+      scopeBtn.hidden = plans.length < 2 && scope !== "all";
 
       if (plans.length === 0) {
         body.append(el("p", "dash-plan-empty", EMPTY));
@@ -346,10 +397,12 @@ export const planWidget: WidgetDefinition<PlanConfig> = {
       summary.append(glyph, el("span", undefined, verdict.text));
       body.append(summary);
 
-      const callout = calloutFor(current.steps);
-      if (callout) body.append(callout);
+      const failedStep = current.steps.find((step) => step.status === "failed");
+      if (failedStep) body.append(calloutFor(failedStep, "failed"));
+      const nextStep = current.steps.find((step) => step.status === "pending");
+      if (nextStep) body.append(calloutFor(nextStep, "next"));
 
-      body.append(stepList(current.steps, showCompleted));
+      if (current.steps.length > 0) body.append(stepList(current.steps, showCompleted));
 
       if (scope === "all" && plans.length > 1)
         body.append(olderPlans(plans, opened, showCompleted));

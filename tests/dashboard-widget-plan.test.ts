@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { planWidget } from "../app/src/renderer/dashboard/widgets/plan.js";
-import { DashboardSources } from "../app/src/renderer/dashboard/data-sources.js";
+import { DashboardSources, parsePlanSections } from "../app/src/renderer/dashboard/data-sources.js";
 import type { DataSource, WidgetContext } from "../app/src/renderer/dashboard/widget-api.js";
 
 type PlanConfig = { plan: "latest" | "all"; showCompleted: boolean };
@@ -20,7 +20,11 @@ interface Harness {
   buttons(): HTMLButtonElement[];
 }
 
-function harness(config: Partial<PlanConfig> = {}): Harness {
+// The widget keys its expand/collapse state on the panel id, so every harness
+// gets its own unless a test is deliberately re-mounting the same panel.
+let panelSeq = 0;
+
+function harness(config: Partial<PlanConfig> = {}, panelId = `p-plan-${++panelSeq}`): Harness {
   const el = document.createElement("div");
   const header = document.createElement("div");
   document.body.append(el, header);
@@ -29,7 +33,7 @@ function harness(config: Partial<PlanConfig> = {}): Harness {
   const setConfig = vi.fn();
   const fail = vi.fn();
   const ctx = {
-    panelId: "p-plan",
+    panelId,
     config: { ...planWidget.defaultConfig, ...config },
     sources: sources.sources,
     header,
@@ -163,6 +167,21 @@ describe("plan widget -- empty and odd notebooks", () => {
     expect(h.el.querySelectorAll(".dash-row-item").length).toBe(4);
   });
 
+  // Documented limitation, pinned so a change is deliberate: the schema puts
+  // plan steps at the top level and the host's STEP_LINE allows at most one
+  // leading space, so a checkbox nested under another one is not a step to
+  // anything in the product -- the evidence gate and the init gate agree.
+  it("ignores a checkbox nested under a step, the way every other reader does", () => {
+    const md =
+      "## Plan A: Nest [local]\n\n- [ ] 1. **Top**\n  - [x] 1a. **Sub one**\n  - [x] 1b. **Sub two**\n";
+    const h = harness();
+    planWidget.mount(h.el, h.ctx);
+    h.notebook(md);
+    expect(parsePlanSections(md)[0].steps).toHaveLength(1);
+    expect(h.el.querySelectorAll(".dash-row-item").length).toBe(1);
+    expect(has(h, "No steps done yet -- 1 step to do")).toBe(true);
+  });
+
   it("carries the anchor's step through without printing the anchor", () => {
     const h = harness();
     planWidget.mount(h.el, h.ctx);
@@ -253,6 +272,53 @@ describe("plan widget -- the current plan", () => {
     expect(h.text()).not.toContain("still to do");
   });
 
+  it("does not call a plan finished when every step failed", () => {
+    const h = harness();
+    planWidget.mount(h.el, h.ctx);
+    h.notebook("## Plan A: All broken [galaxy]\n\n- [!] 1. **One**\n- [!] 2. **Two**\n");
+    expect(has(h, "2 steps failed -- nothing done")).toBe(true);
+    expect(h.text()).not.toContain("Finished");
+  });
+
+  it("does not say 'all 1 step' for a one-step plan", () => {
+    const h = harness();
+    planWidget.mount(h.el, h.ctx);
+    h.notebook("## Plan A: Single [local]\n\n- [x] 1. **Only**\n");
+    expect(has(h, "Finished -- the only step is done")).toBe(true);
+  });
+
+  // A `- [!]` is sticky: the schema has no way to clear one, so a plan that
+  // worked around a failure carries it for good. The failure must not become
+  // the panel's permanent answer to "what do I do next".
+  it("still calls out the next step when an old failure is not what is blocking", () => {
+    const h = harness();
+    planWidget.mount(h.el, h.ctx);
+    h.notebook(
+      "## Plan A: Moved on [galaxy]\n\n- [!] 1. **Old failure**\n- [x] 2. **Recovered**\n" +
+        "- [ ] 3. **Actually next** -- do this now\n  - Verification: the bam exists\n",
+    );
+    const callouts = Array.from(h.el.querySelectorAll(".dash-plan-next"));
+    expect(callouts).toHaveLength(2);
+    const failure = (callouts[0].textContent ?? "").replace(/\s+/g, " ");
+    const next = (callouts[1].textContent ?? "").replace(/\s+/g, " ");
+    expect(callouts[0].classList.contains("is-failed")).toBe(true);
+    expect(failure).toContain("Needs you");
+    expect(failure).toContain("1. Old failure");
+    expect(next).toContain("Next");
+    expect(next).toContain("3. Actually next");
+    expect(next).toContain("Done when: the bam exists");
+  });
+
+  it("puts something in the failure callout when the notebook gave the step no words", () => {
+    const h = harness();
+    planWidget.mount(h.el, h.ctx);
+    h.notebook("## Plan A: Bare failure [galaxy]\n\n- [!] 1. **Broke**\n");
+    const box = h.el.querySelector(".dash-plan-next.is-failed") as HTMLElement;
+    expect((box.textContent ?? "").replace(/\s+/g, " ")).toContain(
+      "The notebook does not say what went wrong.",
+    );
+  });
+
   it("marks the failed row and gives every row a word, not only a colour", () => {
     const h = harness();
     planWidget.mount(h.el, h.ctx);
@@ -302,11 +368,36 @@ describe("plan widget -- hostile and odd input", () => {
     expect(has(h, "<script>bad()</script>")).toBe(true);
   });
 
-  it("shows an unrecognised routing tag as written instead of guessing", () => {
+  // The host's heading parser reads any trailing [word] as routing, so a title
+  // ending in a bracketed chromosome would otherwise be announced as a routing
+  // decision the agent never made.
+  it("says nothing about routing for a tag that is not one of the four", () => {
     const h = harness();
     planWidget.mount(h.el, h.ctx);
-    h.notebook("## Plan A: Odd [draft]\n\n- [ ] 1. **One**\n");
-    expect(has(h, 'Routed "draft"')).toBe(true);
+    h.notebook("## Plan A: Call variants on [chrM]\n\n- [ ] 1. **One**\n");
+    expect(h.el.querySelector(".dash-plan-routing")).toBeNull();
+    expect(h.text().toLowerCase()).not.toContain("chrm");
+    expect(has(h, "1. One")).toBe(true);
+  });
+
+  it("does not put a space before punctuation when rewording step routing", () => {
+    const h = harness();
+    planWidget.mount(h.el, h.ctx);
+    h.notebook("## Plan A: Mixed [hybrid]\n\n- [ ] 1. **One**\n  - Routing: Galaxy, then local\n");
+    expect(has(h, "On Galaxy, then local")).toBe(true);
+    expect(h.text()).not.toContain("Galaxy ,");
+  });
+
+  it("leaves a lone carriage return to the host's parser instead of second-guessing it", () => {
+    const stray = "## Plan A: Stray [local]\n\n- [ ] 1. **Align** -- wrote out\rput and done\n";
+    const h = harness();
+    planWidget.mount(h.el, h.ctx);
+    h.notebook(stray);
+    // Whatever the host makes of a stray CR, the panel must make the same
+    // thing of it: a step the plan panel shows and the notebook panel does not
+    // is worse than both of them being wrong the same way.
+    const hostSteps = parsePlanSections(stray)[0]?.steps ?? [];
+    expect(h.el.querySelectorAll(".dash-row-item").length).toBe(hostSteps.length);
   });
 
   it("drops no step when the heading carries no routing tag", () => {
@@ -465,6 +556,53 @@ describe("plan widget -- more than one plan", () => {
 });
 
 describe("plan widget -- lifecycle", () => {
+  it("keeps an earlier plan open when its own header buttons re-mount it", () => {
+    const first = harness({ plan: "all" }, "p-same");
+    const dispose = planWidget.mount(first.el, first.ctx);
+    first.notebook(TWO_PLANS);
+    (first.el.querySelector(".dash-plan-older-row") as HTMLButtonElement).click();
+    expect(has(first, "2. Reference index")).toBe(true);
+    // What setConfig does: dispose, then mount the same panel again.
+    dispose?.();
+    const second = harness({ plan: "all", showCompleted: false }, "p-same");
+    planWidget.mount(second.el, second.ctx);
+    second.notebook(TWO_PLANS);
+    expect(second.el.querySelector(".dash-plan-older-row")?.getAttribute("aria-expanded")).toBe(
+      "true",
+    );
+  });
+
+  it("takes its header controls back down through onDispose", () => {
+    const h = harness();
+    const dispose = planWidget.mount(h.el, h.ctx);
+    expect(h.header.querySelectorAll("button")).toHaveLength(2);
+    expect(h.cleanups.length).toBeGreaterThan(0);
+    // The host runs these on the failure path too, where the widget never got
+    // to return a dispose.
+    h.cleanups.forEach((fn) => fn());
+    dispose?.();
+    expect(h.header.querySelectorAll("button")).toHaveLength(0);
+  });
+
+  it("never writes to the notebook", () => {
+    const h = harness({ plan: "all" });
+    planWidget.mount(h.el, h.ctx);
+    h.notebook(TWO_PLANS);
+    h.buttons().forEach((b) => b.click());
+    (h.el.querySelector(".dash-plan-older-row") as HTMLButtonElement | null)?.click();
+    expect(h.sources.sources.notebook.get().markdown).toBe(TWO_PLANS);
+  });
+
+  it("shows the empty state before anything has been pushed, and says nothing else", () => {
+    const h = harness();
+    planWidget.mount(h.el, h.ctx);
+    // A cold source and a workspace with no notebook.md are indistinguishable
+    // here -- app.ts only calls setNotebook when a load returns content -- so
+    // the widget must not invent a loading state it could never leave.
+    expect(h.sources.sources.plan.get().updatedAt).toBe(0);
+    expect(h.text()).toBe("No plan yet -- ask Loom to draft one.");
+  });
+
   it("adds its stylesheet once, however many panels mount", () => {
     const a = harness();
     planWidget.mount(a.el, a.ctx);
