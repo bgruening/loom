@@ -630,7 +630,7 @@ describe("a listing that would be enormous", () => {
       for (let i = 0; i < 9; i++) fs.writeFileSync(path.join(root, `f${i}.txt`), "x");
       fs.symlinkSync(root, path.join(root, "L".repeat(180)));
 
-      const res = await listFilesForWeb(root, undefined, { home: root });
+      const res = await listFilesForWeb(root, { home: root });
       expect(res.ok).toBe(true);
       if (!res.ok) return;
       const bytes = Buffer.byteLength(JSON.stringify(res.root), "utf8");
@@ -643,7 +643,7 @@ describe("a listing that would be enormous", () => {
   it("a cwd at the filesystem root still contains correctly", async () => {
     // `startsWith(cwdReal + sep)` became startsWith("//") there, which matches
     // nothing, so a listing came back holding a single entry.
-    const res = await listFilesForWeb("/", undefined, { home: "/nonexistent", maxEntries: 40 });
+    const res = await listFilesForWeb("/", { home: "/nonexistent", maxEntries: 40 });
     expect(res.ok).toBe(true);
     if (res.ok) expect((res.root.children ?? []).length).toBeGreaterThan(1);
   });
