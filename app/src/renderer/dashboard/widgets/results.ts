@@ -92,10 +92,25 @@ const LISTING_GRACE_MS = 1200;
  * size, so the panel kept showing the previous figure for the rest of the
  * session. Nothing in the widget can detect the rewrite, so the images are
  * re-fetched on a slow tick instead, and only when the file listing has moved
- * since they were drawn: an analysis nobody is touching costs nothing.
+ * since they were drawn.
  *
- * The real fix is an mtime on `FileNode`; the main process already stats every
- * file to fill in the size.
+ * Be honest about what that costs. "The listing has moved" is every
+ * `files:changed` the shell reports, and during an active analysis the brain is
+ * rewriting `notebook.md` and appending to `activity.jsonl` continuously -- so
+ * in practice every drawn image is re-read once per tick for as long as the
+ * session is busy. On an idle analysis it is nothing. A tighter guard is not
+ * available: the one signal that would say "this plot changed" is the one the
+ * listing does not carry.
+ *
+ * **Table previews have the identical bug and are not covered here.** The same
+ * byte count gives `renderTable` the same URL and the same signature, so a
+ * regenerated counts file keeps its old rows. Re-running a table preview means
+ * re-rendering the entry rather than swapping one attribute, which is a bigger
+ * change than this one and wants the real fix instead.
+ *
+ * The real fix is an mtime on `FileNode`. The main process already stats every
+ * file to fill in the size (`app/src/main/files-handler.ts`), and so does the
+ * web file surface, so it is one field and this whole tick goes away.
  */
 const IMAGE_RECHECK_MS = 30_000;
 
@@ -420,9 +435,11 @@ export function artifactUrl(relPath: string, cacheKey?: string | number | null):
 
 /**
  * How far past the budget a body-less response may declare itself and still be
- * worth reading whole. Generous, because a text file is not compressible into
- * exactly its head and a few multiples of 32 KB is nothing; bounded, because
- * the alternative on that path is the whole file.
+ * worth reading whole. Generous, because `content-length` is bytes while the
+ * budget and the slice below it are characters -- a multibyte text file needs
+ * headroom for the two to mean the same thing -- and because a few multiples of
+ * 32 KB is nothing; bounded, because the alternative on that path is the whole
+ * file.
  */
 const NO_BODY_BUDGET_MULTIPLE = 8;
 

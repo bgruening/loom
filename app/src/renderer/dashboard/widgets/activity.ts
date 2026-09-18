@@ -58,11 +58,12 @@ const DETAIL_KEYS_MAX = 40;
  * removed on the way back up -- which cuts cycles correctly and puts no bound
  * at all on sharing: a node reachable by N paths is materialised N times, so a
  * six-deep graph over seven distinct objects blocked the main thread for
- * twenty seconds and then threw out of `JSON.stringify`. `JSON.parse` only
- * ever yields a tree, so activity.jsonl cannot do this today -- but
- * `ActivityEvent.payload` is a plain record in the contract and the galaxy
- * source already establishes brain-pushed in-process payloads, so the bound is
- * cheaper than the assumption.
+ * twenty seconds and then threw out of `JSON.stringify`. Every activity event
+ * this build can see comes from `JSON.parse`, which only ever yields a tree, so
+ * nothing on the wire today can reach it -- but `redactForDisplay` is exported,
+ * `ActivityEvent.payload` is a plain record in the contract, and the dashboard
+ * already has one source the brain pushes in process. The bound costs one
+ * comparison; the assumption costs a frozen window.
  */
 const DETAIL_NODES_MAX = 5000;
 /** Within this many pixels of the bottom still counts as "following". */
