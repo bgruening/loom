@@ -1024,16 +1024,13 @@ export async function checkInvocations(
           };
           autoAction = "completed";
         }
-      } else if (summary.error > 0) {
-        // A failure with work still in flight. Keep the block in_progress so the
-        // rest stays under observation -- terminal blocks are never polled again
-        // -- but say so in the summary and let the poller raise it once.
+      } else {
         // A cancel is not instant: Galaxy moves the invocation to `cancelled`
-        // and then deletes its jobs one at a time, and rollUpInvocationJobs
-        // scores every `deleted` job in the same counter as a real error. Say
-        // which it is, or the renderer has no way to tell a deliberate stop
-        // from a failure for as long as the deletes take, and raises a red
-        // alarm about something the user asked for.
+        // and then deletes its jobs one at a time. Naming it is what lets the
+        // renderer tell a deliberate stop from a failure -- it has no
+        // invocation state to look at, only this sentence -- and without it the
+        // loudest surface in the product raises a red alarm about something the
+        // user asked for.
         const stopping = inv.state === "cancelled" || inv.state === "cancelling";
         const tail =
           activeJobs > 0
@@ -1041,13 +1038,32 @@ export async function checkInvocations(
             : stopping
               ? `waiting for Galaxy to finish the cancel (state: ${inv.state})`
               : `invocation still scheduling (state: ${inv.state})`;
-        transition = {
-          status: "in_progress",
-          summary: stopping
-            ? `Workflow cancelling: ${summary.error} job(s) stopped, ${tail}`
-            : `Workflow in progress: ${summary.error} job(s) failed, ${tail}`,
-        };
-        autoAction = stopping ? "cancelling" : "failing";
+        if (stopping) {
+          // Deliberately not gated on the failed counter. Right after a cancel
+          // every job is still running, so nothing has landed in it yet -- and
+          // that is exactly the window where the panel would otherwise say the
+          // run is going along fine.
+          //
+          // "did not finish" rather than "failed" because the counter cannot
+          // tell the two apart: rollUpInvocationJobs scores a `deleted` job
+          // beside a genuinely errored one, so a run that broke and was then
+          // cancelled has both in the same number. It is the word the panel
+          // itself uses for a stopping row.
+          transition = {
+            status: "in_progress",
+            summary: `Workflow cancelling: ${summary.error} job(s) did not finish, ${tail}`,
+          };
+          autoAction = "cancelling";
+        } else if (summary.error > 0) {
+          // A failure with work still in flight. Keep the block in_progress so
+          // the rest stays under observation -- terminal blocks are never polled
+          // again -- but say so in the summary and let the poller raise it once.
+          transition = {
+            status: "in_progress",
+            summary: `Workflow in progress: ${summary.error} job(s) failed, ${tail}`,
+          };
+          autoAction = "failing";
+        }
       }
 
       // Always update the block — even if the rolled-up status didn't

@@ -253,7 +253,7 @@ describe("checkInvocations completion predicate", () => {
 
     expect(entry.autoAction).toBe("cancelling");
     expect(notebook).toContain("status: in_progress");
-    expect(notebook).toContain("Workflow cancelling: 1 job(s) stopped, 1 still running");
+    expect(notebook).toContain("Workflow cancelling: 1 job(s) did not finish, 1 still running");
   });
 
   it("does not call a cancel that is nearly done a scheduling problem", async () => {
@@ -264,8 +264,33 @@ describe("checkInvocations completion predicate", () => {
     const { entry, notebook } = await poll("cancelling", ["deleted", "deleted"]);
 
     expect(entry.autoAction).toBe("cancelling");
-    expect(notebook).toContain("Workflow cancelling: 2 job(s) stopped, waiting for Galaxy");
+    expect(notebook).toContain("Workflow cancelling: 2 job(s) did not finish, waiting for Galaxy");
     expect(notebook).not.toContain("still scheduling");
+  });
+
+  it("names the cancel before any job has been deleted, not only after", async () => {
+    // The moment the user cancels, Galaxy flips the invocation while the jobs
+    // are still running -- so nothing has landed in the failed counter yet.
+    // Gating the cancel wording on that counter left this first window saying
+    // the run was going along fine.
+    const { entry, notebook } = await poll("cancelled", ["running", "running"]);
+
+    expect(entry.autoAction).toBe("cancelling");
+    expect(notebook).toContain("Workflow cancelling: 0 job(s) did not finish, 2 still running");
+    expect(foldInvocationState("in_progress", "Workflow cancelling: 0 job(s) did not finish")).toBe(
+      "stopping",
+    );
+  });
+
+  it("does not call a deleted job and an errored one by the same word", async () => {
+    // rollUpInvocationJobs scores a `deleted` job in the same counter as a
+    // genuinely errored one, so a run that broke and was then cancelled has
+    // both in that number and the brain cannot say which is which. "did not
+    // finish" is true of both, and is the word the panel uses for this row.
+    const { notebook } = await poll("cancelled", ["error", "deleted", "deleting"]);
+
+    expect(notebook).toContain("2 job(s) did not finish");
+    expect(notebook).not.toContain("job(s) failed");
   });
 
   it("writes a cancelling summary the jobs panel actually reads as stopping", async () => {
