@@ -88,6 +88,9 @@ const ONE_PLAN = `# Notebook
   - Verification: VCF header and record counts
 `;
 
+/** Plan A with nothing left to do, so a later draft is the one being worked on. */
+const ONE_PLAN_FINISHED = ONE_PLAN.replace(/- \[ \]/g, "- [x]");
+
 const TWO_PLANS = `${ONE_PLAN}
 ## Plan B: Tissue comparison [galaxy]
 
@@ -467,74 +470,100 @@ describe("plan widget -- header controls", () => {
 });
 
 describe("plan widget -- more than one plan", () => {
-  it("shows the last plan in the notebook, not the first", () => {
+  // The rule is "the plan being worked on", not "the last one written down".
+  // The agent drafts a follow-up while the current plan is still running, so
+  // the last-one rule put an untouched draft at the top of the dashboard while
+  // the jobs panel below it reported a failure in the plan actually running.
+  it("shows the plan being worked on, not an untouched draft below it", () => {
     const h = harness();
     planWidget.mount(h.el, h.ctx);
     h.notebook(TWO_PLANS);
-    const title = h.el.querySelector(".dash-plan-title")?.textContent;
-    expect(title).toBe("Plan B: Tissue comparison");
-    expect(has(h, "No steps done yet -- 2 steps to do")).toBe(true);
+    expect(h.el.querySelector(".dash-plan-title")?.textContent).toBe(
+      "Plan A: chrM Variant Calling",
+    );
+    expect(has(h, "In progress -- 2 of 4 steps done")).toBe(true);
   });
 
-  it("leaves the earlier plans out entirely on the default config", () => {
+  it("moves on to the draft once the plan above it is finished", () => {
+    const h = harness();
+    planWidget.mount(h.el, h.ctx);
+    h.notebook(
+      `${ONE_PLAN_FINISHED}\n## Plan B: Tissue comparison [galaxy]\n\n- [ ] 1. **Normalise counts**\n`,
+    );
+    expect(h.el.querySelector(".dash-plan-title")?.textContent).toBe("Plan B: Tissue comparison");
+  });
+
+  it("falls back to the last plan when none has been started", () => {
+    const h = harness();
+    planWidget.mount(h.el, h.ctx);
+    h.notebook(
+      "## Plan A: First [local]\n\n- [ ] 1. **Alpha**\n\n## Plan B: Second [local]\n\n- [ ] 1. **Beta**\n",
+    );
+    expect(h.el.querySelector(".dash-plan-title")?.textContent).toBe("Plan B: Second");
+  });
+
+  it("leaves the other plans out entirely on the default config", () => {
     const h = harness();
     planWidget.mount(h.el, h.ctx);
     h.notebook(TWO_PLANS);
     expect(h.el.querySelector(".dash-plan-older")).toBeNull();
-    expect(h.text()).not.toContain("chrM Variant Calling");
+    expect(h.text()).not.toContain("Tissue comparison");
   });
 
-  it("lists the earlier plans collapsed, newest first, when asked for all", () => {
+  it("lists the other plans collapsed, newest first, when asked for all", () => {
     const h = harness({ plan: "all" });
     planWidget.mount(h.el, h.ctx);
     h.notebook(`${TWO_PLANS}\n## Plan C: Follow-up [local]\n\n- [ ] 1. **One**\n`);
-    expect(h.el.querySelector(".dash-plan-title")?.textContent).toBe("Plan C: Follow-up");
+    // Plan A is the one in progress; B and C are both untouched drafts below it.
+    expect(h.el.querySelector(".dash-plan-title")?.textContent).toBe(
+      "Plan A: chrM Variant Calling",
+    );
     const rows = Array.from(h.el.querySelectorAll(".dash-plan-older-row"));
     expect(rows.map((r) => r.querySelector(".dash-row-title")?.textContent)).toEqual([
+      "Plan C: Follow-up",
       "Plan B: Tissue comparison",
-      "Plan A: chrM Variant Calling",
     ]);
-    expect(has(h, "2 earlier plans")).toBe(true);
+    expect(has(h, "2 other plans")).toBe(true);
     for (const row of rows) expect(row.getAttribute("aria-expanded")).toBe("false");
-    // Collapsed means collapsed: no earlier plan's steps on screen.
-    expect(h.text()).not.toContain("Reference index");
+    // Collapsed means collapsed: no other plan's steps on screen.
+    expect(h.text()).not.toContain("Normalise counts");
   });
 
-  it("puts the state word for an earlier plan in the button's name, not only in a glyph", () => {
+  it("puts the state word for another plan in the button's name, not only in a glyph", () => {
     const h = harness({ plan: "all" });
     planWidget.mount(h.el, h.ctx);
     h.notebook(TWO_PLANS);
     const row = h.el.querySelector(".dash-plan-older-row") as HTMLButtonElement;
     expect(row.getAttribute("aria-label")).toBe(
-      "Plan A: chrM Variant Calling -- In progress -- 2 of 4 steps done",
+      "Plan B: Tissue comparison -- No steps done yet -- 2 steps to do",
     );
   });
 
-  it("expands an earlier plan in place and collapses it again", () => {
+  it("expands another plan in place and collapses it again", () => {
     const h = harness({ plan: "all" });
     planWidget.mount(h.el, h.ctx);
     h.notebook(TWO_PLANS);
     const row = h.el.querySelector(".dash-plan-older-row") as HTMLButtonElement;
-    expect(row.querySelector(".dash-plan-older-count")?.textContent).toBe("2/4");
+    expect(row.querySelector(".dash-plan-older-count")?.textContent).toBe("0/2");
     row.click();
     expect(row.getAttribute("aria-expanded")).toBe("true");
-    expect(has(h, "2. Reference index")).toBe(true);
-    expect(has(h, "Part on Galaxy, part on this computer")).toBe(true);
+    expect(has(h, "2. Plot")).toBe(true);
+    expect(has(h, "Runs on Galaxy")).toBe(true);
     row.click();
     expect(row.getAttribute("aria-expanded")).toBe("false");
-    expect(h.text()).not.toContain("Reference index");
+    expect(h.text()).not.toContain("2. Plot");
   });
 
-  it("keeps an expanded earlier plan open across a notebook update", () => {
+  it("keeps an expanded plan open across a notebook update", () => {
     const h = harness({ plan: "all" });
     planWidget.mount(h.el, h.ctx);
     h.notebook(TWO_PLANS);
     (h.el.querySelector(".dash-plan-older-row") as HTMLButtonElement).click();
-    expect(has(h, "2. Reference index")).toBe(true);
-    h.notebook(TWO_PLANS.replace("- [ ] 1. **Normalise counts**", "- [x] 1. **Normalise counts**"));
-    expect(has(h, "In progress -- 1 of 2 steps done")).toBe(true);
+    expect(has(h, "2. Plot")).toBe(true);
+    h.notebook(TWO_PLANS.replace("- [ ] 3. **Read alignment**", "- [x] 3. **Read alignment**"));
+    expect(has(h, "In progress -- 3 of 4 steps done")).toBe(true);
     expect(h.el.querySelector(".dash-plan-older-row")?.getAttribute("aria-expanded")).toBe("true");
-    expect(has(h, "2. Reference index")).toBe(true);
+    expect(has(h, "2. Plot")).toBe(true);
   });
 
   it("tells two same-named plans apart when one is expanded", () => {

@@ -96,6 +96,32 @@ function countSteps(steps: PlanStep[]): PlanCounts {
   return { total: steps.length, done, failed };
 }
 
+/**
+ * Which plan the panel is about.
+ *
+ * "The last one written down" is the obvious rule and it is wrong in the case
+ * this panel exists for. The agent drafts a follow-up plan while the current
+ * one is still running, so a notebook whose Plan A just failed at step 3 very
+ * often has an untouched Plan B underneath it -- and the last-one rule then
+ * puts "no steps done yet" at the top of the dashboard while the jobs panel
+ * directly below reports the failure. The two panels contradict each other and
+ * the wrong one is first.
+ *
+ * So: the last plan that has been started and is not finished, which is the one
+ * being worked on. If none is -- everything finished, or nothing begun -- fall
+ * back to the last one, which is right for both of those. The rest stay
+ * reachable through "older".
+ */
+export function currentPlan(plans: PlanSection[]): PlanSection {
+  for (let i = plans.length - 1; i >= 0; i--) {
+    const counts = countSteps(plans[i].steps);
+    const started = counts.done > 0 || counts.failed > 0;
+    const finished = counts.total > 0 && counts.done === counts.total;
+    if (started && !finished) return plans[i];
+  }
+  return plans[plans.length - 1];
+}
+
 function percent(part: number, whole: number): number {
   if (whole <= 0) return 0;
   return Math.max(0, Math.min(100, (part / whole) * 100));
@@ -359,8 +385,7 @@ export const planWidget: WidgetDefinition<PlanConfig> = {
         return;
       }
 
-      // The schema appends new plans at the bottom, so the last one is current.
-      const current = plans[plans.length - 1];
+      const current = currentPlan(plans);
       const counts = countSteps(current.steps);
       const verdict = summarize(counts);
 
@@ -381,7 +406,7 @@ export const planWidget: WidgetDefinition<PlanConfig> = {
       if (current.steps.length > 0) body.append(stepList(current.steps, showCompleted));
 
       if (scope === "all" && plans.length > 1)
-        body.append(olderPlans(plans, opened, showCompleted));
+        body.append(olderPlans(plans, current, opened, showCompleted));
     };
 
     ctx.subscribe(ctx.sources.plan, draw);
@@ -394,27 +419,32 @@ export const planWidget: WidgetDefinition<PlanConfig> = {
 };
 
 /**
- * Earlier plans, newest first, collapsed. Each is a real button with
- * `aria-expanded` so the keyboard and a screen reader get the same affordance
- * the mouse does.
+ * The plans this panel is not currently about, newest first, collapsed. Each is
+ * a real button with `aria-expanded` so the keyboard and a screen reader get
+ * the same affordance the mouse does.
+ *
+ * "Other" rather than "earlier": the plan on show is the one being worked on,
+ * which is not always the last one written down, so a draft below it lands
+ * here too.
  */
 function olderPlans(
   plans: PlanSection[],
+  current: PlanSection,
   opened: Set<string>,
   showCompleted: boolean,
 ): HTMLElement {
   const wrap = el("div", "dash-plan-older");
-  const earlier = plans.slice(0, -1);
+  const others = plans.filter((plan) => plan !== current);
   wrap.append(
     el(
       "div",
       "dash-plan-older-head dash-meta",
-      `${earlier.length} earlier ${plural(earlier.length, "plan", "plans")}`,
+      `${others.length} other ${plural(others.length, "plan", "plans")}`,
     ),
   );
 
-  for (let i = earlier.length - 1; i >= 0; i--) {
-    const plan = earlier[i];
+  for (let i = others.length - 1; i >= 0; i--) {
+    const plan = others[i];
     // Plan ids are slugged from the heading and two plans can slug alike, so
     // the open/closed key carries the position as well.
     const key = `${i}:${plan.title}`;
