@@ -760,12 +760,17 @@ describe("changes the editor did not make", () => {
     build();
     expect(host.getDocument()).toEqual(createDefaultDashboardDocument());
 
+    // By widget, not by position: this test is about a config change being
+    // recorded, and should not fail because the preset was reordered.
+    const notebookConfig = (): unknown =>
+      host.getDocument().dashboards[0].panels.find((p) => p.widget === "notebook")?.config;
+
     act("widget-toggle").click();
-    expect(host.getDocument().dashboards[0].panels[0].config).toEqual({ follow: false });
+    expect(notebookConfig()).toEqual({ follow: false });
     startEditing();
     expect(root.querySelector(".dash-editor-note")!.hasAttribute("hidden")).toBe(false);
     act("undo").click();
-    expect(host.getDocument().dashboards[0].panels[0].config).toEqual({ follow: true });
+    expect(notebookConfig()).toEqual({ follow: true });
   });
 
   it("records every change after that one", () => {

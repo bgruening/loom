@@ -170,9 +170,9 @@ describe("/dashboard", () => {
     // The user is allowed to discard their own panels -- but is told.
     expect(text).toContain("replaced 1 panel(s) you had placed");
     expect(onDisk().dashboards[0].panels.map((p) => p.id)).toEqual([
-      "p-notebook",
-      "p-jobs",
       "p-plan",
+      "p-jobs",
+      "p-notebook",
     ]);
   });
 
@@ -305,9 +305,9 @@ describe("/dashboard reset is the escape hatch, so it must not need the old file
     expect(reset.level).toBe("info");
     expect(reset.text).toContain("reset to the default layout");
     expect(onDisk().dashboards[0].panels.map((p) => p.id)).toEqual([
-      "p-notebook",
-      "p-jobs",
       "p-plan",
+      "p-jobs",
+      "p-notebook",
     ]);
   });
 

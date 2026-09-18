@@ -21,9 +21,12 @@ describe("presets", () => {
     expect(DASHBOARD_FILENAME).toBe(".loom-dashboard.json");
   });
 
-  it("ships a current-analysis preset of notebook + jobs + plan", () => {
+  it("ships a current-analysis preset of plan + jobs + notebook, in that order", () => {
+    // Order is the product decision, not an accident: someone opening the tab
+    // asks "where are we", then "what is Galaxy doing", and only then wants the
+    // notebook, which is a markdown dump and owns the next tab along anyway.
     const preset = dashboardFromPreset("current-analysis");
-    expect(preset?.panels.map((p) => p.widget)).toEqual(["notebook", "jobs", "plan"]);
+    expect(preset?.panels.map((p) => p.widget)).toEqual(["plan", "jobs", "notebook"]);
   });
 
   it("marks preset panels as coming from a preset", () => {

@@ -65,7 +65,7 @@ describe("rendering", () => {
     expect(root.querySelectorAll(".dash-panel")).toHaveLength(3);
     expect(
       [...root.querySelectorAll(".dash-panel")].map((p) => (p as HTMLElement).dataset.widget),
-    ).toEqual(["notebook", "jobs", "plan"]);
+    ).toEqual(["plan", "jobs", "notebook"]);
   });
 
   it("expresses both span and rows as grid spans, not a CSS height", () => {
