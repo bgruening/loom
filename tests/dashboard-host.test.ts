@@ -179,6 +179,22 @@ describe("failure isolation", () => {
     expect(calls).toBe(1);
   });
 
+  it("takes a failed widget's header controls down with it", () => {
+    registry.register(
+      stubWidget("a", (_el, ctx) => {
+        ctx.header.append(document.createElement("button"));
+        ctx.subscribe(ctx.sources.notebook, (snap) => {
+          if (snap.markdown) throw new Error("later");
+        });
+      }),
+    );
+    const host = makeHost();
+    host.setDocument(doc("a"), { persist: false });
+    expect(root.querySelectorAll(".dash-panel-actions button")).toHaveLength(1);
+    sources.setNotebook("go");
+    expect(root.querySelectorAll(".dash-panel-actions button")).toHaveLength(0);
+  });
+
   it("lets a widget declare its own failure through ctx.fail", () => {
     registry.register(
       stubWidget("self", (_el, ctx) => {
@@ -298,6 +314,36 @@ describe("document management", () => {
     host.setDocument(doc("a"), { persist: false });
     expect(host.getDocument().dashboards[0].panels[0].config).toEqual({ follow: false });
     expect(persist).toHaveBeenCalled();
+  });
+
+  it("does not duplicate panels when a widget reconfigures itself during mount", () => {
+    let mounts = 0;
+    registry.register(
+      stubWidget("a", (_el, ctx) => {
+        mounts++;
+        if (mounts === 1) ctx.setConfig({ ready: true });
+      }),
+    );
+    registry.register(stubWidget("b", () => {}));
+    const host = makeHost();
+    host.setDocument(doc("a", "b"), { persist: false });
+
+    expect(root.querySelectorAll(".dash-panel")).toHaveLength(2);
+    expect(host.getDocument().dashboards[0].panels[0].config).toEqual({ ready: true });
+  });
+
+  it("gives up rather than spinning when a widget reconfigures itself every mount", () => {
+    let mounts = 0;
+    registry.register(
+      stubWidget("a", (_el, ctx) => {
+        mounts++;
+        ctx.setConfig({ n: mounts });
+      }),
+    );
+    const host = makeHost();
+    host.setDocument(doc("a"), { persist: false });
+    expect(mounts).toBeLessThanOrEqual(4);
+    expect(root.querySelectorAll(".dash-panel")).toHaveLength(1);
   });
 
   it("merges the panel config over the widget's defaults", () => {

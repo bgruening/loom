@@ -44,6 +44,9 @@ export interface DashboardHostOptions {
   persist?: (document: DashboardDocument) => void;
 }
 
+/** How many times one render may be restarted by a widget reconfiguring itself. */
+const MAX_RENDER_PASSES = 3;
+
 interface MountedPanel {
   panel: DashboardPanel;
   dispose(): void;
@@ -81,6 +84,8 @@ export class DashboardHost implements DashboardHostApi {
   private gridEl: HTMLElement;
   private mounted: MountedPanel[] = [];
   private editorCtx: DashboardEditorContext | null = null;
+  private rendering = false;
+  private renderQueued = false;
 
   constructor(
     private root: HTMLElement,
@@ -157,7 +162,38 @@ export class DashboardHost implements DashboardHostApi {
 
   // ── Rendering ─────────────────────────────────────────────────────────────
 
+  /**
+   * A widget is allowed to call `ctx.setConfig` from inside its own `mount`,
+   * which re-enters here while the grid is half-built. Running that nested
+   * render would clear the grid under the outer loop and leave duplicate
+   * panels behind, so queue it and drain after. The pass cap stops a widget
+   * that reconfigures itself on every mount from spinning forever.
+   */
   render(): void {
+    if (this.rendering) {
+      this.renderQueued = true;
+      return;
+    }
+    this.rendering = true;
+    try {
+      let passes = 0;
+      do {
+        this.renderQueued = false;
+        this.renderOnce();
+        passes++;
+      } while (this.renderQueued && passes < MAX_RENDER_PASSES);
+      if (this.renderQueued) {
+        console.error(
+          "[dashboard] a widget keeps reconfiguring itself on mount; stopped redrawing",
+        );
+      }
+    } finally {
+      this.rendering = false;
+      this.renderQueued = false;
+    }
+  }
+
+  private renderOnce(): void {
     this.disposePanels();
     this.gridEl.textContent = "";
 
@@ -256,6 +292,8 @@ export class DashboardHost implements DashboardHostApi {
       failed = true;
       console.error(`[dashboard] widget "${def.type}" failed:`, err);
       teardown();
+      // Its header controls belong to a widget that is no longer running.
+      actions.textContent = "";
       body.textContent = "";
       body.append(this.errorCard(def.type, messageFor(err)));
     };

@@ -60,6 +60,12 @@ export function initDashboard(container: HTMLElement): DashboardBootstrap {
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let pending: DashboardDocument | null = null;
 
+  const cancelPendingSave = (): void => {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = null;
+    pending = null;
+  };
+
   const flush = (): void => {
     saveTimer = null;
     const doc = pending;
@@ -128,6 +134,10 @@ export function initDashboard(container: HTMLElement): DashboardBootstrap {
       void sources.refreshFiles();
     },
     reloadForCwd: () => {
+      // A save queued against the previous analysis must not land in the new
+      // one: the shell resolves the filename against whatever cwd is current
+      // by the time the write happens.
+      cancelPendingSave();
       sources.reset();
       // Back to the default first: the new workspace may have no layout of its
       // own, and `load` returning early must not leave the old one on screen.
