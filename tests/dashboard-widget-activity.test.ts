@@ -399,6 +399,40 @@ describe("redaction", () => {
     expect(text).toContain("https://usegalaxy.org");
   });
 
+  it("hides a credential inside the one arg shape the log actually writes", () => {
+    // `bash` is not in activity-hooks' NOISY_TOOLS, its args are
+    // `{command: "<the whole command line>"}`, and redactArgs there matches key
+    // names only -- so `command` is not a credential key and the whole line
+    // reached the log. The array fence guards a shape nothing writes; this is
+    // the shape everything writes.
+    const line = (cmd: string): string => JSON.stringify(redactForDisplay({ command: cmd }));
+
+    expect(line("curl -H 'Authorization: Bearer sk-live-t0ken' https://example.org")).not.toContain(
+      "sk-live-t0ken",
+    );
+    expect(line("curl --api-key abc123xyz https://example.org")).not.toContain("abc123xyz");
+    expect(line("export GALAXY_API_KEY=deadbeefcafe && run.sh")).not.toContain("deadbeefcafe");
+    // The command is still readable -- the reader can see what ran.
+    expect(line("curl --api-key abc123xyz https://example.org")).toContain("https://example.org");
+    expect(line("export GALAXY_API_KEY=deadbeefcafe && run.sh")).toContain("GALAXY_API_KEY");
+  });
+
+  it("leaves an ordinary command and an ordinary listing completely alone", () => {
+    // The regression this fence has already had once: matching a credential
+    // stem against any bare word blanked `results.csv` because `monkey.png`
+    // came before it. Every string below contains a stem (`key` in monkey and
+    // keygen, `session` in session1) and none of them is a credential.
+    const same = (value: unknown): void => expect(redactForDisplay(value)).toEqual(value);
+
+    same({ command: "ls -la results/ && head -5 monkey.png results.csv" });
+    same({ command: "python keygen.py --out session1.dat" });
+    same({ outputs: ["monkey.png", "results.csv"] });
+    same({ files: ["session1", "session2", "session3"] });
+    // Prose is not a command line: a colon with nothing after it must not
+    // reach across the space and blank the next word.
+    same({ text: "Authorization: failed, retrying against the staging server" });
+  });
+
   it("cuts a cycle instead of blowing the stack", () => {
     const payload: Record<string, unknown> = { name: "loop" };
     payload.self = payload;

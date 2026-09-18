@@ -266,12 +266,12 @@ describe("state folding", () => {
     // terminal branch, so for the whole of that window the panel sees
     // in_progress with a failed count -- which is the one shape the cancel
     // exception used to miss.
-    expect(foldInvocationState("in_progress", "Workflow cancelling: 9 job(s) deleted")).toBe(
+    expect(foldInvocationState("in_progress", "Workflow cancelling: 9 job(s) did not finish")).toBe(
       "stopping",
     );
     const row = rowFor({
       status: "in_progress",
-      summary: "Workflow cancelling: 9 job(s) deleted, 3 still going",
+      summary: "Workflow cancelling: 9 job(s) did not finish, 3 still running",
       completedJobs: 0,
       failedJobs: 9,
       totalJobs: 12,
@@ -297,7 +297,7 @@ describe("state folding", () => {
           label: "chrM alignment",
           submitted_at: ago(10 * MINUTE),
           status: "in_progress",
-          summary: '"Workflow cancelling: 0 job(s) stopped, 3 still running"',
+          summary: '"Workflow cancelling: 9 job(s) did not finish, 3 still running"',
           total_jobs: 12,
           completed_jobs: 0,
           failed_jobs: 9,
@@ -320,13 +320,12 @@ describe("state folding", () => {
   });
 
   it("still raises the alarm for a run that is failing rather than stopping", () => {
-    // Be careful with this fixture. The summary below is *also* what the brain
-    // writes while a cancel is settling, because rollUpInvocationJobs scores a
-    // `deleted` job in the same counter as an errored one and the block has no
-    // word for a cancel in flight -- so this test pins "a run reporting failed
-    // jobs alarms", not "a cancel alarms". Until checkInvocations says which it
-    // is, the widget cannot tell them apart and the exemption above only fires
-    // once the brain names it.
+    // This fixture used to be ambiguous: checkInvocations wrote the same
+    // sentence for a settling cancel, because rollUpInvocationJobs scores a
+    // `deleted` job in the same counter as an errored one. It now writes
+    // "Workflow cancelling" for that case, so the string below means a genuine
+    // failure and nothing else, and the exemption above fires on the cancel.
+    // The pairing is pinned from the brain side in invocation-check.test.ts.
     const row = rowFor({
       status: "in_progress",
       summary: "Workflow in progress: 9 job(s) failed, 3 still running",

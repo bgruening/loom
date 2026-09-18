@@ -235,6 +235,55 @@ describe("compare and swap", () => {
     dash.stop();
   });
 
+  it("puts the default back when the file is deleted out from under it", async () => {
+    // What `/dashboard undo` does when the change it is undoing is the one that
+    // created the file. Taking the revision alone left the removed layout on
+    // screen, and since the revision had moved nothing asked again -- so the
+    // next edit wrote the deleted layout back out.
+    const theirs = JSON.stringify({
+      version: 1,
+      activeId: "theirs",
+      dashboards: [{ id: "theirs", title: "Theirs", panels: [] }],
+    });
+    const loadDashboard = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, raw: theirs, revision: "r2" })
+      .mockResolvedValue({ ok: true, raw: null, revision: null });
+    installShell({ loadDashboard, saveDashboard: vi.fn() });
+    const dash = initDashboard(root);
+    await settle();
+    expect(dash.host.getActiveDashboard()?.id).toBe("theirs");
+
+    vi.advanceTimersByTime(6000);
+    await settle();
+    expect(dash.host.getActiveDashboard()?.id).toBe("current-analysis");
+    dash.stop();
+  });
+
+  it("keeps the layout when the file is present but empty", async () => {
+    // A zero-byte file is a write someone is in the middle of, or a truncation
+    // -- not a deletion. Treating it as one would throw away the layout on
+    // screen for a blip, which is the data loss this whole pass is about.
+    const theirs = JSON.stringify({
+      version: 1,
+      activeId: "theirs",
+      dashboards: [{ id: "theirs", title: "Theirs", panels: [] }],
+    });
+    const loadDashboard = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, raw: theirs, revision: "r2" })
+      .mockResolvedValue({ ok: true, raw: "   ", revision: "r3" });
+    installShell({ loadDashboard, saveDashboard: vi.fn() });
+    const dash = initDashboard(root);
+    await settle();
+    expect(dash.host.getActiveDashboard()?.id).toBe("theirs");
+
+    vi.advanceTimersByTime(6000);
+    await settle();
+    expect(dash.host.getActiveDashboard()?.id).toBe("theirs");
+    dash.stop();
+  });
+
   it("does not let the poll overwrite a change the user just made", async () => {
     const theirs = JSON.stringify({
       version: 1,

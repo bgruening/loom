@@ -19,7 +19,10 @@ import {
   disarmGalaxyLivePanel,
 } from "../extensions/loom/galaxy-live-source.js";
 import { getPollTickHook } from "../extensions/loom/galaxy-poller.js";
-import { normalizeGalaxyLivePayload } from "../shared/galaxy-live-contract.js";
+import {
+  GALAXY_LIVE_MAX_ITEMS,
+  normalizeGalaxyLivePayload,
+} from "../shared/galaxy-live-contract.js";
 import type { GalaxyLivePayload, GalaxyLiveState } from "../shared/galaxy-live-contract.js";
 
 const CFG = { url: "https://usegalaxy.org", apiKey: "secret-key" };
@@ -410,6 +413,78 @@ describe("fetchGalaxyLiveSnapshot", () => {
     const res = await fetchGalaxyLiveSnapshot(HID, { signal: controller.signal }, deps(get));
     expect(res.aborted).toBe(true);
     expect(res.payload).toBeNull();
+  });
+
+  it.each([
+    ["JSON null", null],
+    ["a bare list", []],
+    ["a string a proxy substituted", "<html>login</html>"],
+  ])("refuses a 200 whose history summary is %s", async (_label, body) => {
+    // Never-throws is this function's whole contract, and `null` broke it: the
+    // TypeError escaped into the poller's catch, so the tick died with no
+    // payload, no backoff and nothing on screen to say anything had happened.
+    const get = vi.fn(async () => body) as unknown as GalaxyLiveDeps["get"];
+    const res = await fetchGalaxyLiveSnapshot(HID, {}, deps(get));
+    expect(res.payload!.unavailable).toBe("unreachable");
+    expect(res.payload!.history).toBeNull();
+    // One request, not two: there is nothing to compare an update_time against.
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a 200 whose contents are not a list, rather than drawing it empty", async () => {
+    // The projection turns a non-array into no rows, which on screen is
+    // "No datasets yet." -- a confident answer about someone's real history.
+    const get = vi.fn(async (path: string) =>
+      path.includes("/contents") ? { err: "not a list" } : { update_time: "t1", name: "mine" },
+    ) as unknown as GalaxyLiveDeps["get"];
+    const res = await fetchGalaxyLiveSnapshot(HID, {}, deps(get));
+    expect(res.payload!.unavailable).toBe("unreachable");
+    expect(res.payload!.history).toBeNull();
+  });
+
+  it("bounds a contents response from a server that ignored the limit", async () => {
+    // We ask for 201 rows. A server handing back the whole history means
+    // projectRow and the sort run over the lot on the 15 s timer, every tick.
+    // Dropping the surplus rather than refusing it matters: refusing pins the
+    // panel on "Galaxy did not answer" for the session, because the next tick
+    // gets the same oversized answer.
+    const rows = Array.from({ length: 5_000 }, (_, i) => ({
+      id: `d${i}`,
+      hid: 5_000 - i, // hid-descending, as we asked
+      state: "ok",
+    }));
+    const get = vi.fn(async (path: string) =>
+      path.includes("/contents") ? rows : { update_time: "t1", name: "mine" },
+    ) as unknown as GalaxyLiveDeps["get"];
+
+    const res = await fetchGalaxyLiveSnapshot(HID, {}, deps(get));
+    expect(res.payload!.unavailable).toBeUndefined();
+    const history = res.payload!.history!;
+    // The newest rows, which is what the panel is for.
+    expect(history.items[0].hid).toBe(5_000);
+    expect(history.items).toHaveLength(GALAXY_LIVE_MAX_ITEMS);
+    // And only the bounded set was projected at all. `truncated` counts the
+    // rows that reached the projection and did not survive its own cap, so it
+    // reads 1,800 for the 2,000 rows this looked at and 4,800 if it looked at
+    // every one of the 5,000 -- which is the assertion that the bound happened.
+    expect(history.truncated).toBe(GALAXY_LIVE_MAX_ITEMS * 10 - GALAXY_LIVE_MAX_ITEMS);
+  });
+
+  it("takes the newest rows even from a server that ignored the order too", async () => {
+    // `projectHistory` sorts what it is handed, so cutting the head of an
+    // ascending list would hand it the oldest rows in the history and the panel
+    // would confidently show work the user finished long ago.
+    const rows = Array.from({ length: 5_000 }, (_, i) => ({
+      id: `d${i}`,
+      hid: i + 1, // ascending: order=hid-dsc was ignored
+      state: "ok",
+    }));
+    const get = vi.fn(async (path: string) =>
+      path.includes("/contents") ? rows : { update_time: "t1", name: "mine" },
+    ) as unknown as GalaxyLiveDeps["get"];
+
+    const history = (await fetchGalaxyLiveSnapshot(HID, {}, deps(get))).payload!.history!;
+    expect(history.items[0].hid).toBe(5_000);
   });
 
   it("bounds a Galaxy that never answers, so ticks cannot stack", async () => {
@@ -874,6 +949,91 @@ describe("GalaxyLiveTicker cadence", () => {
     expect(emptyResolve).toHaveBeenCalledTimes(2);
     expect(none.snapshot).not.toHaveBeenCalled();
     expect(none.pushes[0].unavailable).toBe("no-history");
+  });
+
+  it("bounds the history resolve and lets go of it on stop", async () => {
+    // `galaxyGet` has no timeout of its own, and this one is not behind the
+    // snapshot's: a stalling server measured 301 s before the bare fetch threw,
+    // and for all of it `running` stayed true and every later tick was dropped.
+    let seen: AbortSignal | undefined;
+    let settle: (() => void) | null = null;
+    const hang = new Promise<void>((r) => {
+      settle = r;
+    });
+    const h = tickerHarness({
+      mostRecentHistory: async (signal?: AbortSignal) => {
+        seen = signal;
+        await hang;
+        return { id: HID, name: "most recent" };
+      },
+    });
+
+    const inFlight = h.ticker.tick("# no binding\n");
+    expect(seen).toBeDefined();
+    expect(seen!.aborted).toBe(false);
+
+    h.ticker.stop();
+    expect(seen!.aborted).toBe(true);
+
+    settle!();
+    await inFlight;
+    // Stopped mid-read: no error payload for a shutdown, and no further asks.
+    expect(h.pushes).toEqual([]);
+    expect(h.snapshot).not.toHaveBeenCalled();
+    h.advance(120_000);
+    await h.ticker.tick(bound);
+    expect(h.snapshot).not.toHaveBeenCalled();
+  });
+
+  it("hands the snapshot something to cancel while it is still in flight", async () => {
+    let seen: AbortSignal | undefined;
+    let settle: (() => void) | null = null;
+    const hang = new Promise<void>((r) => {
+      settle = r;
+    });
+    const h = tickerHarness({
+      snapshot: (async (_id: string, opts: { signal?: AbortSignal }) => {
+        seen = opts.signal;
+        await hang;
+        return { payload: historyPayload("t1"), unchanged: false, aborted: true };
+      }) as unknown as GalaxyLiveTickerDeps["snapshot"],
+    });
+
+    const inFlight = h.ticker.tick(bound);
+    await new Promise((r) => setImmediate(r));
+    expect(seen).toBeDefined();
+    expect(seen!.aborted).toBe(false);
+
+    h.ticker.stop();
+    expect(seen!.aborted).toBe(true);
+    settle!();
+    await inFlight;
+  });
+
+  it("does not pile a signal per tick onto one that lives for the session", async () => {
+    // `AbortSignal.any` registers the composite on every source for as long as
+    // that source lives and Node never takes it off again, so hanging one per
+    // tick off the session's signal grows a list nothing empties -- measured at
+    // one retained entry per call. Each tick owns its signal and releases it.
+    const h = tickerHarness();
+    const sessionSignal = (h.ticker as unknown as { abort: AbortController }).abort.signal;
+    const listenerCount = (): number => {
+      const sizes = Object.getOwnPropertySymbols(sessionSignal)
+        .map((k) => (sessionSignal as unknown as Record<symbol, { size?: number }>)[k]?.size)
+        .filter((n): n is number => typeof n === "number");
+      // Guard against the test going vacuous if Node renames its internals: if
+      // nothing here has a size, this is measuring nothing and should say so.
+      expect(sizes.length).toBeGreaterThan(0);
+      return sizes.reduce((a, b) => a + b, 0);
+    };
+
+    expect(listenerCount()).toBe(0);
+    for (let i = 0; i < 50; i++) {
+      h.advance(120_000);
+      await h.ticker.tick(bound);
+    }
+    expect(h.snapshot.mock.calls.length).toBeGreaterThan(10);
+    expect(listenerCount()).toBe(0);
   });
 
   it("forgets the previous history's update_time when the binding changes", async () => {

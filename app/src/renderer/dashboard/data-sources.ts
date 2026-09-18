@@ -171,6 +171,9 @@ function parseStep(rest: string, fallbackNumber: number): PlanStep {
  * Shape per docs/agent/notebook-schema.md. Tolerant by design: a hand-edited
  * notebook that drops the anchors or the numbers still yields usable steps.
  */
+/** A fence opener or closer: three or more backticks, or three or more tildes. */
+const FENCE_MARKER = /^(`{3,}|~{3,})/;
+
 export function parsePlanSections(markdown: string): PlanSection[] {
   const plans: PlanSection[] = [];
   let current: PlanSection | null = null;
@@ -180,14 +183,27 @@ export function parsePlanSections(markdown: string): PlanSection[] {
   // inside a ```markdown fence is exactly what a well-behaved notebook looks
   // like -- and those examples were counted as real steps, which moved the
   // progress bar and put an invented step in the NEXT box.
-  let inFence = false;
+  //
+  // Which marker opened it is remembered, because a toggle on either one is its
+  // own bug: a `~~~` line inside a ```markdown example closed the block, the
+  // ``` that really ended it opened a new one, and every checkbox after that
+  // was read as a real step again -- the phantom the fence tracking is here to
+  // stop, reintroduced by the tracking itself.
+  let openedBy: string | null = null;
   for (const line of markdown.split(/\r?\n/)) {
-    const fence = line.trimStart();
-    if (fence.startsWith("```") || fence.startsWith("~~~")) {
-      inFence = !inFence;
+    const marker = FENCE_MARKER.exec(line.trimStart())?.[1];
+    if (openedBy !== null) {
+      // CommonMark closes a fence with the same character, at least as long as
+      // the one that opened it. Anything else is content.
+      if (marker && marker[0] === openedBy[0] && marker.length >= openedBy.length) {
+        openedBy = null;
+      }
       continue;
     }
-    if (inFence) continue;
+    if (marker) {
+      openedBy = marker;
+      continue;
+    }
     const heading = line.match(PLAN_HEADING);
     if (heading) {
       let title = heading[1].trim();

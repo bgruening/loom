@@ -137,6 +137,103 @@ function redactToken(token: string): { text: string; hideNext: boolean } {
   return { text: capped, hideNext: false };
 }
 
+/**
+ * Split a command line into shell tokens, keeping the whitespace between them
+ * so a rejoin is byte-exact.
+ *
+ * Splitting on whitespace alone would cut `'Authorization: Bearer t0ken'` into
+ * three, and the fence would then hide the word `Bearer` and print the secret
+ * in the token after it. The shell reads that as one argument and so does this.
+ */
+function shellTokens(text: string): string[] {
+  const parts: string[] = [];
+  let buf = "";
+  let quote: string | null = null;
+  for (const ch of text) {
+    if (quote) {
+      buf += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      buf += ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      parts.push(buf, ch);
+      buf = "";
+      continue;
+    }
+    buf += ch;
+  }
+  parts.push(buf);
+  return parts;
+}
+
+/** `redactToken`'s discrimination, for a token that may carry shell quotes. */
+function redactShellToken(token: string): { text: string; hideNext: boolean } {
+  const quoted =
+    token.length > 1 && (token[0] === "'" || token[0] === '"') && token.at(-1) === token[0];
+  const q = quoted ? token[0] : "";
+  const inner = quoted ? token.slice(1, -1) : token;
+  const at = inner.search(/[=:]/);
+  if (at > 0) {
+    const name = inner.slice(0, at);
+    const introduces = OPTION_FLAG.test(name) || HEADER_NAME.test(name);
+    // Everything after the separator is the value, however many words it is:
+    // `Authorization: Bearer t0ken` is one argument, not three.
+    if (introduces && CREDENTIAL_KEY.test(name) && inner.length > at + 1) {
+      return { text: `${q}${inner.slice(0, at + 1)}${HIDDEN}${q}`, hideNext: false };
+    }
+    // A separator with nothing after it deliberately does NOT reach across the
+    // whitespace here, though it does between array elements. An array element
+    // is an argv token; a word in a string is just a word, and "Authorization:
+    // failed" in a sentence must not blank the next one. The shapes a shell
+    // actually produces -- a quoted header, `NAME=value` -- are same-token and
+    // are caught above.
+    return { text: token, hideNext: false };
+  }
+  if (at < 0 && OPTION_FLAG.test(inner) && CREDENTIAL_KEY.test(inner)) {
+    return { text: token, hideNext: true };
+  }
+  return { text: token, hideNext: false };
+}
+
+/**
+ * Hide credentials inside a string that is a command line.
+ *
+ * The array fence below guards `["--api-key", "abc123"]`, a shape nothing in
+ * this build writes. The shape it does write is this one: `bash` is not in
+ * `activity-hooks`' `NOISY_TOOLS`, its args are `{command: "<the whole command
+ * line>"}`, and `redactArgs` there redacts by key name only -- so `command` is
+ * not a credential key and the entire line, secret included, reaches the log
+ * and this panel.
+ *
+ * Same discrimination as the array path and no wider: a leading dash, or a
+ * credential-stemmed name before an `=` or a `:`. A bare word never introduces
+ * anything, so a results listing or a sentence is left alone -- which is the
+ * regression this fence has already had once.
+ */
+export function redactCommandText(text: string): string {
+  // Nothing credential-shaped anywhere in it: the common case, and tokenizing
+  // every log line to discover that is not worth it.
+  if (!CREDENTIAL_KEY.test(text)) return text;
+  let hideNext = false;
+  return shellTokens(text)
+    .map((part) => {
+      if (part === "" || /^\s$/.test(part)) return part;
+      if (hideNext) {
+        hideNext = false;
+        return HIDDEN;
+      }
+      const token = redactShellToken(part);
+      hideNext = token.hideNext;
+      return token.text;
+    })
+    .join("");
+}
+
 const EMPTY_TEXT =
   "Nothing yet. Every step the agent takes -- a command, a Galaxy run finishing, a decision it " +
   "had to make -- lands here as it happens.";
@@ -524,7 +621,10 @@ export function redactForDisplay(
 ): unknown {
   if (value === null) return null;
   const t = typeof value;
-  if (t === "string") return truncate(value as string, DETAIL_STRING_MAX);
+  // Redact the text that will be shown, not the text that arrived: truncating
+  // first bounds the work on a huge string, and anything the cut removed was
+  // never going to be on screen.
+  if (t === "string") return redactCommandText(truncate(value as string, DETAIL_STRING_MAX));
   if (t === "number") return Number.isFinite(value) ? value : String(value);
   if (t === "boolean") return value;
   if (t === "bigint") return String(value);
@@ -553,7 +653,10 @@ export function redactForDisplay(
           items.push(redactForDisplay(v, depth + 1, seen, budget));
           continue;
         }
-        const token = redactToken(v);
+        // The element first as a command line -- an argv array can hold one,
+        // `["bash", "-c", "curl -H '...'"]` -- then as a single argv token,
+        // which is what carries `hideNext` to the element after it.
+        const token = redactToken(redactCommandText(v));
         hideNext = token.hideNext;
         items.push(token.text);
       }

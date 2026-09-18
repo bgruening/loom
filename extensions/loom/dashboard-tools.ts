@@ -52,7 +52,94 @@ const MAX_ACTIONS = 20;
  * window. Past this the summary carries the panel ids, which is what a write
  * actually needs.
  */
-const MAX_READ_CHARS = 20_000;
+export const MAX_READ_CHARS = 20_000;
+
+/**
+ * And how much of everything else.
+ *
+ * Swapping the document out for the summary bounds nothing on its own: the
+ * summary is built from ids and titles the agent itself writes into the file,
+ * and nothing caps their length, so a 261 KB layout came back as a 170,866-
+ * character tool result of which 170,014 was summary. The validation problems
+ * are worse -- one of them quotes the rejected `activeId` back, so a 240,000-
+ * character id becomes a 240,000-character diagnostic about a call that failed.
+ *
+ * Each of these is one budget spent across its whole field rather than a
+ * per-entry cap: twenty problems at a thousand characters each is twenty
+ * thousand characters, which is the cap over again.
+ */
+const MAX_SUMMARY_CHARS = 4_000;
+const MAX_PROBLEM_CHARS = 2_000;
+const MAX_PROBLEMS = 20;
+const MAX_ERROR_CHARS = 2_000;
+/** No dashboard's line is squeezed below this, however many there are. */
+const MIN_SUMMARY_LINE_CHARS = 200;
+
+/** Keep the head of one string, and say how much was dropped. */
+function capText(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}... (${text.length - max} more characters)`;
+}
+
+/** Keep whole lines until the budget runs out, then say how many were dropped. */
+function capLines(lines: string[], budget: number, noun: string): string[] {
+  const kept: string[] = [];
+  let used = 0;
+  for (const line of lines) {
+    if (used >= budget) {
+      kept.push(`... ${lines.length - kept.length} more ${noun} not shown`);
+      return kept;
+    }
+    const capped = capText(line, budget - used);
+    kept.push(capped);
+    used += capped.length;
+  }
+  return kept;
+}
+
+/**
+ * The summary as the model should see it: every dashboard, and a bound.
+ *
+ * Every dashboard, deliberately. Spending one budget head-first lets a single
+ * crowded dashboard eat all of it and collapses the rest into "9 more not
+ * shown" -- and when the document has been omitted too, the response tells the
+ * model to work from the summary while `dashboard_read` takes no arguments, so
+ * there is no second call that would fetch the rest. Each line gets its share
+ * and loses its own tail instead.
+ */
+function cappedSummary(document: DashboardDocument): string[] {
+  const lines = summarizeDocument(document);
+  const share = Math.max(
+    MIN_SUMMARY_LINE_CHARS,
+    Math.floor(MAX_SUMMARY_CHARS / Math.max(1, lines.length)),
+  );
+  return capLines(
+    lines.map((line) => capText(line, share)),
+    MAX_SUMMARY_CHARS,
+    "dashboard(s)",
+  );
+}
+
+/**
+ * Validation diagnostics as the model should see them, inside one shared
+ * budget. Both fields are capped: a problem's `path` is structural, but its
+ * `message` quotes the input.
+ */
+function cappedProblems(problems: DashboardProblem[]): DashboardProblem[] {
+  const kept: DashboardProblem[] = [];
+  let used = 0;
+  for (const problem of problems.slice(0, MAX_PROBLEMS)) {
+    if (used >= MAX_PROBLEM_CHARS) break;
+    const left = MAX_PROBLEM_CHARS - used;
+    const path = capText(problem.path, left);
+    const message = capText(problem.message, Math.max(0, left - path.length));
+    kept.push({ path, message });
+    used += path.length + message.length;
+  }
+  const dropped = problems.length - kept.length;
+  if (dropped > 0) kept.push({ path: "", message: `... ${dropped} more problem(s)` });
+  return kept;
+}
 
 /**
  * Whether the agent may create an `html-sandbox` panel.
@@ -940,7 +1027,15 @@ function toolFailure(error: string, problems?: DashboardProblem[]) {
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify({ success: false, error, ...(problems ? { problems } : {}) }, null, 2),
+        text: JSON.stringify(
+          {
+            success: false,
+            error: capText(error, MAX_ERROR_CHARS),
+            ...(problems ? { problems: cappedProblems(problems) } : {}),
+          },
+          null,
+          2,
+        ),
       },
     ],
     details: { error: true } as Record<string, unknown>,
@@ -959,7 +1054,11 @@ export function registerDashboardTools(pi: ExtensionAPI): void {
     async execute() {
       const read = await readDashboardDocument();
       if (!read.ok) return toolFailure(read.error);
-      const serialized = JSON.stringify(read.document);
+      // Measured the way it is emitted. The response is written with two-space
+      // indentation a few lines below, which roughly doubles it, so comparing
+      // the compact form against the cap let a document that just squeaked
+      // under land in front of the model at twice the size.
+      const serialized = JSON.stringify(read.document, null, 2);
       const tooBig = serialized.length > MAX_READ_CHARS;
       return {
         content: [
@@ -974,10 +1073,10 @@ export function registerDashboardTools(pi: ExtensionAPI): void {
                       documentOmitted: `The layout is ${serialized.length} characters, too large to show in full. Work from the summary below -- it carries the panel ids -- and change panels with actions rather than replacing the whole document.`,
                     }
                   : { document: read.document }),
-                summary: summarizeDocument(read.document),
+                summary: cappedSummary(read.document),
                 widgetTypes: widgetCatalogLines(),
                 presets: presetLines(),
-                ...(read.problems.length ? { problems: read.problems } : {}),
+                ...(read.problems.length ? { problems: cappedProblems(read.problems) } : {}),
                 ...(read.exists
                   ? {}
                   : { note: "No layout file yet; this is the default the user sees." }),
@@ -1085,11 +1184,11 @@ export function registerDashboardTools(pi: ExtensionAPI): void {
             text: JSON.stringify(
               {
                 success: true,
-                changes: outcome.notes,
-                summary: summarizeDocument(outcome.document),
+                changes: capLines(outcome.notes, MAX_SUMMARY_CHARS, "change(s)"),
+                summary: cappedSummary(outcome.document),
                 where: landedLine(),
                 undo: "The user can put this back with /dashboard undo.",
-                ...(outcome.problems.length ? { repairs: outcome.problems } : {}),
+                ...(outcome.problems.length ? { repairs: cappedProblems(outcome.problems) } : {}),
               },
               null,
               2,

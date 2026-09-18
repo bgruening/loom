@@ -187,9 +187,14 @@ export function projectRow(raw: unknown): GalaxyLiveItem | null {
   return item;
 }
 
+/** A JSON object, as opposed to null, an array, or a string a proxy sent. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 function activeCount(raw: unknown): number | null {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const active = (raw as Record<string, unknown>).active;
+  if (!isPlainObject(raw)) return null;
+  const active = raw.active;
   return typeof active === "number" && active >= 0 ? active : null;
 }
 
@@ -268,6 +273,48 @@ export function projectHistory(
 /** Per-tick wall-clock bound. Comfortably above the ~1 s a cold contents fetch
  *  took against usegalaxy.org, well under the 15 s poller interval. */
 const DEFAULT_TIMEOUT_MS = 10_000;
+
+/**
+ * How many contents rows we will project, whatever Galaxy sends.
+ *
+ * We request `GALAXY_LIVE_MAX_ITEMS + 1`; a server that honours `limit` never
+ * reaches this. One that ignores it hands back the whole history, and then
+ * `projectRow` and the sort run over the lot on the brain's 15 s timer, every
+ * 15 s, for as long as the session lasts.
+ *
+ * Extra rows are dropped rather than refused. Refusing pins the panel on
+ * "Galaxy did not answer" for the rest of the session -- the next tick gets the
+ * same oversized answer and the one after that too -- while Galaxy is in fact
+ * answering, and the user can see their history perfectly well in Galaxy's own
+ * UI. Ten of what we asked for is enough slack that this only fires on a server
+ * that is genuinely ignoring us.
+ *
+ * This bounds the work, NOT the transfer -- by the time it is consulted the
+ * body has already been buffered and parsed, because `galaxyGet` ends in
+ * `resp.json()`. A real byte bound has to go there, which is outside this file.
+ */
+const MAX_CONTENTS_ROWS = GALAXY_LIVE_MAX_ITEMS * 10;
+
+/**
+ * The rows worth projecting, from the end of the list that holds them.
+ *
+ * We ask for `order=hid-dsc`, so the newest are at the head -- but an older
+ * server that ignored `order` hands back ascending, and `projectHistory` only
+ * sorts what it is given. Cutting the head there would hand it the oldest rows
+ * in the history and the panel would confidently show a user work they finished
+ * last year. Read the direction off the rows instead of trusting the query.
+ */
+function boundContentsRows(rows: unknown[]): unknown[] {
+  if (rows.length <= MAX_CONTENTS_ROWS) return rows;
+  const hid = (row: unknown): number | null => {
+    const value = (row as { hid?: unknown } | null)?.hid;
+    return typeof value === "number" ? value : null;
+  };
+  const first = hid(rows[0]);
+  const last = hid(rows[rows.length - 1]);
+  const ascending = first !== null && last !== null && last > first;
+  return ascending ? rows.slice(-MAX_CONTENTS_ROWS) : rows.slice(0, MAX_CONTENTS_ROWS);
+}
 
 /**
  * Which failure the user is looking at. The split that matters is 401 from
@@ -366,13 +413,20 @@ export async function fetchGalaxyLiveSnapshot(
   /** A caller-cancelled tick is not a Galaxy failure; a timeout is. */
   const cancelled = (): boolean => Boolean(opts.signal?.aborted);
 
-  let summary: HistorySummary;
+  let raw: unknown;
   try {
-    summary = await deps.get<HistorySummary>(historySummaryPath(historyId), signal);
+    raw = await deps.get<unknown>(historySummaryPath(historyId), signal);
   } catch (err) {
     if (cancelled()) return quiet(true);
     return bare(classifyError(err));
   }
+  // A 200 is not an answer. Galaxy returning JSON `null` here -- which a proxy
+  // in front of it can do too -- used to throw straight out of a function whose
+  // whole contract is that it does not, so the tick died in the poller's catch
+  // with no payload and no backoff. Anything that is not an object is the same
+  // problem: unreadable, retry, say so.
+  if (!isPlainObject(raw)) return bare("unreachable");
+  const summary = raw as HistorySummary;
 
   const updateTime = typeof summary.update_time === "string" ? summary.update_time : "";
   if (opts.knownUpdateTime && updateTime && opts.knownUpdateTime === updateTime) {
@@ -389,12 +443,17 @@ export async function fetchGalaxyLiveSnapshot(
     if (cancelled()) return quiet(true);
     return bare(classifyError(err));
   }
+  // `projectHistory` turns a non-array into no rows, which is indistinguishable
+  // from an empty history -- so a server answering 200 with an error object, or
+  // an HTML login page a proxy substituted, drew a confident "No datasets yet"
+  // over an analysis that has them. Refuse the shape instead.
+  if (!Array.isArray(contents)) return bare("unreachable");
 
   return {
     payload: {
       version: GALAXY_LIVE_SCHEMA_VERSION,
       serverHost: host,
-      history: projectHistory(historyId, summary, contents),
+      history: projectHistory(historyId, summary, boundContentsRows(contents)),
       updatedAt: deps.now().toISOString(),
     },
     unchanged: false,
@@ -492,8 +551,44 @@ export class GalaxyLiveTicker {
   private historyId: string | null = null;
   private failures = 0;
   private resolved: { id: string; at: number; server: string } | null = null;
+  /**
+   * Everything this ticker asks Galaxy hangs off this, so `stop()` abandons
+   * whatever is in flight. Without it a `session_shutdown` landing on a read
+   * held the loop open for as long as the read took -- and `galaxyGet` is a
+   * bare fetch with no timeout of its own, which against a stalling server
+   * measured 301 seconds before it threw.
+   */
+  private readonly abort = new AbortController();
+  private stopped = false;
 
   constructor(private deps: GalaxyLiveTickerDeps) {}
+
+  /** Stop ticking and abandon anything already in flight. Not reversible. */
+  stop(): void {
+    this.stopped = true;
+    this.abort.abort();
+  }
+
+  /**
+   * A signal for one tick, aborted when the session is.
+   *
+   * Deliberately NOT `AbortSignal.any([this.abort.signal, ...])`: `any`
+   * registers the composite on each source for as long as that source lives and
+   * Node never takes it off again, so hanging one off a signal that lives for
+   * the whole session grows a list nothing empties -- measured at one retained
+   * entry per call. This holds a single listener instead, and `done()` removes
+   * it. Anything downstream may compose onto the returned signal freely: it
+   * dies with the tick.
+   */
+  private tickSignal(): { signal: AbortSignal; done: () => void } {
+    const controller = new AbortController();
+    const onStop = (): void => controller.abort();
+    this.abort.signal.addEventListener("abort", onStop, { once: true });
+    return {
+      signal: controller.signal,
+      done: () => this.abort.signal.removeEventListener("abort", onStop),
+    };
+  }
 
   /** Minimum spacing for the next attempt, given what the notebook says. */
   private interval(live: boolean): number {
@@ -521,6 +616,7 @@ export class GalaxyLiveTicker {
   private async resolveHistoryId(
     content: string | null,
     serverUrl: string,
+    signal: AbortSignal,
   ): Promise<string | null> {
     const bound = historyIdFromNotebook(content, serverUrl);
     if (bound) return bound;
@@ -538,7 +634,14 @@ export class GalaxyLiveTicker {
     // that send the user somewhere completely different. Galaxy answering
     // "you have no histories" is the only real no-history, and that is the
     // null below.
-    const summary = await this.deps.mostRecentHistory();
+    //
+    // The resolve goes straight to `galaxyGet`, which is a bare fetch with no
+    // timeout of its own, so the wall clock has to come from here. Composing
+    // onto the tick's signal rather than the session's is what keeps it from
+    // accumulating; both sources die with the tick.
+    const summary = await this.deps.mostRecentHistory(
+      AbortSignal.any([signal, AbortSignal.timeout(DEFAULT_TIMEOUT_MS)]),
+    );
     if (!summary?.id) return null;
     this.resolved = { id: summary.id, at: this.deps.now(), server: serverUrl };
     return summary.id;
@@ -551,7 +654,7 @@ export class GalaxyLiveTicker {
   async tick(content: string | null): Promise<void> {
     // The poller fires this without awaiting it, so nothing outside stops two
     // ticks overlapping while Galaxy is slow. This does.
-    if (this.running) return;
+    if (this.running || this.stopped) return;
     this.running = true;
     try {
       await this.runTick(content);
@@ -592,16 +695,39 @@ export class GalaxyLiveTicker {
     if (now - this.lastAttemptAt < this.interval(live)) return;
     this.lastAttemptAt = now;
 
+    // One signal for everything this tick asks, released when it is done.
+    const tick = this.tickSignal();
+    try {
+      await this.askGalaxy(content, cfg, now, tick.signal);
+    } finally {
+      tick.done();
+    }
+  }
+
+  /** The half of a tick that talks to Galaxy, once the cadence has allowed it. */
+  private async askGalaxy(
+    content: string | null,
+    cfg: { url: string; apiKey: string },
+    now: number,
+    signal: AbortSignal,
+  ): Promise<void> {
     let historyId: string | null;
     try {
-      historyId = await this.resolveHistoryId(content, cfg.url);
+      historyId = await this.resolveHistoryId(content, cfg.url, signal);
     } catch (err) {
+      // A stop that aborted the request mid-flight is not something to report
+      // or to back off from; the session is over.
+      if (this.stopped) return;
       // Asking Galaxy which history is current failed. That is the same class
       // of problem as the read below failing, and it reads the same way.
       this.failures++;
       this.emit(this.unavailable(classifyError(err), cfg.url, this.deps.now()), this.deps.now());
       return;
     }
+    // The resolve may have come back after the session ended, either because it
+    // was aborted or because it finished first. Either way there is nothing to
+    // draw on and nothing worth asking Galaxy for.
+    if (this.stopped) return;
     if (historyId !== this.historyId) {
       // A different history: the update_time we were comparing against belongs
       // to the old one, and reusing it would suppress the first real read.
@@ -618,8 +744,11 @@ export class GalaxyLiveTicker {
 
     const result = await this.deps.snapshot(historyId, {
       knownUpdateTime: this.knownUpdateTime ?? undefined,
+      // The snapshot applies its own timeout and reads this one as "the caller
+      // gave up", which is the right reading only for a stop.
+      signal,
     });
-    if (result.aborted) return;
+    if (result.aborted || this.stopped) return;
 
     if (result.unchanged) {
       this.failures = 0;
@@ -703,6 +832,9 @@ export function armGalaxyLivePanel(ctx: ExtensionContext): void {
       console.error("[galaxy-live] widget push failed:", err);
     }
   };
+  // A ticker being replaced must let go of whatever it is waiting on; the new
+  // one is about to ask the same questions.
+  ticker?.stop();
   ticker = new GalaxyLiveTicker({
     snapshot: fetchGalaxyLiveSnapshot,
     config: getGalaxyConfig,
@@ -717,6 +849,11 @@ export function armGalaxyLivePanel(ctx: ExtensionContext): void {
 /** Stop pushing. Called from `session_shutdown`, beside `stopGalaxyPoller()`. */
 export function disarmGalaxyLivePanel(): void {
   armGeneration++;
+  // The generation guard already drops a late push. This is the other half:
+  // stop waiting for the answer at all. Shutdown never blocked on it -- the
+  // poller fires the hook without awaiting it -- but an in-flight bare fetch
+  // holds the event loop, which is what the controller on the ticker is for.
+  ticker?.stop();
   ticker = null;
   setPollTickHook(null);
 }

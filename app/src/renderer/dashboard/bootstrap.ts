@@ -249,7 +249,25 @@ export function initDashboard(
     if (!res.ok) return;
     const next = res.revision ?? null;
     if (next === revision) return;
-    if (res.raw === null || res.raw.trim() === "") {
+    if (res.raw === null) {
+      revision = next;
+      // The file is gone: `/dashboard undo` removes it when the change being
+      // undone is the one that created it, and so does deleting it by hand.
+      // Taking the revision alone left the pane drawing a layout that no longer
+      // exists -- and since the revision had moved, nothing would ask again, so
+      // the next edit wrote the deleted layout straight back out. Same answer as
+      // a workspace switch: back to the default, without persisting it.
+      //
+      // Only for `null`, which is "there is no file". A file that is present
+      // but empty is a write someone is in the middle of, or a truncation, and
+      // throwing away the layout on screen for one of those would be the data
+      // loss this pass is here to stop.
+      host.setDocument(createDefaultDashboardDocument(), { persist: false });
+      // Whatever the banner was saying about the old file, it is not true now.
+      host.setBanner("");
+      return;
+    }
+    if (res.raw.trim() === "") {
       revision = next;
       return;
     }
