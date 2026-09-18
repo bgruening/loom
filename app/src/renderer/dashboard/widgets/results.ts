@@ -423,7 +423,9 @@ const STYLES = `
 .dash-results-table td { font-family: var(--font, monospace); }
 .dash-results-note { padding: 2px 6px; font-size: 10px; color: var(--dash-text-meta); }
 .dash-results-empty { padding: 10px; font-size: 12px; line-height: 1.5; color: var(--dash-text-meta); }
-.dash-results-pin { opacity: 0; }
+/* Visible without a hover: a control that only appears under a mouse is a
+   control a keyboard or a touchscreen never finds. */
+.dash-results-pin { opacity: 0.55; }
 .dash-results-entry:hover .dash-results-pin,
 .dash-results-pin:focus-visible { opacity: 1; }
 `;
@@ -519,7 +521,9 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
         entry.prepend(wrap);
         const notes: string[] = [];
         if (preview.moreRows) notes.push(`first ${preview.rows.length} rows`);
-        if (preview.extraColumns > 0) notes.push(`${preview.extraColumns} more columns`);
+        if (preview.extraColumns > 0) {
+          notes.push(`${preview.extraColumns} more column${preview.extraColumns === 1 ? "" : "s"}`);
+        }
         if (notes.length) wrap.after(node("div", "dash-results-note", notes.join(", ")));
       });
     };
@@ -570,7 +574,7 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
 
       showAll.hidden = !pinned;
       count.textContent =
-        !snapshot.available || pinned
+        !snapshot.available || pinned || selection.total === 0
           ? ""
           : selection.total > selection.shown.length
             ? `${selection.shown.length} of ${selection.total}`
