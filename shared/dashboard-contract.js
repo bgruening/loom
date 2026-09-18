@@ -27,7 +27,14 @@ export const DASHBOARD_MAX_BYTES = 256 * 1024;
  * that, and it includes flag-gated widgets this list should not advertise.
  * Validation never consults either.
  */
-export const KNOWN_WIDGET_TYPES = ["notebook", "jobs", "plan", "activity", "results"];
+export const KNOWN_WIDGET_TYPES = [
+  "notebook",
+  "jobs",
+  "plan",
+  "activity",
+  "results",
+  "galaxy-history",
+];
 
 const DEFAULT_PRESET_ID = "current-analysis";
 const MIN_ROWS = 1;
