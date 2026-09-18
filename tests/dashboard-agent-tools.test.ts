@@ -182,6 +182,26 @@ describe("dashboard_read", () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain("no notebook");
   });
+
+  it("summarizes rather than pasting a huge layout into the model's context", async () => {
+    seed(
+      documentWith([
+        {
+          id: "p-fat",
+          widget: "notebook",
+          config: { blob: "x".repeat(30_000) },
+          layout: { span: 2, rows: 3 },
+          addedBy: "preset",
+        },
+      ]),
+    );
+    const result = await run("dashboard_read");
+    expect(result.success).toBe(true);
+    expect(result.document).toBeUndefined();
+    expect(result.documentOmitted).toContain("too large");
+    // The panel ids a write needs are still there.
+    expect((result.summary as string[])[0]).toContain("p-fat");
+  });
 });
 
 describe("dashboard_update -- the happy paths", () => {

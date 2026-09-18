@@ -43,6 +43,16 @@ import { readDashboardDocument, updateDashboardDocument } from "./dashboard-stor
 const MAX_ACTIONS = 20;
 
 /**
+ * How much of the document `dashboard_read` will put in front of the model.
+ *
+ * The file may be up to 256 KB and a panel config can hold whatever a previous
+ * write put there, so returning it whole would let one layout eat the context
+ * window. Past this the summary carries the panel ids, which is what a write
+ * actually needs.
+ */
+const MAX_READ_CHARS = 20_000;
+
+/**
  * Whether the agent may create an `html-sandbox` panel.
  *
  * The sandboxed HTML widget is the one piece with a real security surface: the
@@ -750,6 +760,8 @@ export function registerDashboardTools(pi: ExtensionAPI): void {
     async execute() {
       const read = await readDashboardDocument();
       if (!read.ok) return toolFailure(read.error);
+      const serialized = JSON.stringify(read.document);
+      const tooBig = serialized.length > MAX_READ_CHARS;
       return {
         content: [
           {
@@ -758,7 +770,11 @@ export function registerDashboardTools(pi: ExtensionAPI): void {
               {
                 success: true,
                 exists: read.exists,
-                document: read.document,
+                ...(tooBig
+                  ? {
+                      documentOmitted: `The layout is ${serialized.length} characters, too large to show in full. Work from the summary below -- it carries the panel ids -- and change panels with actions rather than replacing the whole document.`,
+                    }
+                  : { document: read.document }),
                 summary: summarizeDocument(read.document),
                 widgetTypes: widgetCatalogLines(),
                 presets: presetLines(),
