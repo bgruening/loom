@@ -181,15 +181,22 @@ async function resolveRealWithin(
   return { ok: true, real };
 }
 
-/** Whether a directory's real path stays inside the cwd, so it is safe to descend. */
-async function isWithinCwd(cwd: string, p: string): Promise<boolean> {
+/**
+ * Where a symlink actually lands, or null when the tree should not show it at
+ * all: outside the jail, unresolvable, or onto a name the read side refuses.
+ * Listing such an entry discloses the name and size of something the caller may
+ * not read, and offers a click that can only fail.
+ */
+async function linkTarget(cwdReal: string, abs: string, home: string): Promise<string | null> {
+  let real: string;
   try {
-    const cwdReal = await fsp.realpath(cwd);
-    const pReal = await fsp.realpath(p);
-    return pReal === cwdReal || pReal.startsWith(cwdReal + path.sep);
+    real = await fsp.realpath(abs);
   } catch {
-    return false;
+    return null;
   }
+  if (real !== cwdReal && !real.startsWith(cwdReal + path.sep)) return null;
+  if (pathRefusal(path.relative(cwdReal, real), real, home)) return null;
+  return real;
 }
 
 interface WalkBudget {
@@ -198,6 +205,7 @@ interface WalkBudget {
 
 async function walkDir(
   cwd: string,
+  cwdReal: string,
   relDir: string,
   depth: number,
   home: string,
@@ -228,14 +236,15 @@ async function walkDir(
     let isFile = e.isFile();
     let recurse = isDir;
     if (e.isSymbolicLink()) {
+      const target = await linkTarget(cwdReal, absPath, home);
+      if (!target) continue;
       try {
-        const target = await fsp.stat(absPath);
-        isDir = target.isDirectory();
-        isFile = target.isFile();
-        recurse = isDir && (await isWithinCwd(cwd, absPath));
+        const stat = await fsp.stat(absPath);
+        isDir = stat.isDirectory();
+        isFile = stat.isFile();
+        recurse = isDir;
       } catch {
-        isDir = false;
-        isFile = true;
+        continue;
       }
     }
 
@@ -245,7 +254,7 @@ async function walkDir(
         name: e.name,
         relPath: childRel,
         type: "directory",
-        children: recurse ? await walkDir(cwd, childRel, depth + 1, home, budget) : [],
+        children: recurse ? await walkDir(cwd, cwdReal, childRel, depth + 1, home, budget) : [],
       });
     } else if (isFile) {
       budget.remaining--;
@@ -280,7 +289,10 @@ export async function listFilesForWeb(
   if (options.remote) return { ok: false, error: REMOTE_LIST_REFUSAL };
   const home = options.home ?? homedir();
   try {
-    const children = await walkDir(cwd, "", 0, home, {
+    // Symlink targets are compared against the cwd's own real path, so resolve
+    // it once rather than per entry.
+    const cwdReal = await fsp.realpath(cwd).catch(() => path.resolve(cwd));
+    const children = await walkDir(cwd, cwdReal, "", 0, home, {
       remaining: options.maxEntries ?? MAX_TOTAL_ENTRIES,
     });
     return {

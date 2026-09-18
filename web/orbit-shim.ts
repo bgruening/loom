@@ -236,6 +236,11 @@ async function fetchMode(): Promise<"remote" | "desktop"> {
     decodeListResponse(await invoke("files:list", opts)),
   readFile: async (relPath: string, opts?: { tail?: boolean }) =>
     decodeReadResponse(await invoke("files:read", relPath, opts)),
+  // Read-only means read-only, and the file viewer's Save button is now
+  // reachable here for the first time. Without this it would report
+  // "window.orbit.writeFile is not a function" at the user.
+  writeFile: () =>
+    Promise.resolve({ ok: false as const, error: "the web shell opens files read-only" }),
   // These three are served by the web server out of the session cwd, so they
   // behave the same here as on the desktop: the notebook the brain is writing,
   // and the dashboard layout that sits beside it.

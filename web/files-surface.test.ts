@@ -196,12 +196,22 @@ describe("listFilesForWeb", () => {
     }
   });
 
-  it("shows a symlinked directory but refuses to descend out of the jail", async () => {
+  // Listing an entry the read side will refuse discloses the name and size of a
+  // file outside the workspace and offers a click that can only fail.
+  it("leaves out symlinks whose target is outside the jail", async () => {
     const res = await listFilesForWeb(cwd, { home: HOME });
     if (!res.ok) throw new Error(res.error);
-    const dirOut = child(res.root, "dir-out");
-    expect(dirOut).toMatchObject({ type: "directory" });
-    expect(dirOut!.children).toEqual([]);
+    const listed = names(res.root);
+    expect(listed).not.toContain("link-out");
+    expect(listed).not.toContain("dir-out");
+    expect(listed).not.toContain("loop-a");
+    expect(listed).not.toContain("notes.txt");
+  });
+
+  it("keeps a symlink that stays inside the jail", async () => {
+    const res = await listFilesForWeb(cwd, { home: HOME });
+    if (!res.ok) throw new Error(res.error);
+    expect(child(res.root, "link-in")).toMatchObject({ type: "file" });
   });
 
   it("stops at the depth cap", async () => {
