@@ -464,6 +464,9 @@ export class DashboardEditorController implements DashboardEditor {
   private buildToolbar(toolbar: HTMLElement): void {
     toolbar.textContent = "";
     toolbar.classList.add("dash-editor");
+    // The select below is brand new and empty, so the cached signature from a
+    // previous attach must not convince `renderToolbar` it is already filled.
+    this.selectSignature = "";
 
     const mainRow = el("div", "dash-editor-row");
     this.select = el("select", "dash-editor-select");
@@ -943,6 +946,19 @@ export class DashboardEditorController implements DashboardEditor {
     return dashboard && panel ? { dashboard, panel } : null;
   }
 
+  /**
+   * The panel as the document has it now. A sheet control closes over the panel
+   * the sheet was drawn from, and between the draw and the click the agent, a
+   * widget's own `setConfig` or a keypress on the panel may have moved it on --
+   * so a stepper that counted from the captured value, or a settings form that
+   * wrote back the captured config, would undo somebody else's change.
+   */
+  private currentPanel(dashboardId: string, panelId: string): DashboardPanel | null {
+    const doc = this.document();
+    const dashboard = doc?.dashboards.find((d) => d.id === dashboardId);
+    return dashboard?.panels.find((p) => p.id === panelId) ?? null;
+  }
+
   private renderSettingsSheet(): void {
     const doc = this.document();
     const found = doc && this.sheetPanelId ? this.findPanel(doc, this.sheetPanelId) : null;
@@ -964,7 +980,9 @@ export class DashboardEditorController implements DashboardEditor {
     titleInput.placeholder = def?.label ?? panel.widget;
     titleInput.addEventListener("change", () => {
       this.sheetFocus = "panel-title";
-      this.applyPanelTitle(dashboard.id, panel, titleInput.value);
+      const now = this.currentPanel(dashboard.id, panel.id);
+      if (now) this.applyPanelTitle(dashboard.id, now, titleInput.value);
+      else this.renderSheet();
     });
     titleField.append(titleInput);
     this.sheetEl.append(titleField);
@@ -975,14 +993,16 @@ export class DashboardEditorController implements DashboardEditor {
     half.setAttribute("aria-pressed", String(panel.layout.span === 1));
     half.addEventListener("click", () => {
       this.sheetFocus = "panel-half";
-      this.setPanelWidth(dashboard.id, panel, 1, null);
+      const now = this.currentPanel(dashboard.id, panel.id);
+      if (now) this.setPanelWidth(dashboard.id, now, 1, null);
       this.renderSheet();
     });
     const fullWidth = button("dash-editor-btn", "Full", "panel-full");
     fullWidth.setAttribute("aria-pressed", String(panel.layout.span === 2));
     fullWidth.addEventListener("click", () => {
       this.sheetFocus = "panel-full";
-      this.setPanelWidth(dashboard.id, panel, 2, null);
+      const now = this.currentPanel(dashboard.id, panel.id);
+      if (now) this.setPanelWidth(dashboard.id, now, 2, null);
       this.renderSheet();
     });
     widthField.append(half, fullWidth);
@@ -996,7 +1016,8 @@ export class DashboardEditorController implements DashboardEditor {
     this.label(shorter, "Make this panel shorter");
     shorter.addEventListener("click", () => {
       this.sheetFocus = "panel-shorter";
-      this.setPanelRows(dashboard.id, panel, panel.layout.rows - 1, null);
+      const now = this.currentPanel(dashboard.id, panel.id);
+      if (now) this.setPanelRows(dashboard.id, now, now.layout.rows - 1, null);
       this.renderSheet();
     });
     const readout = el(
@@ -1009,7 +1030,8 @@ export class DashboardEditorController implements DashboardEditor {
     this.label(taller, "Make this panel taller");
     taller.addEventListener("click", () => {
       this.sheetFocus = "panel-taller";
-      this.setPanelRows(dashboard.id, panel, panel.layout.rows + 1, null);
+      const now = this.currentPanel(dashboard.id, panel.id);
+      if (now) this.setPanelRows(dashboard.id, now, now.layout.rows + 1, null);
       this.renderSheet();
     });
     stepper.append(shorter, readout, taller);
@@ -1062,11 +1084,9 @@ export class DashboardEditorController implements DashboardEditor {
         input.checked = field.value === true;
         input.addEventListener("change", () => {
           this.sheetFocus = act;
-          this.applyConfig(
-            dashboardId,
-            panel,
-            applyFieldValue(panel.config, field.key, input.checked),
-          );
+          const now = this.currentPanel(dashboardId, panel.id);
+          if (!now) return this.renderSheet();
+          this.applyConfig(dashboardId, now, applyFieldValue(now.config, field.key, input.checked));
         });
         row.append(input, label);
       } else {
@@ -1081,14 +1101,14 @@ export class DashboardEditorController implements DashboardEditor {
               this.renderSheet();
               return;
             }
-            this.applyConfig(dashboardId, panel, applyFieldValue(panel.config, field.key, value));
+            const now = this.currentPanel(dashboardId, panel.id);
+            if (!now) return this.renderSheet();
+            this.applyConfig(dashboardId, now, applyFieldValue(now.config, field.key, value));
             return;
           }
-          this.applyConfig(
-            dashboardId,
-            panel,
-            applyFieldValue(panel.config, field.key, input.value),
-          );
+          const now = this.currentPanel(dashboardId, panel.id);
+          if (!now) return this.renderSheet();
+          this.applyConfig(dashboardId, now, applyFieldValue(now.config, field.key, input.value));
         });
         row.append(label, input);
       }

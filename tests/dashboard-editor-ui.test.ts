@@ -563,6 +563,33 @@ describe("panel settings", () => {
     expect(maybeAct("config-json")).not.toBeNull();
   });
 
+  it("acts on the panel as it is now, not as it was when the sheet was drawn", () => {
+    build(doc("follower"));
+    startEditing();
+    tool("p0", "settings").click();
+    expect(root.querySelector(".dash-editor-stepper output")?.textContent).toBe("2 rows");
+
+    // Somebody else -- the agent, another window -- moves the panel on.
+    clock += 60_000;
+    const changed = host.getDocument();
+    changed.dashboards[0].panels[0].layout.rows = 5;
+    changed.dashboards[0].panels[0].config = { follow: false, limit: 99 };
+    host.setDocument(changed, { persist: false });
+
+    act("panel-taller").click();
+    expect(host.getDocument().dashboards[0].panels[0].layout.rows).toBe(6);
+
+    const follow = act("config-follow") as HTMLInputElement;
+    follow.checked = true;
+    follow.dispatchEvent(new Event("change"));
+    // `limit` was not in the sheet's copy of the config; writing the stale copy
+    // back would have dropped it.
+    expect(host.getDocument().dashboards[0].panels[0].config).toEqual({
+      follow: true,
+      limit: 99,
+    });
+  });
+
   it("closes itself when its panel is removed", () => {
     build(doc("notebook", "jobs"));
     startEditing();
@@ -693,6 +720,16 @@ describe("what leaves the editor", () => {
     expect((act("add-panel") as HTMLButtonElement).disabled).toBe(false);
     act("undo").click();
     expect(panelOrder()).toEqual(["p0"]);
+  });
+
+  it("fills the dashboard list again when the same editor is attached to a new host", () => {
+    build(doc("notebook"));
+    host.dispose();
+    host = new DashboardHost(root, { sources: sources.sources, registry, editor });
+    host.setDocument(doc("notebook"), { persist: false });
+    const select = act("select-dashboard") as HTMLSelectElement;
+    expect([...select.options].map((o) => o.value)).toEqual(["d"]);
+    expect(select.value).toBe("d");
   });
 
   it("stops touching the document once the host disposes it", () => {
