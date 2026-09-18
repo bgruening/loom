@@ -101,10 +101,21 @@ function countSteps(steps: PlanStep[]): PlanCounts {
  * directly below reports the failure. The two panels contradict each other and
  * the wrong one is first.
  *
- * So: the last plan that has been started and is not finished, which is the one
- * being worked on. If none is -- everything finished, or nothing begun -- fall
- * back to the last one, which is right for both of those. The rest stay
- * reachable through "older".
+ * So: the last plan that has been started and still has a step to do. If none
+ * has -- everything is over, or nothing has begun -- fall back to the last one,
+ * which is right for both of those. The rest stay reachable through "older".
+ *
+ * "Still has a step to do" rather than "is not finished" on purpose. A plan
+ * whose last unticked step failed has nothing pending and nothing more will
+ * happen in it, but it is not all-done either; reading that as unfinished
+ * pinned it as the current plan for good, and no plan written after it could
+ * ever take over. It also made the panel disagree with itself, because the
+ * header summarises those same counts as "Finished, but 1 step failed".
+ *
+ * The one case this deliberately answers differently from "the last plan" is a
+ * started-then-abandoned plan sitting above a finished one: the abandoned plan
+ * wins, because it is the one with work outstanding. That is the point of the
+ * panel, and the finished plan is one click away under "other plans".
  *
  * `undefined` for an empty list rather than a lie in the signature: the caller
  * in this file has already returned by then, but this is exported.
@@ -113,8 +124,8 @@ export function currentPlan(plans: PlanSection[]): PlanSection | undefined {
   for (let i = plans.length - 1; i >= 0; i--) {
     const counts = countSteps(plans[i].steps);
     const started = counts.done > 0 || counts.failed > 0;
-    const finished = counts.total > 0 && counts.done === counts.total;
-    if (started && !finished) return plans[i];
+    const pending = counts.total - counts.done - counts.failed;
+    if (started && pending > 0) return plans[i];
   }
   return plans[plans.length - 1];
 }

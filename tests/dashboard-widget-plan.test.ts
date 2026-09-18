@@ -497,6 +497,28 @@ describe("plan widget -- more than one plan", () => {
     expect(currentPlan([])).toBeUndefined();
   });
 
+  it("moves on once a plan has nothing left to do, even if it ended badly", () => {
+    // Every step ticked but one, and that one failed: nothing pending, nothing
+    // more will happen. Reading that as "unfinished" pinned it as current for
+    // good and no later plan could ever take over -- while the header called
+    // the same counts "Finished, but 1 step failed".
+    const md = "## Plan A: Alpha\n\n- [x] a\n- [x] b\n- [!] c\n\n## Plan B: Beta\n\n- [ ] e\n";
+    expect(currentPlan(parsePlanSections(md))?.title).toBe("Plan B: Beta");
+  });
+
+  it("moves on from a plan where everything failed", () => {
+    const md = "## Plan A: Alpha\n\n- [!] a\n- [!] b\n\n## Plan B: Beta\n\n- [ ] e\n";
+    expect(currentPlan(parsePlanSections(md))?.title).toBe("Plan B: Beta");
+  });
+
+  it("prefers a plan with work outstanding over a later one that is finished", () => {
+    // Deliberate, and the one case that differs from "the last plan wins": the
+    // abandoned plan is the one with steps still to do, which is the question
+    // this panel answers. The finished plan is one click away under "other".
+    const md = "## Plan A: Alpha\n\n- [x] a\n- [ ] b\n\n## Plan B: Beta\n\n- [x] e\n- [x] f\n";
+    expect(currentPlan(parsePlanSections(md))?.title).toBe("Plan A: Alpha");
+  });
+
   it("falls back to the last plan when none has been started", () => {
     const h = harness();
     planWidget.mount(h.el, h.ctx);
