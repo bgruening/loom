@@ -374,6 +374,21 @@ describe("plan widget -- hostile and odd input", () => {
     expect(has(h, "<script>bad()</script>")).toBe(true);
   });
 
+  it("names a step whose title is nothing but overrides", () => {
+    // `safeName` replaces a run of unsafe characters with ONE SPACE, so a title
+    // made entirely of them comes back as `" "` -- which is truthy, so the
+    // `|| "Untitled step"` this panel used could never fire and the row drew a
+    // blank. `safeNameOr` trims before it decides. (A plan title always carries
+    // its `Plan A:` label through the parser, so the two plan-title call sites
+    // are defensive; this is the one a notebook can actually reach.)
+    const h = harness();
+    planWidget.mount(h.el, h.ctx);
+    h.notebook("## Plan A: Real title [local]\n\n- [ ] 1. **\u202e\u202d\u202c**\n");
+
+    expect(h.text()).toContain("Untitled step");
+    expect(h.text()).not.toContain("\u202e");
+  });
+
   // The host's heading parser reads any trailing [word] as routing, so a title
   // ending in a bracketed chromosome would otherwise be announced as a routing
   // decision the agent never made.

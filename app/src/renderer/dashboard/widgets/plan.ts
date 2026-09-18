@@ -10,7 +10,7 @@
  * carries a glyph and a word before it carries a colour.
  */
 
-import { safeName } from "./text-safety.js";
+import { safeName, safeNameOr } from "./text-safety.js";
 import type { PlanSection, PlanSnapshot, PlanStep, WidgetDefinition } from "../widget-api.js";
 
 /**
@@ -223,7 +223,9 @@ function routingSentence(routing: string | null): string | null {
  */
 function stepRouting(routing: string | null): string | null {
   if (!routing) return null;
-  const trimmed = safeName(routing);
+  // `safeName` replaces a run of overrides with one space, so the result of a
+  // wholly hostile routing string is `" "` -- truthy, and nothing here trims it.
+  const trimmed = safeName(routing).trim();
   if (!trimmed) return null;
   if (/^local$/i.test(trimmed)) return "On this computer";
   // Step routing is free text, so it is a name like any other.
@@ -293,7 +295,7 @@ function el<K extends keyof HTMLElementTagNameMap>(
  * gives a tool argument, for the same reason.
  */
 function stepLabel(step: PlanStep): string {
-  const title = safeName(step.title || step.detail) || "Untitled step";
+  const title = safeNameOr(step.title || step.detail, "Untitled step");
   return `${step.number}. ${title}`;
 }
 
@@ -381,7 +383,7 @@ function calloutFor(step: PlanStep, kind: "failed" | "next"): HTMLElement {
 
 function planHeading(plan: PlanSection): DocumentFragment {
   const frag = document.createDocumentFragment();
-  frag.append(el("div", "dash-plan-title", safeName(plan.title) || "Untitled plan"));
+  frag.append(el("div", "dash-plan-title", safeNameOr(plan.title, "Untitled plan")));
   const routing = routingSentence(plan.routing);
   if (routing) frag.append(el("div", "dash-plan-routing dash-meta", routing));
   return frag;
@@ -544,7 +546,7 @@ function olderPlans(
     // what "finished" or "stopped" means.
     const verdict = summarize(counts);
 
-    const title = safeName(plan.title) || "Untitled plan";
+    const title = safeNameOr(plan.title, "Untitled plan");
     const row = el("button", "dash-plan-older-row");
     row.type = "button";
     row.append(stateChip({ glyph: verdict.glyph, word: verdict.text, state: verdict.state }));
