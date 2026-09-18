@@ -285,6 +285,40 @@ describe("state folding", () => {
     expect(describeRun(row, NOW)).toBe("Stopping. Galaxy is still shutting this down.");
   });
 
+  it("draws no red stripe on a run being shut down, and keeps its explanation", () => {
+    const h = harness({ show: "all" });
+    const dispose = jobsWidget.mount(h.el, h.ctx);
+    h.sources.setNotebook(
+      notebookWith([
+        invocationBlock({
+          invocation_id: "inv-cancelling",
+          galaxy_server_url: "https://usegalaxy.org",
+          notebook_anchor: "plan-a-step-1",
+          label: "chrM alignment",
+          submitted_at: ago(10 * MINUTE),
+          status: "in_progress",
+          summary: '"Workflow cancelling: 0 job(s) stopped, 3 still running"',
+          total_jobs: 12,
+          completed_jobs: 0,
+          failed_jobs: 9,
+          last_polled_at: ago(20_000),
+        }),
+      ]),
+    );
+    const item = h.el.querySelector(".dash-jobs-row");
+    expect(item?.getAttribute("data-state")).toBe("stopping");
+    expect(item?.classList.contains("is-failed")).toBe(false);
+    // The bar is drawn, and the nine deletes are not painted as errors in it.
+    expect(h.el.querySelector(".dash-jobs-bar")).not.toBeNull();
+    expect(h.el.querySelector(".dash-jobs-bar-fail")).toBeNull();
+    expect(h.el.querySelector(".dash-jobs-bar")?.getAttribute("aria-label")).toContain(
+      "9 did not finish",
+    );
+    // And the brain's own sentence about the cancel is not suppressed.
+    expect(h.el.querySelector(".dash-jobs-why")?.textContent).toContain("Workflow cancelling");
+    teardown(h, dispose);
+  });
+
   it("still raises the alarm for a run that is failing rather than stopping", () => {
     // Be careful with this fixture. The summary below is *also* what the brain
     // writes while a cancel is settling, because rollUpInvocationJobs scores a

@@ -783,7 +783,11 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
           if (url) img.src = url;
         }
       } catch (err) {
-        ctx.fail(err);
+        // Not ctx.fail: this is a cosmetic refresh of something already on
+        // screen, and the same file two functions up keeps its rows rather
+        // than turning into an error card over a preview. Tearing the whole
+        // panel down because a cache-buster threw would be the louder bug.
+        console.error("[dashboard] results image re-check failed:", err);
       }
     }, IMAGE_RECHECK_MS);
     ctx.onDispose(() => clearInterval(recheck));

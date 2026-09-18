@@ -657,7 +657,9 @@ function progressBar(row: RunRow): HTMLElement | null {
     span.style.width = pct(done, total);
     bar.append(span);
   }
-  if (failed > 0) {
+  // Not on a run being shut down: those are Galaxy's own deletes in the failed
+  // counter, and a red stripe is the same claim the headline stopped making.
+  if (failed > 0 && row.state !== "stopping") {
     const span = node("span", "dash-jobs-bar-fail");
     span.style.width = pct(failed, total);
     bar.append(span);
@@ -717,7 +719,11 @@ function detailRows(row: RunRow, now: number): Array<[string, string]> {
  * healthy running row it would only repeat the counts.
  */
 function shouldShowSummary(row: RunRow): boolean {
-  return row.summary !== null && (!row.live || needsAttention(row));
+  // `stopping` is live and deliberately raises no attention, so neither arm
+  // catches it -- and it is the one live state where the brain's sentence says
+  // something the headline cannot: which of the jobs had finished before the
+  // user stopped it.
+  return row.summary !== null && (!row.live || needsAttention(row) || row.state === "stopping");
 }
 
 function renderRow(row: RunRow, now: number, compact: boolean, openIds: Set<string>): HTMLElement {
