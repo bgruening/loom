@@ -55,53 +55,67 @@ describe("dashboard-store write serialization", () => {
     return doc;
   }
 
+  /**
+   * One interleaving is not a measurement. Unlocked, the reset race is won by
+   * the update most of the time but not every time -- an independent reviewer
+   * measured 98 in 100 and a single-shot assertion caught it about one run in
+   * two. Repeating it turns "it happened to pass" into a number: pre-fix these
+   * fail within the first few trials, post-fix all TRIALS pass.
+   */
+  const TRIALS = 40;
+
   it("does not let a reset land inside an update's check-then-rename", async () => {
-    await updateDashboardDocument((current) => {
-      current.dashboards[0].title = "original";
-      return { ok: true, document: current };
-    });
-
-    // Started on the same tick, which is the shape the reviewer reproduced: a
-    // user typing `/dashboard reset` while a tool call is already in flight.
-    const [reset, update] = await Promise.all([
-      replaceDashboardDocument(withTitle("reset")),
-      updateDashboardDocument((current) => {
-        current.dashboards[0].title = `${current.dashboards[0].title}+edited`;
+    for (let trial = 0; trial < TRIALS; trial++) {
+      await updateDashboardDocument((current) => {
+        current.dashboards[0].title = "original";
         return { ok: true, document: current };
-      }),
-    ]);
+      });
 
-    expect(reset.ok).toBe(true);
-    expect(update.ok).toBe(true);
-    // The update ran second, so it edited the reset document rather than the
-    // pre-reset one. Unlocked, it reads "original", and the reset it reported
-    // as written is nowhere on disk.
-    expect(titleOnDisk()).toBe("reset+edited");
+      // Started on the same tick, which is the shape the reviewer reproduced: a
+      // user typing `/dashboard reset` while a tool call is already in flight.
+      const [reset, update] = await Promise.all([
+        replaceDashboardDocument(withTitle("reset")),
+        updateDashboardDocument((current) => {
+          current.dashboards[0].title = `${current.dashboards[0].title}+edited`;
+          return { ok: true, document: current };
+        }),
+      ]);
+
+      expect(reset.ok).toBe(true);
+      expect(update.ok).toBe(true);
+      // The update ran second, so it edited the reset document rather than the
+      // pre-reset one. Unlocked, it reads "original", and the reset it reported
+      // as written is nowhere on disk -- two successes, one of them a lie.
+      expect(titleOnDisk()).toBe("reset+edited");
+    }
   });
 
   it("does not let an undo and an update both write from the same revision", async () => {
-    await updateDashboardDocument((current) => {
-      current.dashboards[0].title = "first";
-      return { ok: true, document: current };
-    });
-    await updateDashboardDocument((current) => {
-      current.dashboards[0].title = "second";
-      return { ok: true, document: current };
-    });
-
-    const [undone, update] = await Promise.all([
-      undoDashboardChange(),
-      updateDashboardDocument((current) => {
-        current.dashboards[0].title = `${current.dashboards[0].title}+edited`;
+    for (let trial = 0; trial < TRIALS; trial++) {
+      resetDashboardUndo();
+      await updateDashboardDocument((current) => {
+        current.dashboards[0].title = "first";
         return { ok: true, document: current };
-      }),
-    ]);
+      });
+      await updateDashboardDocument((current) => {
+        current.dashboards[0].title = "second";
+        return { ok: true, document: current };
+      });
 
-    expect(undone).toMatchObject({ ok: true, restored: "previous" });
-    expect(update.ok).toBe(true);
-    // Undo ran first and put "first" back, so the edit is on top of that.
-    // Unlocked, both compare-and-swaps pass against the same revision -- undo
-    // reports the restore and the update writes over it from the stale read.
-    expect(titleOnDisk()).toBe("first+edited");
+      const [undone, update] = await Promise.all([
+        undoDashboardChange(),
+        updateDashboardDocument((current) => {
+          current.dashboards[0].title = `${current.dashboards[0].title}+edited`;
+          return { ok: true, document: current };
+        }),
+      ]);
+
+      expect(undone).toMatchObject({ ok: true, restored: "previous" });
+      expect(update.ok).toBe(true);
+      // Undo ran first and put "first" back, so the edit is on top of that.
+      // Unlocked, both compare-and-swaps pass against the same revision -- undo
+      // reports the restore and the update writes over it from the stale read.
+      expect(titleOnDisk()).toBe("first+edited");
+    }
   });
 });
