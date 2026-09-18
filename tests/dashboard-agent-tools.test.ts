@@ -31,6 +31,7 @@ import {
   reassertProvenance,
   registerDashboardTools,
   widgetCatalogLines,
+  MAX_READ_CHARS,
 } from "../extensions/loom/dashboard-tools";
 import {
   getDashboardPath,
@@ -205,6 +206,58 @@ describe("dashboard_read", () => {
     expect(result.documentOmitted).toContain("too large");
     // The panel ids a write needs are still there.
     expect((result.summary as string[])[0]).toContain("p-fat");
+  });
+
+  it("caps the summary too, not just the document it stands in for", async () => {
+    // Omitting the document bounds nothing on its own: the summary is built
+    // from ids the agent writes into the file and nothing caps their length,
+    // so a layout well under the store's byte cap used to come back as a
+    // ~170,000-character tool result made almost entirely of summary.
+    seed({
+      version: 1,
+      activeId: "d0",
+      dashboards: Array.from({ length: 10 }, (_, d) => ({
+        id: `d${d}`,
+        title: `Dashboard ${d}`,
+        panels: Array.from({ length: 40 }, (_, i) => ({
+          id: `p-${d}-${i}-${"y".repeat(200)}`,
+          widget: "notebook" as const,
+          config: {},
+          layout: { span: 2 as const, rows: 3 as const },
+          addedBy: "preset" as const,
+        })),
+      })),
+    });
+    const tool = tools().get("dashboard_read");
+    const raw = (await tool!.execute("call-1", {}, new AbortController().signal, vi.fn(), {}))
+      .content[0].text;
+    const result = JSON.parse(raw) as Record<string, unknown>;
+
+    expect(result.success).toBe(true);
+    expect(raw.length).toBeLessThan(MAX_READ_CHARS);
+    // Still useful: the first dashboard and its first panel id are in there.
+    expect((result.summary as string[])[0]).toContain("p-0-0-");
+    expect((result.summary as string[]).at(-1)).toContain("not shown");
+  });
+
+  it("does not quote a 240,000-character activeId back in the diagnostics", async () => {
+    fs.writeFileSync(
+      dashPath,
+      JSON.stringify({
+        version: 1,
+        activeId: "z".repeat(240_000),
+        dashboards: [{ id: "current-analysis", title: "Current analysis", panels: [] }],
+      }),
+      "utf-8",
+    );
+    const tool = tools().get("dashboard_read");
+    const raw = (await tool!.execute("call-1", {}, new AbortController().signal, vi.fn(), {}))
+      .content[0].text;
+
+    expect(raw.length).toBeLessThan(MAX_READ_CHARS);
+    expect((JSON.parse(raw) as { problems: { message: string }[] }).problems[0].message).toContain(
+      "more characters",
+    );
   });
 });
 
