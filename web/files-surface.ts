@@ -62,6 +62,8 @@ export interface FilesSurfaceOptions {
   remote?: boolean;
   /** $HOME for the sensitive-path policy. Injectable so a test does not depend on the runner's. */
   home?: string;
+  /** Whole-tree entry ceiling. Defaults to MAX_TOTAL_ENTRIES. */
+  maxEntries?: number;
 }
 
 export type WebFileReadResult =
@@ -134,7 +136,10 @@ export function resolveInJail(
 
   const abs = path.resolve(cwd, path.normalize(relPath));
   const rel = path.relative(cwd, abs);
-  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
+  // `startsWith("..")` -- the usual spelling, and the one files-handler.ts uses
+  // -- also catches a file legitimately named `..notes`. path.relative only ever
+  // emits `..` as a whole segment, so compare it as one.
+  if (rel === "" || rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel)) {
     return { ok: false, error: "path leaves the working directory" };
   }
 
@@ -275,7 +280,9 @@ export async function listFilesForWeb(
   if (options.remote) return { ok: false, error: REMOTE_LIST_REFUSAL };
   const home = options.home ?? homedir();
   try {
-    const children = await walkDir(cwd, "", 0, home, { remaining: MAX_TOTAL_ENTRIES });
+    const children = await walkDir(cwd, "", 0, home, {
+      remaining: options.maxEntries ?? MAX_TOTAL_ENTRIES,
+    });
     return {
       ok: true,
       root: { name: path.basename(cwd) || cwd, relPath: "", type: "directory", children },
