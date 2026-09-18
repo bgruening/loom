@@ -15,8 +15,10 @@
  *    model wrote and text a command printed.
  *  - **A key whose NAME looks like a credential keeps its name and loses its
  *    value.** That is most of the fence, and the rest of it is a credential
- *    name inside a token list hiding what it introduces, because a command
- *    line recorded as argv has no keys to read. It is worth being precise
+ *    *option* inside a token list hiding what it introduces, because a command
+ *    line recorded as argv would have no keys to read -- no producer writes
+ *    one today, so that half is a guard rather than a fix. It is worth being
+ *    precise
  *    about what still walks through: it does not scan values, so a key pasted
  *    into the middle of a command string leaks, and a payload that uses a
  *    whole secret as a KEY shows that key by name -- a Galaxy job id has the
@@ -86,33 +88,52 @@ const HIDDEN = "[hidden]";
 const DETAIL_KEY_MAX = 80;
 
 /**
- * A `--api-key`-shaped token: an option name, a header name, an environment
- * variable, and nothing that could be a sentence.
+ * `--api-key`, `-H`: an option, and nothing a filename could be mistaken for.
+ * The leading dash is the whole of the discrimination. Without it the stem
+ * match is far too eager on ordinary data -- `monkey.png` contains "key" and
+ * `session1.dat` contains "session", and either of those blanking the file
+ * listed after it is worse than the leak this guards against.
  */
-const TOKEN_NAME = /^-{0,2}[A-Za-z0-9_.-]{1,64}$/;
+const OPTION_FLAG = /^-{1,2}[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/;
+
+/** `Authorization`, `api_key`: a bare header or variable name, no spaces. */
+const HEADER_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 
 /**
  * Hide what a credential-shaped name introduces inside a token list.
  *
  * A command line recorded as `["--api-key", "abc123"]` hands the fence no key
- * to read, so the same secret that `{api_key: "abc123"}` would have lost walks
- * straight through -- and a tool-start or exec-guard payload recording argv is
- * exactly that shape. Either half of the pair is covered: `--api-key abc123`
- * as two elements, and `--api-key=abc123` or `Authorization: Bearer abc123` as
- * one. The name has to look like a name, so a sentence that happens to contain
- * the word "secret" does not blank whatever follows it.
+ * to read, so the same secret that `{api_key: "abc123"}` would have lost would
+ * walk straight through. Every half of the pair is covered: `--api-key abc123`
+ * as two elements, `--api-key=abc123` as one, and `Authorization:` introducing
+ * `Bearer abc123` as the element after it.
+ *
+ * **Nothing in this build writes a payload of that shape** -- `activity-hooks`
+ * and `exec-guard/gate` both record `redactArgs(toolName, args)`, which is the
+ * tool's JSON argument object -- so this is a guard against a shape the log may
+ * grow, not one it has. That is exactly why it has to be narrow: over-redaction
+ * on a field name costs a click, but silently blanking one filename in a list
+ * of results because the one before it was called `monkey.png` is a reader
+ * losing data with no way to work out why.
  */
 function redactToken(token: string): { text: string; hideNext: boolean } {
+  const capped = truncate(token, DETAIL_STRING_MAX);
   const at = token.search(/[=:]/);
   if (at > 0) {
     const name = token.slice(0, at);
-    if (TOKEN_NAME.test(name) && CREDENTIAL_KEY.test(name)) {
-      return { text: `${token.slice(0, at + 1)}${HIDDEN}`, hideNext: false };
+    const introduces = OPTION_FLAG.test(name) || HEADER_NAME.test(name);
+    if (introduces && CREDENTIAL_KEY.test(name)) {
+      // `Authorization:` with nothing after it introduces the NEXT element.
+      // Writing "[hidden]" here would claim to have hidden something and then
+      // print the value in the element after it.
+      return token.length > at + 1
+        ? { text: `${token.slice(0, at + 1)}${HIDDEN}`, hideNext: false }
+        : { text: capped, hideNext: true };
     }
-  } else if (at < 0 && TOKEN_NAME.test(token) && CREDENTIAL_KEY.test(token)) {
-    return { text: truncate(token, DETAIL_STRING_MAX), hideNext: true };
+  } else if (at < 0 && OPTION_FLAG.test(token) && CREDENTIAL_KEY.test(token)) {
+    return { text: capped, hideNext: true };
   }
-  return { text: truncate(token, DETAIL_STRING_MAX), hideNext: false };
+  return { text: capped, hideNext: false };
 }
 
 const EMPTY_TEXT =

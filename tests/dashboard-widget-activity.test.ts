@@ -379,6 +379,9 @@ describe("statusWord", () => {
 
 // -- the credential fence ----------------------------------------------------
 
+/** What the fence writes in place of a value. */
+const HIDDEN_MARKER = "[hidden]";
+
 describe("redaction", () => {
   it("hides the value of anything that looks like a credential, at any depth", () => {
     const out = redactForDisplay({
@@ -504,6 +507,43 @@ describe("redaction", () => {
     const text = JSON.stringify(out);
     expect(text).toContain("reads.fq");
     expect(text).toContain("https://host:8080/galaxy");
+  });
+
+  it("does not blank a file because the one before it is called monkey.png", () => {
+    // The whole failure mode of a name-shaped heuristic: an ordinary list of
+    // results is not a command line, and a stem match with no leading dash
+    // fires on `monkey`, `session1.dat`, `donkey_genome.fa` and `keygen.py`.
+    // Losing a filename with no way to work out why is worse than the leak.
+    const out = redactForDisplay({
+      outputs: ["monkey.png", "results.csv", "summary.tsv"],
+      datasets: ["donkey_genome.fa", "reads.fastq"],
+      files: ["session1.dat", "session2.dat", "session3.dat", "session4.dat"],
+      argv: ["python", "keygen.py", "out.txt"],
+    });
+    const text = JSON.stringify(out);
+    expect(text).not.toContain(HIDDEN_MARKER);
+    for (const kept of [
+      "results.csv",
+      "summary.tsv",
+      "reads.fastq",
+      "session2.dat",
+      "session4.dat",
+      "out.txt",
+    ]) {
+      expect(text, kept).toContain(kept);
+    }
+  });
+
+  it("hides the element a bare header name introduces, rather than claiming to", () => {
+    // `Authorization:` as its own element carries no value, so writing
+    // "[hidden]" into it hides nothing and prints the real value next door.
+    const out = redactForDisplay({
+      argv: ["curl", "-H", "Authorization:", "Bearer t0kenv4lue", "https://usegalaxy.org"],
+    });
+    const text = JSON.stringify(out);
+    expect(text).not.toContain("t0kenv4lue");
+    expect(text).toContain("Authorization:");
+    expect(text).toContain("https://usegalaxy.org");
   });
 
   it("caps a key, because a payload can use a whole value as one", () => {
