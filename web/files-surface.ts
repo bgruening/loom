@@ -54,6 +54,14 @@ const NOTEBOOK_FILENAME = "notebook.md";
 const MAX_TOTAL_ENTRIES = 20000;
 
 /**
+ * Total path text the listing may emit. See `WalkBudget.bytes`: the entry
+ * ceiling bounds the work, this bounds the response. Two megabytes of paths is
+ * far more tree than anyone reads and two orders of magnitude under what one
+ * self-referential symlink produced without it.
+ */
+const MAX_PATH_BYTES = 2 * 1024 * 1024;
+
+/**
  * The non-hidden names files-handler.ts's FS_BLOCKLIST drops. The dotted ones it
  * also lists are covered by the blanket dotfile rule below, so only these three
  * need naming.
@@ -74,6 +82,8 @@ export interface FilesSurfaceOptions {
   maxEntries?: number;
   /** Per-directory entry ceiling. Defaults to MAX_ENTRIES_PER_DIR. */
   maxEntriesPerDir?: number;
+  /** Whole-tree path-text ceiling. Defaults to MAX_PATH_BYTES. */
+  maxPathBytes?: number;
 }
 
 export type WebFileReadResult =
@@ -163,6 +173,20 @@ export function resolveInJail(
 }
 
 /**
+ * Is `real` the cwd or inside it?
+ *
+ * Spelled out rather than `startsWith(cwdReal + path.sep)` because that becomes
+ * `startsWith("//")` when the cwd is the filesystem root, which matches nothing
+ * -- with cwd at `/`, a listing came back holding one entry. It failed safe, and
+ * a cwd at `/` is pathological, but the check was simply wrong there.
+ */
+function isWithinCwd(real: string, cwdReal: string): boolean {
+  if (real === cwdReal) return true;
+  const prefix = cwdReal.endsWith(path.sep) ? cwdReal : cwdReal + path.sep;
+  return real.startsWith(prefix);
+}
+
+/**
  * The half of the jail that needs the disk: the target's real path has to stay
  * inside the cwd's real path, and the policy above has to hold for the real name
  * too. Throws nothing -- an ELOOP from a symlink cycle or an ENOENT comes back
@@ -187,7 +211,7 @@ async function resolveRealWithin(
     if (code === "ELOOP") return { ok: false, error: "path leaves the working directory" };
     return { ok: false, error: "no such file" };
   }
-  if (real !== cwdReal && !real.startsWith(cwdReal + path.sep)) {
+  if (!isWithinCwd(real, cwdReal)) {
     return { ok: false, error: "path leaves the working directory" };
   }
   const refusal = pathRefusal(path.relative(cwdReal, real), real, home);
@@ -208,7 +232,7 @@ async function linkTarget(cwdReal: string, abs: string, home: string): Promise<s
   } catch {
     return null;
   }
-  if (real !== cwdReal && !real.startsWith(cwdReal + path.sep)) return null;
+  if (!isWithinCwd(real, cwdReal)) return null;
   if (pathRefusal(path.relative(cwdReal, real), real, home)) return null;
   return real;
 }
@@ -218,6 +242,17 @@ interface WalkBudget {
   remaining: number;
   /** Entries to examine in any one directory. */
   perDir: number;
+  /**
+   * Bytes of path text left to emit.
+   *
+   * The entry ceiling bounds the work and not the answer, and those are not
+   * the same dimension: every node carries a `relPath` whose length grows with
+   * depth times name length, so one symlink to the cwd named with 180
+   * characters turned a nine-file directory into 13.8 MB of JSON down the
+   * socket -- roughly 40 MB with a 255-character name. Charging for the path
+   * text bounds what actually crosses the wire.
+   */
+  bytes: number;
 }
 
 async function walkDir(
@@ -228,7 +263,7 @@ async function walkDir(
   home: string,
   budget: WalkBudget,
 ): Promise<FileNode[]> {
-  if (depth > MAX_DEPTH || budget.remaining <= 0) return [];
+  if (depth > MAX_DEPTH || budget.remaining <= 0 || budget.bytes <= 0) return [];
   const absDir = path.resolve(cwd, relDir);
 
   // `opendir` rather than `readdir`: readdir materializes the whole directory
@@ -256,6 +291,8 @@ async function walkDir(
     if (segmentRefusal(e.name) || isSensitivePath(absPath, home)) continue;
 
     const childRel = toPosix(path.join(relDir, e.name));
+    budget.bytes -= childRel.length + e.name.length;
+    if (budget.bytes <= 0) break;
 
     let isDir = e.isDirectory();
     let isFile = e.isFile();
@@ -318,6 +355,7 @@ export async function listFilesForWeb(
     const children = await walkDir(cwd, cwdReal, "", 0, home, {
       remaining: options.maxEntries ?? MAX_TOTAL_ENTRIES,
       perDir: options.maxEntriesPerDir ?? MAX_ENTRIES_PER_DIR,
+      bytes: options.maxPathBytes ?? MAX_PATH_BYTES,
     });
     return {
       ok: true,
@@ -462,7 +500,7 @@ async function fdRealPath(fd: fsp.FileHandle): Promise<string | null> {
 }
 
 function withinJail(real: string, cwdReal: string, home: string): boolean {
-  if (real !== cwdReal && !real.startsWith(cwdReal + path.sep)) return false;
+  if (!isWithinCwd(real, cwdReal)) return false;
   return pathRefusal(path.relative(cwdReal, real), real, home) === null;
 }
 

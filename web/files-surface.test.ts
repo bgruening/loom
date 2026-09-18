@@ -619,3 +619,32 @@ describe("readNotebookForWeb", () => {
     expect(res.ok).toBe(false);
   });
 });
+
+describe("a listing that would be enormous", () => {
+  it("bounds the bytes it emits, not just the entries it examines", async () => {
+    // One symlink to the cwd, named with 180 characters, turned a nine-file
+    // directory into 13.8 MB of JSON: the entry ceiling bounds the work and
+    // the response size is a different dimension.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "files-surface-bytes-"));
+    try {
+      for (let i = 0; i < 9; i++) fs.writeFileSync(path.join(root, `f${i}.txt`), "x");
+      fs.symlinkSync(root, path.join(root, "L".repeat(180)));
+
+      const res = await listFilesForWeb(root, undefined, { home: root });
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      const bytes = Buffer.byteLength(JSON.stringify(res.root), "utf8");
+      expect(bytes).toBeLessThan(4 * 1024 * 1024);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("a cwd at the filesystem root still contains correctly", async () => {
+    // `startsWith(cwdReal + sep)` became startsWith("//") there, which matches
+    // nothing, so a listing came back holding a single entry.
+    const res = await listFilesForWeb("/", undefined, { home: "/nonexistent", maxEntries: 40 });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect((res.root.children ?? []).length).toBeGreaterThan(1);
+  });
+});
