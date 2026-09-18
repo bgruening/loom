@@ -1028,10 +1028,6 @@ export async function checkInvocations(
         // A failure with work still in flight. Keep the block in_progress so the
         // rest stays under observation -- terminal blocks are never polled again
         // -- but say so in the summary and let the poller raise it once.
-        const tail =
-          activeJobs > 0
-            ? `${activeJobs} still running`
-            : `invocation still scheduling (state: ${inv.state})`;
         // A cancel is not instant: Galaxy moves the invocation to `cancelled`
         // and then deletes its jobs one at a time, and rollUpInvocationJobs
         // scores every `deleted` job in the same counter as a real error. Say
@@ -1039,6 +1035,12 @@ export async function checkInvocations(
         // from a failure for as long as the deletes take, and raises a red
         // alarm about something the user asked for.
         const stopping = inv.state === "cancelled" || inv.state === "cancelling";
+        const tail =
+          activeJobs > 0
+            ? `${activeJobs} still running`
+            : stopping
+              ? `waiting for Galaxy to finish the cancel (state: ${inv.state})`
+              : `invocation still scheduling (state: ${inv.state})`;
         transition = {
           status: "in_progress",
           summary: stopping

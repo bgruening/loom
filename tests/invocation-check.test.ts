@@ -256,6 +256,18 @@ describe("checkInvocations completion predicate", () => {
     expect(notebook).toContain("Workflow cancelling: 1 job(s) stopped, 1 still running");
   });
 
+  it("does not call a cancel that is nearly done a scheduling problem", async () => {
+    // Every job already deleted but Galaxy has not moved the invocation off
+    // `cancelling` yet. The tail on this branch is written for a workflow that
+    // is still handing out jobs, and on a cancel it said the invocation was
+    // "still scheduling", which is the one thing it is certainly not doing.
+    const { entry, notebook } = await poll("cancelling", ["deleted", "deleted"]);
+
+    expect(entry.autoAction).toBe("cancelling");
+    expect(notebook).toContain("Workflow cancelling: 2 job(s) stopped, waiting for Galaxy");
+    expect(notebook).not.toContain("still scheduling");
+  });
+
   it("writes a cancelling summary the jobs panel actually reads as stopping", async () => {
     // The panel has no invocation state to look at, so it reads this sentence.
     // That coupling is deliberate and documented at CANCELLED_SUMMARY; this is
