@@ -36,6 +36,14 @@ const DEFAULT_ROWS = 2;
 const MAX_DASHBOARDS = 20;
 const MAX_PANELS = 40;
 const MAX_REASON_CHARS = 280;
+const MAX_NAME_CHARS = 200;
+const MAX_WIDGET_TYPE_CHARS = 100;
+// Config is the one place the document carries arbitrary shape, so it is the one
+// place that needs walking rather than trusting. JSON.stringify recurses and
+// JSON.parse does not, so a 16 KB file nested a few thousand deep blows the
+// stack inside a structuredClone-by-JSON.
+const MAX_CONFIG_DEPTH = 24;
+const MAX_CONFIG_NODES = 5000;
 const ADDED_BY = new Set(["user", "agent", "preset"]);
 
 export const DASHBOARD_PRESETS = [
@@ -134,6 +142,59 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+/**
+ * Copy a panel config defensively: bounded depth and node count, cycles cut,
+ * anything JSON cannot carry dropped, and a property whose getter throws
+ * skipped rather than propagated. Returns the copy, or null if it hit a limit.
+ */
+function copyConfig(raw) {
+  let budget = MAX_CONFIG_NODES;
+  const seen = new WeakSet();
+
+  const walk = (value, depth) => {
+    if (depth > MAX_CONFIG_DEPTH) return { over: true };
+    if (budget-- <= 0) return { over: true };
+
+    if (value === null) return { value: null };
+    const kind = typeof value;
+    if (kind === "string" || kind === "boolean") return { value };
+    if (kind === "number") return Number.isFinite(value) ? { value } : { skip: true };
+    if (kind !== "object") return { skip: true }; // function, symbol, bigint, undefined
+
+    if (seen.has(value)) return { skip: true };
+    seen.add(value);
+
+    if (Array.isArray(value)) {
+      const out = [];
+      for (const item of value) {
+        const result = walk(item, depth + 1);
+        if (result.over) return result;
+        out.push(result.skip ? null : result.value);
+      }
+      seen.delete(value);
+      return { value: out };
+    }
+
+    const out = {};
+    for (const key of Object.keys(value)) {
+      let member;
+      try {
+        member = value[key];
+      } catch {
+        continue; // a throwing getter is not worth the whole document
+      }
+      const result = walk(member, depth + 1);
+      if (result.over) return result;
+      if (!result.skip) out[key] = result.value;
+    }
+    seen.delete(value);
+    return { value: out };
+  };
+
+  const result = walk(raw, 0);
+  return result.over || result.skip ? null : result.value;
+}
+
 function problem(path, message) {
   return { path, message };
 }
@@ -156,7 +217,14 @@ export function dashboardFromPreset(presetId) {
 
 /** The document a workspace starts with: one dashboard, the current-analysis preset. */
 export function createDefaultDashboardDocument() {
-  const dashboard = dashboardFromPreset(DEFAULT_PRESET_ID);
+  const dashboard = dashboardFromPreset(DEFAULT_PRESET_ID) ?? {
+    // Only reachable if DEFAULT_PRESET_ID stops naming a preset. Returning an
+    // empty dashboard beats turning the never-throws validator, which calls
+    // this, into a thrower.
+    id: DEFAULT_PRESET_ID,
+    title: "Dashboard",
+    panels: [],
+  };
   return {
     version: DASHBOARD_SCHEMA_VERSION,
     activeId: dashboard.id,
@@ -194,7 +262,15 @@ function normalizeLayout(raw, path, problems) {
   return layout;
 }
 
-function normalizePanel(raw, path, index, seenIds, problems) {
+/** Trim, and cap the length of a name-shaped string that ends up in the DOM. */
+function capName(value, limit, path, field, problems) {
+  const trimmed = value.trim();
+  if (trimmed.length <= limit) return trimmed;
+  problems.push(problem(`${path}.${field}`, `longer than ${limit} characters; truncated`));
+  return trimmed.slice(0, limit);
+}
+
+function normalizePanel(raw, path, index, ids, problems) {
   if (!isPlainObject(raw)) {
     problems.push(problem(path, `expected an object, got ${describe(raw)}; dropped`));
     return null;
@@ -205,31 +281,45 @@ function normalizePanel(raw, path, index, seenIds, problems) {
   }
 
   let id = typeof raw.id === "string" && raw.id.trim() !== "" ? raw.id.trim() : "";
-  if (!id) {
-    id = `panel-${index + 1}`;
+  if (id) {
+    id = capName(id, MAX_NAME_CHARS, path, "id", problems);
+    if (ids.taken.has(id)) {
+      let suffix = 2;
+      while (ids.taken.has(`${id}-${suffix}`)) suffix++;
+      problems.push(problem(`${path}.id`, `"${id}" is already used; renamed to "${id}-${suffix}"`));
+      id = `${id}-${suffix}`;
+    }
+  } else {
+    // Skip anything another panel declared for itself: a generated id must
+    // never push an explicitly named panel off its own id, because that id is
+    // what a config change is written through.
+    let n = index + 1;
+    while (ids.taken.has(`panel-${n}`) || ids.declared.has(`panel-${n}`)) n++;
+    id = `panel-${n}`;
     problems.push(problem(`${path}.id`, `missing; using "${id}"`));
   }
-  if (seenIds.has(id)) {
-    let suffix = 2;
-    while (seenIds.has(`${id}-${suffix}`)) suffix++;
-    problems.push(problem(`${path}.id`, `"${id}" is already used; renamed to "${id}-${suffix}"`));
-    id = `${id}-${suffix}`;
-  }
-  seenIds.add(id);
+  ids.taken.add(id);
 
   const panel = {
     id,
-    widget: raw.widget.trim(),
+    widget: capName(raw.widget, MAX_WIDGET_TYPE_CHARS, path, "widget", problems),
     config: {},
     layout: normalizeLayout(raw.layout, `${path}.layout`, problems),
   };
   if (typeof raw.title === "string" && raw.title.trim() !== "") {
-    panel.title = raw.title.trim();
+    panel.title = capName(raw.title, MAX_NAME_CHARS, path, "title", problems);
   } else if (raw.title !== undefined) {
     problems.push(problem(`${path}.title`, "expected a non-empty string; using the widget label"));
   }
   if (isPlainObject(raw.config)) {
-    panel.config = clone(raw.config);
+    const config = copyConfig(raw.config);
+    if (config === null) {
+      problems.push(
+        problem(`${path}.config`, "too large or too deeply nested to keep; using an empty config"),
+      );
+    } else {
+      panel.config = config;
+    }
   } else if (raw.config !== undefined) {
     problems.push(problem(`${path}.config`, `expected an object, got ${describe(raw.config)}`));
   }
@@ -266,6 +356,8 @@ function normalizeDashboard(raw, path, index, seenIds, problems) {
   if (!id) {
     id = `dashboard-${index + 1}`;
     problems.push(problem(`${path}.id`, `missing; using "${id}"`));
+  } else {
+    id = capName(id, MAX_NAME_CHARS, path, "id", problems);
   }
   if (seenIds.has(id)) {
     let suffix = 2;
@@ -277,7 +369,7 @@ function normalizeDashboard(raw, path, index, seenIds, problems) {
 
   let title = "Dashboard";
   if (typeof raw.title === "string" && raw.title.trim() !== "") {
-    title = raw.title.trim();
+    title = capName(raw.title, MAX_NAME_CHARS, path, "title", problems);
   } else if (raw.title !== undefined) {
     problems.push(problem(`${path}.title`, 'expected a non-empty string; using "Dashboard"'));
   }
@@ -293,10 +385,18 @@ function normalizeDashboard(raw, path, index, seenIds, problems) {
     rawPanels = rawPanels.slice(0, MAX_PANELS);
   }
 
-  const seenPanelIds = new Set();
+  // Collect every id a panel declares for itself before assigning any, so a
+  // generated fallback cannot steal one that appears later in the list.
+  const declared = new Set();
+  for (const rawPanel of rawPanels) {
+    if (isPlainObject(rawPanel) && typeof rawPanel.id === "string" && rawPanel.id.trim() !== "") {
+      declared.add(rawPanel.id.trim().slice(0, MAX_NAME_CHARS));
+    }
+  }
+  const ids = { declared, taken: new Set() };
   const panels = [];
   rawPanels.forEach((rawPanel, i) => {
-    const panel = normalizePanel(rawPanel, `${path}.panels[${i}]`, i, seenPanelIds, problems);
+    const panel = normalizePanel(rawPanel, `${path}.panels[${i}]`, i, ids, problems);
     if (panel) panels.push(panel);
   });
 
@@ -313,6 +413,20 @@ function normalizeDashboard(raw, path, index, seenIds, problems) {
  * leave the file on disk alone.
  */
 export function validateDashboardDocument(input) {
+  // "Never throws" is a promise the callers rely on -- `parseDashboardDocument`
+  // is awaited with no try/catch, so a throw here becomes an unhandled
+  // rejection and a silently empty dashboard. The bounded walks below should
+  // make this unreachable; this is the backstop that keeps the promise true
+  // whatever a future edit does.
+  try {
+    return normalizeDocument(input);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, problems: [problem("", `could not be read: ${message}`)] };
+  }
+}
+
+function normalizeDocument(input) {
   if (!isPlainObject(input)) {
     return {
       ok: false,
@@ -368,9 +482,12 @@ export function validateDashboardDocument(input) {
 
   let activeId = typeof input.activeId === "string" ? input.activeId.trim() : "";
   if (!dashboards.some((d) => d.id === activeId)) {
-    if (activeId) {
+    if (input.activeId !== undefined) {
       problems.push(
-        problem("activeId", `"${activeId}" is not in this document; using "${dashboards[0].id}"`),
+        problem(
+          "activeId",
+          `${activeId ? `"${activeId}"` : describe(input.activeId)} is not a dashboard in this document; using "${dashboards[0].id}"`,
+        ),
       );
     }
     activeId = dashboards[0].id;

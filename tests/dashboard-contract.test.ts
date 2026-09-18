@@ -291,6 +291,123 @@ describe("validateDashboardDocument -- repairs", () => {
   });
 });
 
+describe("validateDashboardDocument -- input designed to break it", () => {
+  function withConfig(config: unknown) {
+    return {
+      version: 1,
+      activeId: "d",
+      dashboards: [{ id: "d", title: "D", panels: [{ id: "p", widget: "a", config }] }],
+    };
+  }
+
+  it("survives a config nested thousands deep, well inside the file size cap", () => {
+    // Built as text, the way it arrives: a file this deep parses fine and then
+    // takes a recursive copy off the stack.
+    const depth = 8000;
+    const raw =
+      '{"version":1,"activeId":"d","dashboards":[{"id":"d","title":"D","panels":' +
+      '[{"id":"p","widget":"a","config":{"x":' +
+      "[".repeat(depth) +
+      "1" +
+      "]".repeat(depth) +
+      "}}]}]}";
+    expect(raw.length).toBeLessThan(64 * 1024);
+
+    const result = parseDashboardDocument(raw);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.document.dashboards[0].panels[0].config).toEqual({});
+      expect(result.problems.some((p) => p.path.endsWith(".config"))).toBe(true);
+    }
+  });
+
+  it("survives a circular config", () => {
+    const config: Record<string, unknown> = { a: 1 };
+    config.self = config;
+    const doc = expectOk(validateDashboardDocument(withConfig(config)));
+    expect(doc.dashboards[0].panels[0].config).toEqual({ a: 1 });
+  });
+
+  it("drops values JSON cannot carry instead of throwing on them", () => {
+    const doc = expectOk(
+      validateDashboardDocument(
+        withConfig({
+          keep: "yes",
+          big: BigInt(1),
+          fn: () => 1,
+          nope: undefined,
+          nan: NaN,
+          nested: { ok: true },
+        }),
+      ),
+    );
+    expect(doc.dashboards[0].panels[0].config).toEqual({
+      keep: "yes",
+      nested: { ok: true },
+    });
+  });
+
+  it("skips a config property whose getter throws", () => {
+    const config = { good: 1 };
+    Object.defineProperty(config, "bad", {
+      enumerable: true,
+      get() {
+        throw new Error("no");
+      },
+    });
+    const doc = expectOk(validateDashboardDocument(withConfig(config)));
+    expect(doc.dashboards[0].panels[0].config).toEqual({ good: 1 });
+  });
+
+  it("truncates absurd ids, titles and widget types rather than carrying them", () => {
+    const result = validateDashboardDocument({
+      version: 1,
+      activeId: "d",
+      dashboards: [
+        {
+          id: "d",
+          title: "t".repeat(5000),
+          panels: [{ id: "i".repeat(5000), widget: "w".repeat(5000), title: "p".repeat(5000) }],
+        },
+      ],
+    });
+    const doc = expectOk(result);
+    expect(doc.dashboards[0].title).toHaveLength(200);
+    const panel = doc.dashboards[0].panels[0];
+    expect(panel.id).toHaveLength(200);
+    expect(panel.title).toHaveLength(200);
+    expect(panel.widget).toHaveLength(100);
+  });
+
+  it("does not let a generated id displace one a later panel declared", () => {
+    const doc = expectOk(
+      validateDashboardDocument({
+        version: 1,
+        activeId: "d",
+        dashboards: [
+          {
+            id: "d",
+            title: "D",
+            panels: [{ widget: "a" }, { id: "panel-1", widget: "b" }],
+          },
+        ],
+      }),
+    );
+    // The explicitly named panel keeps its name; the anonymous one moves.
+    expect(doc.dashboards[0].panels.map((p) => p.id)).toEqual(["panel-2", "panel-1"]);
+  });
+
+  it("reports a non-string activeId, not just a wrong one", () => {
+    const result = validateDashboardDocument({
+      version: 1,
+      activeId: 42,
+      dashboards: [{ id: "d", title: "D", panels: [] }],
+    });
+    expect(expectOk(result).activeId).toBe("d");
+    expect(result.problems.some((p) => p.path === "activeId")).toBe(true);
+  });
+});
+
 describe("parseDashboardDocument", () => {
   it("reports malformed JSON instead of throwing", () => {
     const result = parseDashboardDocument("{ not json");
