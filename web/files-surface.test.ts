@@ -313,6 +313,28 @@ describe("readFileForWeb", () => {
   });
 });
 
+// Orbit's default workspace is ~/.loom/analyses/<name>, which sits under two
+// dotted segments and inside the directory holding ~/.loom/config.json. If the
+// sensitive-path policy read that as a credential store the whole surface would
+// be dead in the default configuration.
+describe("the default Orbit workspace", () => {
+  it("serves an analysis that lives under ~/.loom/analyses", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "files-surface-loomhome-"));
+    const analysis = path.join(home, ".loom", "analyses", "demo");
+    fs.mkdirSync(analysis, { recursive: true });
+    fs.writeFileSync(path.join(home, ".loom", "config.json"), "{}");
+    fs.writeFileSync(path.join(analysis, "notebook.md"), "# demo\n");
+    try {
+      const listed = await listFilesForWeb(analysis, { home });
+      expect(listed.ok && names(listed.root)).toEqual(["notebook.md"]);
+      const read = await readFileForWeb(analysis, "notebook.md", undefined, { home });
+      expect(read.ok).toBe(true);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("readFileForWeb tail", () => {
   it("returns the last 200 lines of a short file", async () => {
     const text = await readText("activity.jsonl", { tail: true });
