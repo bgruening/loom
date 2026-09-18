@@ -19,6 +19,7 @@ import {
   disarmGalaxyLivePanel,
 } from "../extensions/loom/galaxy-live-source.js";
 import { getPollTickHook } from "../extensions/loom/galaxy-poller.js";
+import { normalizeGalaxyLivePayload } from "../shared/galaxy-live-contract.js";
 import type { GalaxyLivePayload, GalaxyLiveState } from "../shared/galaxy-live-contract.js";
 
 const CFG = { url: "https://usegalaxy.org", apiKey: "secret-key" };
@@ -61,6 +62,15 @@ describe("projectRow", () => {
       job_state_summary: { ok: 8, running: 3, error: 1 },
     });
     expect(row).toMatchObject({ kind: "collection", state: "error", elementCount: 12 });
+  });
+
+  it("clamps every Galaxy-supplied string, not only the obvious one", () => {
+    // Capping the row count is not capping the payload. 200 rows with a
+    // hundred-thousand-character id each is twenty megabytes on one stdout
+    // line, every tick, through a cap that says it prevents exactly that.
+    const row = projectRow({ id: "f".repeat(100_000), hid: 1, extension: "x".repeat(5_000) });
+    expect(row!.id.length).toBeLessThanOrEqual(64);
+    expect(row!.extension.length).toBeLessThanOrEqual(32);
   });
 
   it("clamps a pathological dataset name", () => {
@@ -132,6 +142,22 @@ describe("projectHistory against recorded Galaxy responses", () => {
     expect(h.items.find((i) => i.name === hostile)).toBeTruthy();
   });
 
+  it("bounds the payload in bytes, not only in rows", () => {
+    const rows = Array.from({ length: 300 }, (_, i) => ({
+      id: "f".repeat(100_000),
+      hid: i + 1,
+      name: "n".repeat(100_000),
+      state: "ok",
+      extension: "e".repeat(100_000),
+    }));
+    const h = projectHistory(HID, { update_time: "u".repeat(1_000_000) }, rows);
+    const bytes = JSON.stringify(h).length;
+    expect(h.items).toHaveLength(200);
+    // 200 rows of clamped fields, with room to spare and nothing like a
+    // megabyte. Before the token clamp this was 21 MB.
+    expect(bytes).toBeLessThan(200_000);
+  });
+
   it("truncates a history too large to send, and says by how much", () => {
     // Built from a recorded row rather than committing a 5,000-row response.
     const [template] = fixture("midrun.contents") as Record<string, unknown>[];
@@ -183,6 +209,10 @@ describe("projectHistory arithmetic", () => {
   });
 
   it("never undercounts, over every combination of server count and page size", () => {
+    // The bound is `max`, not `min`. With `min` this assertion cannot fail in
+    // the direction it is named after: active=0 and twelve rows fetched is the
+    // exact case where the arithmetic used to report nothing hidden while
+    // seven rows were, and `min` waves it through.
     for (let active = 0; active <= 12; active++) {
       for (let fetched = 0; fetched <= 12; fetched++) {
         const rows = Array.from({ length: fetched }, (_, i) => ({
@@ -192,10 +222,26 @@ describe("projectHistory arithmetic", () => {
         }));
         const h = projectHistory(HID, { contents_active: { active } }, rows, 5);
         expect(h.truncated).toBeGreaterThanOrEqual(0);
-        // What the panel adds up must cover everything the server said exists.
-        expect(h.items.length + h.truncated).toBeGreaterThanOrEqual(Math.min(active, fetched));
+        expect(
+          h.items.length + h.truncated,
+          `active=${active} fetched=${fetched}`,
+        ).toBeGreaterThanOrEqual(Math.max(active, fetched));
+        // And it must never claim completeness while rows are missing.
+        if (h.items.length < fetched) expect(h.countsComplete).toBe(false);
       }
     }
+  });
+
+  it("does not believe a server count that is smaller than the rows it sent", () => {
+    // The summary probe and the contents fetch are a second apart, so a history
+    // that grew in between returns more rows than the count admits to. Trusting
+    // the count outright drew a page and said nothing was hidden.
+    const rows = Array.from({ length: 12 }, (_, i) => ({ id: `d${i}`, hid: i + 1, state: "ok" }));
+    const h = projectHistory(HID, { contents_active: { active: 5 } }, rows, 5);
+    expect(h.items).toHaveLength(5);
+    expect(h.truncated).toBe(7);
+    expect(h.truncatedExact).toBe(false);
+    expect(h.countsComplete).toBe(false);
   });
 
   it("reports no truncation when the page is the whole history", () => {
@@ -628,6 +674,116 @@ describe("GalaxyLiveTicker cadence", () => {
     expect(h.pushes[1].updatedAt).not.toBe(h.pushes[0].updatedAt);
   });
 
+  it("does not wedge on a false error after one blip", async () => {
+    // The sequence that broke it: a good read, one 502, then a healthy server
+    // whose history has not changed since. The unchanged branch re-stamped the
+    // LAST payload, which was the error, so the panel sat on "Galaxy did not
+    // answer" for the rest of the session -- and for a settled history whose
+    // update_time never moves again, forever.
+    const good: SnapshotResult = {
+      payload: historyPayload("t1"),
+      unchanged: false,
+      aborted: false,
+    };
+    const blip: SnapshotResult = {
+      payload: {
+        version: 1,
+        serverHost: "usegalaxy.org",
+        history: null,
+        unavailable: "unreachable",
+        updatedAt: "2026-09-18T06:00:00.000Z",
+      },
+      unchanged: false,
+      aborted: false,
+    };
+    const h = tickerHarness({}, [good, blip, good, good, good]);
+    const content = `${bound}\n${INVOCATION("in_progress")}`;
+    await h.ticker.tick(content);
+    expect(h.pushes.at(-1)!.history).not.toBeNull();
+    h.advance(20_000);
+    await h.ticker.tick(content);
+    expect(h.pushes.at(-1)!.unavailable).toBe("unreachable");
+    // Galaxy is fine again from here. The panel must come back.
+    for (let i = 0; i < 6; i++) {
+      h.advance(400_000);
+      await h.ticker.tick(content);
+    }
+    expect(h.pushes.at(-1)!.unavailable).toBeUndefined();
+    expect(h.pushes.at(-1)!.history).not.toBeNull();
+  });
+
+  it("re-asks for contents after a failure instead of trusting the old update_time", async () => {
+    // The mechanism behind the wedge: keeping `knownUpdateTime` across a
+    // failure lets the next healthy tick take the cheap no-change path and
+    // never fetch the contents that would replace the error on screen.
+    const blip: SnapshotResult = {
+      payload: {
+        version: 1,
+        serverHost: "usegalaxy.org",
+        history: null,
+        unavailable: "unreachable",
+        updatedAt: "2026-09-18T06:00:00.000Z",
+      },
+      unchanged: false,
+      aborted: false,
+    };
+    const h = tickerHarness({}, [
+      { payload: historyPayload("t1"), unchanged: false, aborted: false },
+      blip,
+      { payload: historyPayload("t1"), unchanged: false, aborted: false },
+    ]);
+    const content = `${bound}\n${INVOCATION("in_progress")}`;
+    await h.ticker.tick(content);
+    h.advance(20_000);
+    await h.ticker.tick(content);
+    h.advance(400_000);
+    await h.ticker.tick(content);
+    expect(h.snapshot.mock.calls[2][1].knownUpdateTime).toBeUndefined();
+  });
+
+  it("closes the gap again once Galaxy answers", async () => {
+    const blip: SnapshotResult = {
+      payload: {
+        version: 1,
+        serverHost: "usegalaxy.org",
+        history: null,
+        unavailable: "unreachable",
+        updatedAt: "2026-09-18T06:00:00.000Z",
+      },
+      unchanged: false,
+      aborted: false,
+    };
+    const h = tickerHarness({}, [
+      blip,
+      blip,
+      { payload: historyPayload("t9"), unchanged: false, aborted: false },
+    ]);
+    const content = `${bound}\n${INVOCATION("in_progress")}`;
+    await h.ticker.tick(content);
+    h.advance(400_000);
+    await h.ticker.tick(content);
+    h.advance(400_000);
+    await h.ticker.tick(content);
+    expect(h.snapshot).toHaveBeenCalledTimes(3);
+    // Two failures widened the gap; the success has to close it, or a run that
+    // blipped once stays on a five-minute cadence for the rest of its life.
+    h.advance(15_000);
+    await h.ticker.tick(content);
+    expect(h.snapshot).toHaveBeenCalledTimes(4);
+  });
+
+  it("re-asks which history is current once the cached answer expires", async () => {
+    const mostRecentHistory = vi.fn(async () => ({ id: HID, name: "most recent" }));
+    const h = tickerHarness({ mostRecentHistory });
+    await h.ticker.tick("# no binding\n");
+    h.advance(200_000);
+    await h.ticker.tick("# no binding\n");
+    expect(mostRecentHistory).toHaveBeenCalledTimes(1);
+    h.advance(200_000);
+    await h.ticker.tick("# no binding\n");
+    expect(mostRecentHistory).toHaveBeenCalledTimes(2);
+  });
+
   it("never forwards an unchanged result as a history-less payload", async () => {
     // The shape that would blank a populated panel: `history: null` renders as
     // "No history yet.", so an unchanged tick must not produce one.
@@ -764,14 +920,17 @@ describe("GalaxyLiveTicker cadence", () => {
     expect(h.pushes).toEqual([]);
   });
 
-  it("reset drops everything, so a new analysis starts from nothing", async () => {
-    const h = tickerHarness();
-    await h.ticker.tick(bound);
-    expect(h.pushes).toHaveLength(1);
-    h.ticker.reset();
-    await h.ticker.tick(bound);
-    expect(h.snapshot).toHaveBeenCalledTimes(2);
-    expect(h.pushes).toHaveLength(2);
+  it("a fresh arming starts from nothing, which is what a new session wants", async () => {
+    // There is no `reset()`: `armGalaxyLivePanel` builds a new ticker per
+    // session, so a new session reads at once rather than waiting out an
+    // interval measured against the previous one.
+    const first = tickerHarness();
+    await first.ticker.tick(bound);
+    expect(first.pushes).toHaveLength(1);
+    const second = tickerHarness();
+    await second.ticker.tick(bound);
+    expect(second.snapshot).toHaveBeenCalledTimes(1);
+    expect(second.pushes).toHaveLength(1);
   });
 });
 
@@ -861,5 +1020,102 @@ describe("armGalaxyLivePanel", () => {
     expect(spy).not.toHaveBeenCalled();
     expect(getPollTickHook()).toBeNull();
     spy.mockRestore();
+  });
+});
+
+// ── The boundary between two versions ────────────────────────────────────────
+
+describe("normalizeGalaxyLivePayload", () => {
+  // The brain ships on npm independently of the Orbit build, so this is a
+  // boundary between two versions and not only between two processes. A shape
+  // the shell does not recognise is a thing that happens.
+  it.each([
+    ["not an object", 42],
+    ["null", null],
+    ["an array", []],
+    ["no version", { serverHost: "h", history: null, updatedAt: "" }],
+    ["a version from the future", { version: 2, history: null, updatedAt: "" }],
+  ])("refuses %s", (_label, raw) => {
+    expect(normalizeGalaxyLivePayload(raw)).toBeNull();
+  });
+
+  it("keeps a payload whose history is the wrong type away from the widget", () => {
+    // `items` as a string threw `items.filter is not a function` out of the
+    // render, and the host turns that into a sticky error card only a click
+    // recovers. One malformed push used to cost the panel.
+    const p = normalizeGalaxyLivePayload({
+      version: 1,
+      serverHost: "usegalaxy.org",
+      history: { id: "x", name: "n", items: "not an array" },
+      updatedAt: "2026-09-18T06:00:00.000Z",
+    });
+    expect(p!.history!.items).toEqual([]);
+  });
+
+  it("drops rows that are not rows and folds a state it does not model", () => {
+    const p = normalizeGalaxyLivePayload({
+      version: 1,
+      serverHost: "h",
+      history: {
+        id: "x",
+        name: "n",
+        items: [null, 7, { id: "a", hid: 1, state: "warp_drive" }],
+        counts: { ok: 1, nonsense: 4, running: "many" },
+      },
+      updatedAt: "",
+    });
+    expect(p!.history!.items).toHaveLength(1);
+    expect(p!.history!.items[0].state).toBe("other");
+    expect(p!.history!.counts).toEqual({ ok: 1 });
+  });
+
+  it("keeps an unavailable reason it does not know, as a reason", () => {
+    // Dropping the payload would leave the panel on stale rows; keeping the
+    // unknown string would render a blank card. It becomes a reason the shell
+    // does have a sentence for.
+    const p = normalizeGalaxyLivePayload({
+      version: 1,
+      serverHost: "h",
+      history: null,
+      unavailable: "rate-limited",
+      updatedAt: "",
+    });
+    expect(p!.history).toBeNull();
+    expect(p!.unavailable).toBe("unreachable");
+  });
+
+  it("clamps a payload built to be enormous", () => {
+    const p = normalizeGalaxyLivePayload({
+      version: 1,
+      serverHost: "h".repeat(100_000),
+      history: {
+        id: "i".repeat(100_000),
+        name: "n".repeat(100_000),
+        updateTime: "u".repeat(100_000),
+        items: Array.from({ length: 5000 }, () => ({
+          id: "x".repeat(100_000),
+          name: "y".repeat(100_000),
+          extension: "z".repeat(100_000),
+        })),
+      },
+      updatedAt: "d".repeat(100_000),
+    });
+    expect(p!.history!.items).toHaveLength(200);
+    expect(JSON.stringify(p).length).toBeLessThan(200_000);
+  });
+
+  it("round-trips a payload the brain actually built", () => {
+    const history = projectHistory(
+      "6f608228bd012a10",
+      fixture("midrun.summary"),
+      fixture("midrun.contents"),
+    );
+    const real: GalaxyLivePayload = {
+      version: 1,
+      serverHost: "usegalaxy.org.au",
+      history,
+      updatedAt: "2026-09-18T06:00:00.000Z",
+    };
+    expect(normalizeGalaxyLivePayload(JSON.parse(JSON.stringify(real)))).toEqual(real);
   });
 });

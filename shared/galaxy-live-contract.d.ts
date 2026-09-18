@@ -1,6 +1,7 @@
 export const GALAXY_LIVE_SCHEMA_VERSION: 1;
 export const GALAXY_LIVE_MAX_ITEMS: number;
 export const GALAXY_LIVE_MAX_NAME: number;
+export const GALAXY_LIVE_MAX_TOKEN: number;
 
 export type GalaxyLiveState =
   | "new"
@@ -83,3 +84,9 @@ export interface GalaxyLivePayload {
 export function normalizeState(s: unknown): GalaxyLiveState;
 export function isActiveState(s: GalaxyLiveState): boolean;
 export function clampText(v: unknown, max?: number): string;
+/**
+ * Coerce a decoded payload into something drawable, or null. Never throws.
+ * The brain ships independently of the shell, so a payload this build does not
+ * recognise is a thing that happens rather than a thing that cannot.
+ */
+export function normalizeGalaxyLivePayload(raw: unknown): GalaxyLivePayload | null;

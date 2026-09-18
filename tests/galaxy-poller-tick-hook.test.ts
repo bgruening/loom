@@ -38,17 +38,35 @@ describe("the poll tick hook", () => {
   it("does not make the poller's own work wait behind it", async () => {
     // A hook talking to a Galaxy that has stopped answering must not delay the
     // thing this timer actually exists for: advancing in-flight invocations and
-    // jobs. If someone puts an `await` back in front of the hook, this hangs.
+    // jobs. Raced against a timer rather than simply awaited, so putting an
+    // `await` back in front of the hook fails this in a quarter of a second
+    // instead of hanging the file until CI gives up on it.
     resetState();
     let entered = false;
+    let release: (() => void) | undefined;
     setPollTickHook(
       () =>
-        new Promise<void>(() => {
+        new Promise<void>((resolve) => {
           entered = true;
+          release = resolve;
         }),
     );
-    await expect(pollGalaxyNow()).resolves.toBeUndefined();
-    expect(entered).toBe(true);
+    try {
+      const winner = await Promise.race([
+        pollGalaxyNow().then(() => "tick finished" as const),
+        new Promise<"tick is still waiting on the hook">((r) =>
+          setTimeout(() => r("tick is still waiting on the hook"), 250),
+        ),
+      ]);
+      expect(winner).toBe("tick finished");
+      expect(entered).toBe(true);
+    } finally {
+      // Let the hook settle even when the assertion above failed: the poller
+      // holds one in-flight tick at a time, so a hook left hanging would take
+      // every test after this one down with it and turn a clear failure into a
+      // stalled file.
+      release?.();
+    }
   });
 
   it("swallows a hook that rejects, and a hook that throws before it returns", async () => {

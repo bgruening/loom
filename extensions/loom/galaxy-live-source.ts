@@ -30,6 +30,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   GALAXY_LIVE_MAX_ITEMS,
+  GALAXY_LIVE_MAX_TOKEN,
   GALAXY_LIVE_SCHEMA_VERSION,
   clampText,
   normalizeState,
@@ -170,7 +171,10 @@ export function projectRow(raw: unknown): GalaxyLiveItem | null {
   if (typeof row.id !== "string" || !row.id) return null;
   const isCollection = row.history_content_type === "dataset_collection";
   const item: GalaxyLiveItem = {
-    id: row.id,
+    // Clamped like every other Galaxy-supplied string. Capping the row count is
+    // not capping the payload: a server answering with a hundred-thousand-
+    // character id per row turns 200 rows into twenty megabytes on one line.
+    id: clampText(row.id, GALAXY_LIVE_MAX_TOKEN),
     hid: typeof row.hid === "number" ? row.hid : 0,
     name: clampText(row.name),
     state: isCollection ? collectionState(row) : normalizeState(row.state),
@@ -234,20 +238,25 @@ export function projectHistory(
   const counts: Partial<Record<GalaxyLiveState, number>> = {};
   for (const item of capped) counts[item.state] = (counts[item.state] ?? 0) + 1;
 
-  // Two independent ways to know rows were left behind, and both are needed.
+  // Two independent ways to know rows were left behind, and the answer is the
+  // larger of them rather than whichever one happens to be present.
   // `contents_active.active` is exact but absent on a server that silently
   // drops the `keys=` we asked for (it answers 200 either way). The overflow
   // row -- we request keep+1 and keep `keep` -- is always available but only
-  // proves "at least one more".
+  // proves "at least one more". Preferring the server's count outright was
+  // wrong: the summary and the contents are two requests a second apart, so a
+  // history that grew in between returns more rows than the count admits to,
+  // and the panel then reports nothing hidden while rows are missing.
   const active = activeCount(s.contents_active);
   const overflow = Math.max(0, items.length - capped.length);
-  const truncated = active !== null ? Math.max(0, active - capped.length) : overflow;
-  const truncatedExact = active !== null || overflow === 0;
+  const fromServer = active !== null ? Math.max(0, active - capped.length) : 0;
+  const truncated = Math.max(fromServer, overflow);
+  const truncatedExact = active !== null ? fromServer >= overflow : overflow === 0;
 
   return {
     id: historyId,
     name: clampText(s.name) || "Untitled history",
-    updateTime: typeof s.update_time === "string" ? s.update_time : "",
+    updateTime: clampText(s.update_time, GALAXY_LIVE_MAX_TOKEN),
     counts,
     countsComplete: truncated === 0,
     items: capped,
@@ -471,25 +480,20 @@ export class GalaxyLiveTicker {
   private lastAttemptAt = 0;
   private lastPushAt = 0;
   private lastFingerprint: string | null = null;
-  private lastPayload: GalaxyLivePayload | null = null;
+  /**
+   * The last payload that actually carried a history. Deliberately NOT "the
+   * last payload": an `unchanged` tick re-stamps this to refresh the staleness
+   * clock, and re-stamping an error payload wedged the panel on "Galaxy did not
+   * answer" for the rest of the session. One dropped packet, and a settled
+   * history whose `update_time` never moves again could never clear it.
+   */
+  private lastHistoryPayload: GalaxyLivePayload | null = null;
   private knownUpdateTime: string | null = null;
   private historyId: string | null = null;
   private failures = 0;
   private resolved: { id: string; at: number; server: string } | null = null;
 
   constructor(private deps: GalaxyLiveTickerDeps) {}
-
-  /** Forget everything. A new session, or a new analysis directory. */
-  reset(): void {
-    this.lastAttemptAt = 0;
-    this.lastPushAt = 0;
-    this.lastFingerprint = null;
-    this.lastPayload = null;
-    this.knownUpdateTime = null;
-    this.historyId = null;
-    this.failures = 0;
-    this.resolved = null;
-  }
 
   /** Minimum spacing for the next attempt, given what the notebook says. */
   private interval(live: boolean): number {
@@ -509,7 +513,7 @@ export class GalaxyLiveTicker {
     const stale = Boolean(payload.history) && now - this.lastPushAt >= STALE_REFRESH_MS;
     if (fingerprint === this.lastFingerprint && !stale) return;
     this.lastFingerprint = fingerprint;
-    this.lastPayload = payload;
+    if (payload.history) this.lastHistoryPayload = payload;
     this.lastPushAt = now;
     this.deps.push(payload);
   }
@@ -619,12 +623,12 @@ export class GalaxyLiveTicker {
 
     if (result.unchanged) {
       this.failures = 0;
-      // Galaxy answered and nothing moved. Re-stamp the payload we already have
+      // Galaxy answered and nothing moved. Re-stamp the history we already have
       // so the panel's staleness line reflects when we last asked, not when the
       // history last changed -- otherwise a quiet run looks abandoned.
-      if (this.lastPayload) {
+      if (this.lastHistoryPayload) {
         this.emit(
-          { ...this.lastPayload, updatedAt: new Date(this.deps.now()).toISOString() },
+          { ...this.lastHistoryPayload, updatedAt: new Date(this.deps.now()).toISOString() },
           this.deps.now(),
         );
       }
@@ -633,8 +637,14 @@ export class GalaxyLiveTicker {
 
     const payload = result.payload;
     if (!payload) return;
-    if (payload.unavailable) this.failures++;
-    else {
+    if (payload.unavailable) {
+      this.failures++;
+      // Forget what we were comparing against. Otherwise the next healthy tick
+      // sees an unmoved `update_time`, takes the cheap "nothing changed" path,
+      // and never refetches the contents that would put the history back on
+      // screen in place of the error.
+      this.knownUpdateTime = null;
+    } else {
       this.failures = 0;
       this.knownUpdateTime = payload.history?.updateTime || null;
     }
@@ -645,6 +655,9 @@ export class GalaxyLiveTicker {
 // ── Arming ───────────────────────────────────────────────────────────────────
 
 let ticker: GalaxyLiveTicker | null = null;
+/** Bumped by every arm and every disarm, so a push from a tick that was already
+ *  in flight when the session ended lands nowhere. */
+let armGeneration = 0;
 
 /**
  * Shells that draw a dashboard. In the terminal a widget push collapses to
@@ -666,18 +679,28 @@ export function armGalaxyLivePanel(ctx: ExtensionContext): void {
     disarmGalaxyLivePanel();
     return;
   }
+  // A fresh ticker per arming is deliberate: `session_start` means a new
+  // session, and a new session wants the panel filled now rather than up to a
+  // minute later. The generation is what makes shutdown mean shutdown -- the
+  // hook is fired and not awaited, so a tick already in flight can still be
+  // holding this closure after the session ends.
+  const generation = ++armGeneration;
   const push = (payload: GalaxyLivePayload): void => {
+    if (generation !== armGeneration) return;
     try {
       ctx.ui.setWidget(LoomWidgetKey.GalaxyLive, encodeJsonWidget(payload));
     } catch (err) {
       // Same guard as the notebook widget: a tick that lands after session
       // teardown fires against a ctx pi has invalidated, and touching ctx.ui
-      // throws "ctx is stale after session replacement or reload". Drop the
-      // panel rather than spamming stderr every 15s, and surface anything else.
-      if (!(err instanceof Error && /ctx is stale/i.test(err.message))) {
-        console.error("[galaxy-live] widget push failed:", err);
+      // throws "ctx is stale after session replacement or reload". That one is
+      // terminal for this arming, so stop. Anything else is surfaced and the
+      // panel keeps trying -- one transient throw must not quietly cost the
+      // user their panel for the rest of the session.
+      if (err instanceof Error && /ctx is stale/i.test(err.message)) {
+        disarmGalaxyLivePanel();
+        return;
       }
-      disarmGalaxyLivePanel();
+      console.error("[galaxy-live] widget push failed:", err);
     }
   };
   ticker = new GalaxyLiveTicker({
@@ -693,6 +716,7 @@ export function armGalaxyLivePanel(ctx: ExtensionContext): void {
 
 /** Stop pushing. Called from `session_shutdown`, beside `stopGalaxyPoller()`. */
 export function disarmGalaxyLivePanel(): void {
+  armGeneration++;
   ticker = null;
   setPollTickHook(null);
 }

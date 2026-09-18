@@ -11,7 +11,7 @@ import {
 } from "../../../../shared/dashboard-contract.js";
 import type { DashboardDocument } from "../../../../shared/dashboard-contract.js";
 import { LoomWidgetKey, decodeJsonWidget } from "../../../../shared/loom-shell-contract.js";
-import type { GalaxyLivePayload } from "../../../../shared/galaxy-live-contract.js";
+import { normalizeGalaxyLivePayload } from "../../../../shared/galaxy-live-contract.js";
 import type { FileNode } from "../../preload/preload.js";
 import { DashboardHost } from "./host.js";
 import { DashboardSources } from "./data-sources.js";
@@ -224,22 +224,33 @@ export function initDashboard(container: HTMLElement): DashboardBootstrap {
 
   /**
    * The live Galaxy history the brain projects. Decoding here rather than in
-   * the widget keeps the widget off `window.orbit` entirely, and a payload that
-   * will not parse is dropped rather than taking the UI-request handler down --
-   * it is JSON that crossed a process boundary.
+   * the widget keeps the widget off `window.orbit` entirely.
+   *
+   * Both the parse and the shape are checked. The brain ships on npm
+   * independently of the Orbit build, so this is a process boundary between two
+   * versions, not just two processes: a payload whose `items` arrived as a
+   * string used to throw out of the widget's render, and the host turns that
+   * into a sticky error card that only a click recovers. Nothing unrecognisable
+   * reaches a widget.
    */
   const offUiRequest =
     typeof shell.onUiRequest === "function"
       ? shell.onUiRequest((request) => {
           if (request.method !== "setWidget") return;
           if (request.widgetKey !== LoomWidgetKey.GalaxyLive) return;
+          let decoded: unknown;
           try {
-            sources.setGalaxyLive(
-              decodeJsonWidget<GalaxyLivePayload>(request.widgetLines as string[] | undefined),
-            );
+            decoded = decodeJsonWidget(request.widgetLines as string[] | undefined);
           } catch (err) {
-            console.error("[dashboard] galaxy widget payload rejected:", err);
+            console.error("[dashboard] galaxy widget payload would not parse:", err);
+            return;
           }
+          const payload = normalizeGalaxyLivePayload(decoded);
+          if (!payload) {
+            console.error("[dashboard] galaxy widget payload rejected: unusable shape");
+            return;
+          }
+          sources.setGalaxyLive(payload);
         })
       : null;
 

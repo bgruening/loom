@@ -50,6 +50,11 @@ const UNAVAILABLE_TEXT: Record<GalaxyLiveUnavailable, string> = {
   forbidden: "This history belongs to another account.",
 };
 
+/** For an `unavailable` this build has never heard of. The brain ships on npm
+ *  independently of the shell, so a newer reason reaching an older panel is a
+ *  supported configuration, and a blank card is the one answer it must not be. */
+const UNAVAILABLE_FALLBACK = "Galaxy is not available right now.";
+
 /**
  * What the panel says, and the mark it says it with, for each state Galaxy can
  * report. Never the machine word: "setting_metadata" is not a thing a biologist
@@ -145,11 +150,16 @@ const DAY = 24 * HOUR;
  * identical, so the panel always says which.
  */
 export function describeAge(ageMs: number): string {
-  if (!Number.isFinite(ageMs) || ageMs < 0) return "just now";
+  // A stamp we cannot read is not "just now", which is the one direction this
+  // line must never round towards.
+  if (!Number.isFinite(ageMs)) return "an unknown time ago";
+  // A small negative age is clock skew between the brain and the renderer.
   if (ageMs < 45_000) return "just now";
-  if (ageMs < HOUR) return `${Math.round(ageMs / MINUTE)} min ago`;
+  // Rounding without the clamp reads "60 min ago" and "24 hours ago" for the
+  // last millisecond of each bucket, immediately before "1 hour"/"1 day".
+  if (ageMs < HOUR) return `${Math.min(59, Math.round(ageMs / MINUTE))} min ago`;
   if (ageMs < DAY) {
-    const hours = Math.round(ageMs / HOUR);
+    const hours = Math.min(23, Math.round(ageMs / HOUR));
     return hours === 1 ? "1 hour ago" : `${hours} hours ago`;
   }
   const days = Math.round(ageMs / DAY);
@@ -291,7 +301,9 @@ export function renderGalaxyHistory(
   body.append(head);
 
   if (!payload.history) {
-    const reason = payload.unavailable ? UNAVAILABLE_TEXT[payload.unavailable] : "No history yet.";
+    const reason = payload.unavailable
+      ? (UNAVAILABLE_TEXT[payload.unavailable] ?? UNAVAILABLE_FALLBACK)
+      : "No history yet.";
     body.append(el("p", "gx-live-empty", reason));
     root.append(body);
     return;
@@ -299,11 +311,10 @@ export function renderGalaxyHistory(
 
   // Say out loud when the counts describe a page rather than the history, so
   // the number above the list can never be read as a total it is not. Skipped
-  // for a history with nothing in it: "nothing yet" directly above "this
-  // history has no datasets yet" is two lines of a narrow panel saying one
-  // thing.
-  const empty = payload.history.items.length === 0 && payload.history.truncated === 0;
-  if (!empty) {
+  // when there is nothing to count: "nothing yet (newest 0)" above "nothing to
+  // show on this page" spends two lines of a narrow panel saying one thing,
+  // and the line below it already says how much is withheld.
+  if (payload.history.items.length > 0) {
     const summary = summarizeCounts(payload.history.counts);
     body.append(
       el(
@@ -319,13 +330,14 @@ export function renderGalaxyHistory(
   // Above the list, not below it: showing numbers nobody has refreshed as if
   // they were live is the worst thing this surface could do, and in a short
   // panel anything under the list is off-screen.
+  // Always drawn, even for a stamp that will not parse: the panel's one
+  // promise is that it says when Galaxy was last asked, and a line that
+  // silently disappears is worse than one admitting it does not know.
   const asOf = Date.parse(payload.updatedAt);
-  if (Number.isFinite(asOf)) {
-    const age = now - asOf;
-    const line = el("p", "gx-live-checked", `Checked ${describeAge(age)}`);
-    if (age > STALE_AFTER_MS) line.classList.add("gx-live-stale");
-    body.append(line);
-  }
+  const age = Number.isFinite(asOf) ? now - asOf : NaN;
+  const line = el("p", "gx-live-checked", `Checked ${describeAge(age)}`);
+  if (!Number.isFinite(age) || age > STALE_AFTER_MS) line.classList.add("gx-live-stale");
+  body.append(line);
 
   const scroller = el("div", "gx-live-scroll");
   renderHistory(scroller, payload.history, config);
@@ -345,8 +357,13 @@ export const galaxyHistoryWidget: WidgetDefinition<GalaxyHistoryConfig> = {
     // and `undefined.get()` inside mount would turn the panel into an error card
     // for something that is not an error.
     const source = (ctx.sources as { galaxy?: DataSource<GalaxyLivePayload | null> }).galaxy;
-    const mountedAt = Date.now();
     let latest: GalaxyLivePayload | null = null;
+    // Not a constant: `DashboardSources.reset()` pushes null when the user
+    // switches analysis directory, without re-mounting the widget. Measuring
+    // from the original mount would then say "No word from Galaxy yet." the
+    // instant they switch, which reads as a broken Galaxy rather than as a
+    // panel that has been waiting two seconds.
+    let waitingSince = Date.now();
 
     const toggle = el("button", "dash-panel-btn gx-live-toggle");
     toggle.type = "button";
@@ -367,14 +384,20 @@ export const galaxyHistoryWidget: WidgetDefinition<GalaxyHistoryConfig> = {
     ctx.header.append(toggle);
 
     const draw = (): void =>
-      renderGalaxyHistory(element, latest, ctx.config, { now: Date.now(), mountedAt });
+      renderGalaxyHistory(element, latest, ctx.config, {
+        now: Date.now(),
+        mountedAt: waitingSince,
+      });
 
     if (!source) {
       // A shell without the Galaxy source (or a build where it is off) gets a
       // sentence, not an error card: nothing is broken, there is just no data.
       // It must not say "waiting", which is what a panel that is about to get
       // data says -- this one never will.
-      renderGalaxyHistory(element, NO_SOURCE, ctx.config, { now: mountedAt, mountedAt });
+      renderGalaxyHistory(element, NO_SOURCE, ctx.config, {
+        now: waitingSince,
+        mountedAt: waitingSince,
+      });
       return () => toggle.remove();
     }
 
@@ -384,6 +407,7 @@ export const galaxyHistoryWidget: WidgetDefinition<GalaxyHistoryConfig> = {
     latest = source.get();
     draw();
     const unsubscribe = ctx.subscribe(source, (payload) => {
+      if (payload === null && latest !== null) waitingSince = Date.now();
       latest = payload;
       draw();
     });

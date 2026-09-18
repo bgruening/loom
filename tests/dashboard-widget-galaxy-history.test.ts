@@ -104,8 +104,18 @@ describe("describeAge", () => {
     [120_000, "2 min ago"],
     [3_600_000, "1 hour ago"],
     [6 * 86_400_000, "6 days ago"],
+    // The last millisecond of each bucket used to round up past the bucket it
+    // was in: "60 min ago" sat immediately before "1 hour ago".
+    [3_599_999, "59 min ago"],
+    [86_399_999, "23 hours ago"],
   ])("reads %i ms as %s", (ms, expected) => {
     expect(describeAge(ms)).toBe(expected);
+  });
+
+  it("does not call an unreadable stamp 'just now'", () => {
+    // "just now" is the one direction this line must never guess in.
+    expect(describeAge(NaN)).toBe("an unknown time ago");
+    expect(describeAge(Infinity)).toBe("an unknown time ago");
   });
 });
 
@@ -169,6 +179,22 @@ describe("renderGalaxyHistory", () => {
     expect(root.querySelector("b")).toBeNull();
     expect(root.querySelector("script")).toBeNull();
     expect(root.querySelector(".gx-live-title")?.textContent).toBe("<b>not bold</b>");
+  });
+
+  it("says something for a reason this build has never heard of", () => {
+    // The brain ships on npm independently of the shell, so a newer reason
+    // reaching an older panel is a supported configuration. It used to render
+    // a header above an empty paragraph.
+    const root = draw(payload({ history: null, unavailable: "rate-limited" as never }));
+    expect(root.querySelector(".gx-live-empty")?.textContent).toBeTruthy();
+  });
+
+  it("says when Galaxy was last asked even when the stamp is unreadable", () => {
+    // The line disappearing takes the panel's one promise with it.
+    const root = draw(payload({ updatedAt: "not a date" }));
+    const line = root.querySelector(".gx-live-checked")!;
+    expect(line.textContent).toBe("Checked an unknown time ago");
+    expect(line.classList.contains("gx-live-stale")).toBe(true);
   });
 
   it("turns each unavailable reason into its own sentence and no rows", () => {
@@ -246,15 +272,17 @@ describe("renderGalaxyHistory", () => {
     expect(root.querySelector(".gx-live-more")?.textContent).toBe("+ 12 more");
   });
 
-  it("does not say 'nothing yet' directly above 'no datasets yet'", () => {
+  it("never prints a count of nothing", () => {
     // Two lines of a 400px panel saying one thing. The counts line earns its
-    // place only when there is something to count.
+    // place only when there is something to count -- including the case where
+    // the page is empty but rows are withheld, which printed the memorable
+    // "nothing yet (newest 0)" above "+ 40 more".
     const history = projectHistory("dead", fixture("empty.summary"), fixture("empty.contents"));
-    const root = draw({ ...payload(), history });
-    expect(root.querySelector(".gx-live-counts")).toBeNull();
-    // ...but a page with nothing on it still says how much is behind it.
+    expect(draw({ ...payload(), history }).querySelector(".gx-live-counts")).toBeNull();
     const withheld = projectHistory("x", { contents_active: { active: 40 } }, [], 5);
-    expect(draw({ ...payload(), history: withheld }).querySelector(".gx-live-counts")).toBeTruthy();
+    const root = draw({ ...payload(), history: withheld });
+    expect(root.querySelector(".gx-live-counts")).toBeNull();
+    expect(root.querySelector(".gx-live-more")?.textContent).toBe("+ 40 more");
   });
 
   it("says the history is empty only when Galaxy agrees it is", () => {
@@ -414,6 +442,22 @@ describe("galaxyHistoryWidget.mount", () => {
     // A new analysis directory must not leave the old history on screen.
     sources.reset();
     expect(h.element.querySelectorAll(".gx-live-row")).toHaveLength(0);
+  });
+
+  it("does not say 'no word from Galaxy' the instant the analysis changes", () => {
+    // Switching analysis directory pushes null without re-mounting the widget.
+    // Measured from the original mount, a panel open for ten minutes went
+    // straight to "No word from Galaxy yet.", which reads as a broken Galaxy
+    // rather than as a panel that has been waiting two seconds.
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse("2026-09-18T06:00:00.000Z"));
+    const sources = new DashboardSources();
+    const h = harness(sources.sources.galaxy);
+    galaxyHistoryWidget.mount(h.element, h.ctx as never);
+    sources.setGalaxyLive(payload());
+    vi.advanceTimersByTime(10 * 60_000);
+    sources.reset();
+    expect(h.element.querySelector(".gx-live-empty")?.textContent).toContain("Waiting");
   });
 
   it("a re-mount after dispose leaves exactly one subscription and one toggle", () => {
