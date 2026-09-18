@@ -511,12 +511,3 @@ function olderPlans(
   }
   return wrap;
 }
-
-// ── Styles ───────────────────────────────────────────────────────────────────
-
-/**
- * The stylesheet lives here rather than in `dashboard.css` so that this widget
- * is one file, which is what lets several widgets be written at once without
- * colliding in a shared file. Move the block into `dashboard.css` and delete
- * this when the branches come back together.
- */

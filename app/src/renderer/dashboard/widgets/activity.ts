@@ -576,15 +576,6 @@ export function isAtBottom(m: ScrollMetrics, threshold = STICK_THRESHOLD_PX): bo
   return distance <= threshold;
 }
 
-// -- Styles ------------------------------------------------------------------
-
-/**
- * `dashboard/dashboard.css` belongs to the foundation and several widget
- * branches would collide in it, so this widget carries its own sheet and
- * installs it once. Lift it into `dashboard.css` and delete this once the
- * widget branches have been merged.
- */
-
 // -- The widget --------------------------------------------------------------
 
 /**

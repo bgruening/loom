@@ -276,7 +276,7 @@ export function parseJobBlocks(content: string): DashboardJob[] {
 /** Parse an activity.jsonl tail. Unparsable or non-object lines are skipped. */
 export function parseActivityLines(text: string): ActivityEvent[] {
   const events: ActivityEvent[] = [];
-  for (const line of text.split("\n")) {
+  for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     let parsed: unknown;
