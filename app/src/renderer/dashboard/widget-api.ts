@@ -36,8 +36,33 @@ export interface NotebookSnapshot extends Snapshot {
   path: string | null;
 }
 
+/**
+ * A single Galaxy tool run, from a `loom-job` notebook block. Distinct from an
+ * invocation on purpose -- a job id and an invocation id go to different Galaxy
+ * endpoints -- and it is the only thing that moves in a session driven by tool
+ * runs rather than workflows.
+ */
+export interface DashboardJob {
+  jobId: string;
+  galaxyServerUrl: string;
+  notebookAnchor: string;
+  label: string;
+  toolId: string | null;
+  submittedAt: string;
+  status: "in_progress" | "completed" | "failed" | "cancelled" | "skipped";
+  summary?: string;
+  /** False when the brain recorded the run without Galaxy confirming the id. */
+  serverVerified?: boolean;
+  /** Galaxy's raw job state at the last poll. */
+  galaxyState?: string;
+  lastPolledAt?: string;
+}
+
 export interface InvocationSnapshot extends Snapshot {
+  /** Workflow runs, from `loom-invocation` blocks. */
   invocations: Invocation[];
+  /** Single tool runs, from `loom-job` blocks. */
+  jobs: DashboardJob[];
 }
 
 export type PlanStepStatus = "pending" | "done" | "failed";
@@ -51,6 +76,8 @@ export interface PlanStep {
   status: PlanStepStatus;
   /** `Routing: Galaxy (bwa-mem2/2.2.1)` -> `Galaxy (bwa-mem2/2.2.1)`. */
   routing: string | null;
+  /** The step's `Verification:` sub-bullet, which the schema requires of every step. */
+  verification: string | null;
   /** Everything after the em-dash on the step line. */
   detail: string;
 }

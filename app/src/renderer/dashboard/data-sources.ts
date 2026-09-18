@@ -13,6 +13,7 @@ import { parseInvocationBlocks } from "../galaxy-invocations.js";
 import type { FileNode } from "../../preload/preload.js";
 import type {
   ActivityEvent,
+  DashboardJob,
   ActivitySnapshot,
   DashboardDataSources,
   DataSource,
@@ -75,7 +76,8 @@ const PLAN_HEADING = /^##\s+(Plan\b.*)$/i;
 const ANY_H2 = /^##\s+/;
 const ROUTING_TAG = /\[([a-z]+)\]\s*$/i;
 const STEP_LINE = /^ {0,1}-\s*\[([ xX!])\]\s*(.*)$/;
-const STEP_SUBBULLET = /^\s{2,}-\s*Routing:\s*(.+?)\s*$/i;
+const STEP_ROUTING = /^\s{2,}-\s*Routing:\s*(.+?)\s*$/i;
+const STEP_VERIFICATION = /^\s{2,}-\s*Verification:\s*(.+?)\s*$/i;
 const STEP_NUMBER = /^(\d+)[.)]\s*/;
 const STEP_ANCHOR = /\{#([A-Za-z0-9_-]+)\}/;
 const STEP_BOLD = /\*\*(.+?)\*\*/;
@@ -133,6 +135,7 @@ function parseStep(rest: string, fallbackNumber: number): PlanStep {
     title: parts[0].trim(),
     status: "pending",
     routing: null,
+    verification: null,
     detail: parts[1].replace(LEADING_SEPARATOR, "").trim(),
   };
 }
@@ -175,13 +178,95 @@ export function parsePlanSections(markdown: string): PlanSection[] {
       continue;
     }
 
-    const routing = line.match(STEP_SUBBULLET);
-    if (routing && current.steps.length > 0) {
-      current.steps[current.steps.length - 1].routing = routing[1];
+    if (current.steps.length === 0) continue;
+    const last = current.steps[current.steps.length - 1];
+    const routing = line.match(STEP_ROUTING);
+    if (routing) {
+      last.routing = routing[1];
+      continue;
     }
+    // Every step is supposed to carry one; a widget showing "what still has to
+    // be true" needs the text, not just the fact that it exists.
+    const verification = line.match(STEP_VERIFICATION);
+    if (verification) last.verification = verification[1];
   }
 
   return plans;
+}
+
+// ── loom-job parsing ─────────────────────────────────────────────────────────
+
+const JOB_FENCE_OPEN = "```loom-job";
+const FENCE_CLOSE = "```";
+const JOB_STATUSES = new Set(["in_progress", "completed", "failed", "cancelled", "skipped"]);
+
+function unquote(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith('"')) {
+    try {
+      return JSON.parse(trimmed) as string;
+    } catch {
+      return trimmed;
+    }
+  }
+  return trimmed;
+}
+
+/**
+ * Single Galaxy tool runs recorded as `loom-job` blocks. The brain writes and
+ * updates them (extensions/loom/galaxy-job-block.ts); this reads them, the same
+ * way galaxy-invocations.ts reads `loom-invocation` blocks rather than importing
+ * the brain's writer. Two readers of one on-disk format is a real cost -- if a
+ * third appears, move the grammar into shared/.
+ */
+export function parseJobBlocks(content: string): DashboardJob[] {
+  const out: DashboardJob[] = [];
+  const lines = content.split("\n");
+  let i = 0;
+  while (i < lines.length) {
+    if (lines[i].trim() !== JOB_FENCE_OPEN) {
+      i++;
+      continue;
+    }
+    const start = i + 1;
+    let end = start;
+    while (end < lines.length && lines[end].trim() !== FENCE_CLOSE) end++;
+
+    const fields: Record<string, string> = {};
+    for (const line of lines.slice(start, end)) {
+      const m = line.match(/^([a-z_]+):\s*(.*)$/);
+      if (m) fields[m[1]] = unquote(m[2]);
+    }
+    if (
+      fields.job_id &&
+      fields.galaxy_server_url &&
+      fields.notebook_anchor &&
+      fields.label &&
+      fields.submitted_at &&
+      JOB_STATUSES.has(fields.status)
+    ) {
+      out.push({
+        jobId: fields.job_id,
+        galaxyServerUrl: fields.galaxy_server_url,
+        notebookAnchor: fields.notebook_anchor,
+        label: fields.label,
+        toolId: fields.tool_id || null,
+        submittedAt: fields.submitted_at,
+        status: fields.status as DashboardJob["status"],
+        summary: fields.summary || undefined,
+        serverVerified:
+          fields.server_verified === "true"
+            ? true
+            : fields.server_verified === "false"
+              ? false
+              : undefined,
+        galaxyState: fields.galaxy_state || undefined,
+        lastPolledAt: fields.last_polled_at || undefined,
+      });
+    }
+    i = end + 1;
+  }
+  return out;
 }
 
 // ── Activity parsing ─────────────────────────────────────────────────────────
@@ -260,6 +345,7 @@ export class DashboardSources {
   });
   private invocations = new MutableSource<InvocationSnapshot>({
     invocations: [],
+    jobs: [],
     updatedAt: 0,
   });
   private plan = new MutableSource<PlanSnapshot>({ plans: [], updatedAt: 0 });
@@ -311,7 +397,11 @@ export class DashboardSources {
     // same markdown, and a listener on `notebook` that reaches for
     // `sources.plan.get()` must not see the previous plan.
     this.notebook.stage({ markdown, path, updatedAt });
-    this.invocations.stage({ invocations: parseInvocationBlocks(markdown), updatedAt });
+    this.invocations.stage({
+      invocations: parseInvocationBlocks(markdown),
+      jobs: parseJobBlocks(markdown),
+      updatedAt,
+    });
     this.plan.stage({ plans: parsePlanSections(markdown), updatedAt });
     this.notebook.notify();
     this.invocations.notify();
@@ -395,7 +485,7 @@ export class DashboardSources {
     this.again.files = false;
     const updatedAt = Date.now();
     this.notebook.set({ markdown: "", path: null, updatedAt });
-    this.invocations.set({ invocations: [], updatedAt });
+    this.invocations.set({ invocations: [], jobs: [], updatedAt });
     this.plan.set({ plans: [], updatedAt });
     this.activity.set({ events: [], available: false, updatedAt });
     this.files.set({ root: null, available: false, updatedAt });

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   DashboardSources,
   parseActivityLines,
+  parseJobBlocks,
   parsePlanSections,
 } from "../app/src/renderer/dashboard/data-sources.js";
 
@@ -30,6 +31,17 @@ Not a plan section.
 ## Plan B: Follow-up [galaxy]
 
 - [ ] Draft the comparison
+
+\`\`\`loom-job
+job_id: job-9
+galaxy_server_url: https://usegalaxy.org
+notebook_anchor: plan-a-step-1
+label: fastp trim
+tool_id: fastp
+submitted_at: 2026-09-18T04:50:00Z
+status: completed
+galaxy_state: ok
+\`\`\`
 
 \`\`\`loom-invocation
 invocation_id: inv-1
@@ -81,6 +93,12 @@ describe("parsePlanSections", () => {
     expect(steps[2].routing).toBeNull();
   });
 
+  it("attaches a Verification sub-bullet too, which the schema requires of every step", () => {
+    const steps = parsePlanSections(NOTEBOOK)[0].steps;
+    expect(steps[0].verification).toBe("confirm the fastp report exists");
+    expect(steps[1].verification).toBeNull();
+  });
+
   it("copes with a hand-edited step that has no number, anchor or bold", () => {
     const plans = parsePlanSections("## Plan C: Ad hoc\n\n- [ ] just do the thing -- somehow\n");
     expect(plans[0].steps[0]).toMatchObject({
@@ -124,16 +142,95 @@ describe("parseActivityLines", () => {
   });
 });
 
+describe("parseJobBlocks", () => {
+  it("reads a loom-job block, which is all that moves in a tool-run session", () => {
+    const [job] = parseJobBlocks(NOTEBOOK);
+    expect(job).toMatchObject({
+      jobId: "job-9",
+      label: "fastp trim",
+      toolId: "fastp",
+      status: "completed",
+      galaxyState: "ok",
+      notebookAnchor: "plan-a-step-1",
+    });
+  });
+
+  it("skips a block missing a required field rather than half-reading it", () => {
+    const partial = ["```loom-job", "job_id: x", "status: in_progress", "```"].join("\n");
+    expect(parseJobBlocks(partial)).toEqual([]);
+  });
+
+  it("accepts every status the brain can write, including the non-failure endings", () => {
+    for (const status of ["in_progress", "completed", "failed", "cancelled", "skipped"]) {
+      const block = [
+        "```loom-job",
+        "job_id: j",
+        "galaxy_server_url: https://usegalaxy.org",
+        "notebook_anchor: a",
+        "label: L",
+        "submitted_at: 2026-09-18T00:00:00Z",
+        `status: ${status}`,
+        "```",
+      ].join("\n");
+      expect(parseJobBlocks(block)[0]?.status, status).toBe(status);
+    }
+  });
+
+  it("unquotes a JSON-quoted label", () => {
+    const block = [
+      "```loom-job",
+      "job_id: j",
+      "galaxy_server_url: https://usegalaxy.org",
+      "notebook_anchor: a",
+      'label: "BWA: paired, 4 samples"',
+      "submitted_at: 2026-09-18T00:00:00Z",
+      "status: in_progress",
+      "```",
+    ].join("\n");
+    expect(parseJobBlocks(block)[0].label).toBe("BWA: paired, 4 samples");
+  });
+
+  it("returns nothing for a notebook with no job blocks", () => {
+    expect(parseJobBlocks("# nothing here")).toEqual([]);
+  });
+});
+
 describe("DashboardSources", () => {
-  it("derives invocations and plan steps from one notebook push", () => {
+  it("derives invocations, jobs and plan steps from one notebook push", () => {
     const sources = new DashboardSources();
     sources.setNotebook(NOTEBOOK, "/tmp/a/notebook.md");
 
     expect(sources.sources.notebook.get().path).toBe("/tmp/a/notebook.md");
-    expect(sources.sources.invocations.get().invocations.map((i) => i.invocationId)).toEqual([
-      "inv-1",
-    ]);
+    const snapshot = sources.sources.invocations.get();
+    expect(snapshot.invocations.map((i) => i.invocationId)).toEqual(["inv-1"]);
+    expect(snapshot.jobs.map((j) => j.jobId)).toEqual(["job-9"]);
     expect(sources.sources.plan.get().plans).toHaveLength(2);
+  });
+
+  it("stages the derived sources before notifying, so none of them lag", () => {
+    const sources = new DashboardSources();
+    let planSeenFromNotebookListener = -1;
+    let jobsSeenFromNotebookListener = -1;
+    sources.sources.notebook.subscribe(() => {
+      planSeenFromNotebookListener = sources.sources.plan.get().plans.length;
+      jobsSeenFromNotebookListener = sources.sources.invocations.get().jobs.length;
+    });
+    sources.setNotebook(NOTEBOOK);
+    expect(planSeenFromNotebookListener).toBe(2);
+    expect(jobsSeenFromNotebookListener).toBe(1);
+  });
+
+  it("does not wake a session widget when nothing about the session changed", () => {
+    const sources = new DashboardSources();
+    let notifications = 0;
+    sources.sources.session.subscribe(() => {
+      notifications++;
+    });
+    sources.setSession({ status: "running", cwd: "/tmp/a" });
+    sources.setSession({ status: "running", cwd: "/tmp/a" });
+    sources.setSession({ tokens: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 } });
+    sources.setSession({ tokens: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 } });
+    expect(notifications).toBe(2);
   });
 
   it("notifies subscribers and stops after unsubscribe", () => {

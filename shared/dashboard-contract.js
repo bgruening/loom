@@ -236,6 +236,26 @@ export function serializeDashboardDocument(document) {
   return JSON.stringify(document, null, 2) + "\n";
 }
 
+/**
+ * A short content fingerprint for the layout file, used as the compare-and-swap
+ * token between a load and the save based on it. Not a security hash: FNV-1a in
+ * plain JS because the renderer, the main process and the web server all have to
+ * agree on it, and only one of the three can import node:crypto.
+ */
+export function dashboardRevision(raw) {
+  if (typeof raw !== "string") return null;
+  let high = 0x811c9dc5;
+  let low = 0x01000193;
+  for (let i = 0; i < raw.length; i++) {
+    const code = raw.charCodeAt(i);
+    high = Math.imul(high ^ code, 0x01000193) >>> 0;
+    low = Math.imul(low ^ ((code << 5) | (code >>> 3)), 0x85ebca6b) >>> 0;
+  }
+  return (
+    high.toString(16).padStart(8, "0") + low.toString(16).padStart(8, "0") + raw.length.toString(16)
+  );
+}
+
 function normalizeLayout(raw, path, problems) {
   const layout = { span: 1, rows: DEFAULT_ROWS };
   if (raw === undefined) return layout;

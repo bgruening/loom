@@ -42,7 +42,7 @@ afterEach(() => {
 describe("first run", () => {
   it("renders the default layout and says nothing when there is no file", async () => {
     const shell: FakeShell = {
-      loadDashboard: vi.fn().mockResolvedValue({ ok: true, raw: null }),
+      loadDashboard: vi.fn().mockResolvedValue({ ok: true, raw: null, revision: null }),
       saveDashboard: vi.fn().mockResolvedValue({ ok: true }),
     };
     installShell(shell);
@@ -56,7 +56,7 @@ describe("first run", () => {
 
   it("treats an empty file the same as no file", async () => {
     installShell({
-      loadDashboard: vi.fn().mockResolvedValue({ ok: true, raw: "   " }),
+      loadDashboard: vi.fn().mockResolvedValue({ ok: true, raw: "   ", revision: "r0" }),
       saveDashboard: vi.fn(),
     });
     const dash = initDashboard(root);
@@ -80,7 +80,9 @@ describe("loading a saved layout", () => {
       ],
     };
     const shell: FakeShell = {
-      loadDashboard: vi.fn().mockResolvedValue({ ok: true, raw: JSON.stringify(saved) }),
+      loadDashboard: vi
+        .fn()
+        .mockResolvedValue({ ok: true, raw: JSON.stringify(saved), revision: "rS" }),
       saveDashboard: vi.fn().mockResolvedValue({ ok: true }),
     };
     installShell(shell);
@@ -94,7 +96,7 @@ describe("loading a saved layout", () => {
 
   it("falls back to the default and leaves a corrupt file alone", async () => {
     const shell: FakeShell = {
-      loadDashboard: vi.fn().mockResolvedValue({ ok: true, raw: "{ not json" }),
+      loadDashboard: vi.fn().mockResolvedValue({ ok: true, raw: "{ not json", revision: "rBad" }),
       saveDashboard: vi.fn().mockResolvedValue({ ok: true }),
     };
     installShell(shell);
@@ -111,9 +113,11 @@ describe("loading a saved layout", () => {
 
   it("refuses a document from a newer build the same way", async () => {
     installShell({
-      loadDashboard: vi
-        .fn()
-        .mockResolvedValue({ ok: true, raw: '{"version":99,"activeId":"x","dashboards":[]}' }),
+      loadDashboard: vi.fn().mockResolvedValue({
+        ok: true,
+        raw: '{"version":99,"activeId":"x","dashboards":[]}',
+        revision: "rNew",
+      }),
       saveDashboard: vi.fn(),
     });
     initDashboard(root);
@@ -132,10 +136,136 @@ describe("loading a saved layout", () => {
   });
 });
 
+describe("compare and swap", () => {
+  it("hands the revision it loaded back on the save based on it", async () => {
+    const shell: FakeShell = {
+      loadDashboard: vi.fn().mockResolvedValue({ ok: true, raw: null, revision: null }),
+      saveDashboard: vi.fn().mockResolvedValue({ ok: true, revision: "r1" }),
+    };
+    installShell(shell);
+    const dash = initDashboard(root);
+    await settle();
+
+    const first = dash.host.getDocument();
+    first.dashboards[0].title = "One";
+    dash.host.setDocument(first);
+    vi.advanceTimersByTime(400);
+    await settle();
+    expect(shell.saveDashboard!.mock.calls[0][1]).toBeNull();
+
+    const second = dash.host.getDocument();
+    second.dashboards[0].title = "Two";
+    dash.host.setDocument(second);
+    vi.advanceTimersByTime(400);
+    await settle();
+    // The revision the first save returned is the base for the second.
+    expect(shell.saveDashboard!.mock.calls[1][1]).toBe("r1");
+    dash.stop();
+  });
+
+  it("takes the newer layout and says so when a save conflicts", async () => {
+    const theirs = JSON.stringify({
+      version: 1,
+      activeId: "theirs",
+      dashboards: [{ id: "theirs", title: "Written by the agent", panels: [] }],
+    });
+    const shell: FakeShell = {
+      loadDashboard: vi.fn().mockResolvedValue({ ok: true, raw: null, revision: null }),
+      saveDashboard: vi
+        .fn()
+        .mockResolvedValue({
+          ok: false,
+          conflict: true,
+          error: "changed",
+          raw: theirs,
+          revision: "r9",
+        }),
+    };
+    installShell(shell);
+    const dash = initDashboard(root);
+    await settle();
+
+    const mine = dash.host.getDocument();
+    mine.dashboards[0].title = "Mine";
+    dash.host.setDocument(mine);
+    vi.advanceTimersByTime(400);
+    await settle();
+
+    expect(dash.host.getActiveDashboard()?.id).toBe("theirs");
+    expect(root.querySelector(".dash-banner")?.textContent).toContain("changed elsewhere");
+    dash.stop();
+  });
+
+  it("picks up a layout something else rewrote, without being asked to save", async () => {
+    const theirs = JSON.stringify({
+      version: 1,
+      activeId: "theirs",
+      dashboards: [{ id: "theirs", title: "Theirs", panels: [] }],
+    });
+    const loadDashboard = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, raw: null, revision: null })
+      .mockResolvedValue({ ok: true, raw: theirs, revision: "r2" });
+    installShell({ loadDashboard, saveDashboard: vi.fn() });
+    const dash = initDashboard(root);
+    await settle();
+    expect(dash.host.getActiveDashboard()?.id).toBe("current-analysis");
+
+    dash.refreshFromFiles();
+    await settle();
+    expect(dash.host.getActiveDashboard()?.id).toBe("theirs");
+    dash.stop();
+  });
+
+  it("polls for an external change even where the shell has no file watcher", async () => {
+    const theirs = JSON.stringify({
+      version: 1,
+      activeId: "theirs",
+      dashboards: [{ id: "theirs", title: "Theirs", panels: [] }],
+    });
+    const loadDashboard = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, raw: null, revision: null })
+      .mockResolvedValue({ ok: true, raw: theirs, revision: "r2" });
+    installShell({ loadDashboard, saveDashboard: vi.fn() });
+    const dash = initDashboard(root);
+    await settle();
+
+    vi.advanceTimersByTime(6000);
+    await settle();
+    expect(dash.host.getActiveDashboard()?.id).toBe("theirs");
+    dash.stop();
+  });
+
+  it("does not let the poll overwrite a change the user just made", async () => {
+    const theirs = JSON.stringify({
+      version: 1,
+      activeId: "theirs",
+      dashboards: [{ id: "theirs", title: "Theirs", panels: [] }],
+    });
+    const loadDashboard = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, raw: null, revision: null })
+      .mockResolvedValue({ ok: true, raw: theirs, revision: "r2" });
+    installShell({ loadDashboard, saveDashboard: vi.fn().mockResolvedValue({ ok: true }) });
+    const dash = initDashboard(root);
+    await settle();
+
+    const mine = dash.host.getDocument();
+    mine.dashboards[0].title = "Mine";
+    dash.host.setDocument(mine);
+    // The poll fires while the save is still queued.
+    vi.advanceTimersByTime(200);
+    await settle();
+    expect(dash.host.getActiveDashboard()?.title).toBe("Mine");
+    dash.stop();
+  });
+});
+
 describe("saving", () => {
   it("writes the serialized document after the debounce, once", async () => {
     const shell: FakeShell = {
-      loadDashboard: vi.fn().mockResolvedValue({ ok: true, raw: null }),
+      loadDashboard: vi.fn().mockResolvedValue({ ok: true, raw: null, revision: null }),
       saveDashboard: vi.fn().mockResolvedValue({ ok: true }),
     };
     installShell(shell);
@@ -159,7 +289,7 @@ describe("saving", () => {
 
   it("drops a queued save when the analysis directory changes under it", async () => {
     const shell: FakeShell = {
-      loadDashboard: vi.fn().mockResolvedValue({ ok: true, raw: null }),
+      loadDashboard: vi.fn().mockResolvedValue({ ok: true, raw: null, revision: null }),
       saveDashboard: vi.fn().mockResolvedValue({ ok: true }),
     };
     installShell(shell);
@@ -179,7 +309,7 @@ describe("saving", () => {
 
   it("goes back to the default layout when the new directory has none", async () => {
     const shell: FakeShell = {
-      loadDashboard: vi.fn().mockResolvedValue({ ok: true, raw: null }),
+      loadDashboard: vi.fn().mockResolvedValue({ ok: true, raw: null, revision: null }),
       saveDashboard: vi.fn().mockResolvedValue({ ok: true }),
     };
     installShell(shell);

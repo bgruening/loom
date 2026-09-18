@@ -18,10 +18,21 @@ import type { SessionSnapshot } from "./widget-api.js";
 import "./widgets/index.js";
 
 const SAVE_DEBOUNCE_MS = 300;
+/**
+ * How often to notice that something else rewrote the layout file. The desktop
+ * shell has a cwd watcher and `refreshFromFiles` drives a check off it; the web
+ * shell has no watcher at all, so this poll is what makes the two behave the
+ * same. One small read of a file capped at 256 KB.
+ */
+const EXTERNAL_CHECK_MS = 5000;
 
 const CORRUPT_BANNER =
   "The saved dashboard for this analysis could not be read, so this is the default one. " +
   "Your file has been left alone -- changing anything here will replace it.";
+
+const CONFLICT_BANNER =
+  "The dashboard was changed elsewhere, so this is the newer version. " +
+  "Your last change was not saved.";
 
 export interface DashboardBootstrap {
   host: DashboardHost;
@@ -32,11 +43,26 @@ export interface DashboardBootstrap {
   refreshFromFiles(): void;
   /** A new analysis directory: drop the old data and load that workspace's layout. */
   reloadForCwd(): void;
+  /** Stop the external-change poll. For tests and teardown. */
+  stop(): void;
 }
 
+type LoadResult =
+  { ok: true; raw: string | null; revision: string | null } | { ok: false; error: string };
+
+type SaveResult =
+  | { ok: true; revision?: string | null }
+  | {
+      ok: false;
+      error: string;
+      conflict?: boolean;
+      raw?: string | null;
+      revision?: string | null;
+    };
+
 type DashboardShell = {
-  loadDashboard?: () => Promise<{ ok: true; raw: string | null } | { ok: false; error: string }>;
-  saveDashboard?: (raw: string) => Promise<{ ok: true } | { ok: false; error: string }>;
+  loadDashboard?: () => Promise<LoadResult>;
+  saveDashboard?: (raw: string, baseRevision?: string | null) => Promise<SaveResult>;
   readFile?: (
     relPath: string,
     opts?: { tail?: boolean },
@@ -62,6 +88,10 @@ export function initDashboard(container: HTMLElement): DashboardBootstrap {
   // Same guard the notebook loader in app.ts uses: a load for the directory we
   // just left must not apply its document over the one we are switching to.
   let loadSeq = 0;
+  // The version of the file this renderer believes it is editing. Handed back
+  // on every save so a write based on a version somebody else replaced is
+  // refused rather than applied over the top.
+  let revision: string | null = null;
 
   const cancelPendingSave = (): void => {
     if (saveTimer) clearTimeout(saveTimer);
@@ -69,14 +99,48 @@ export function initDashboard(container: HTMLElement): DashboardBootstrap {
     pending = null;
   };
 
+  /** Adopt a document that arrived from disk. Never writes back. */
+  const adopt = (raw: string, nextRevision: string | null): boolean => {
+    const parsed = parseDashboardDocument(raw);
+    if (!parsed.ok) {
+      console.error("[dashboard] saved layout rejected:", parsed.problems);
+      host.setBanner(CORRUPT_BANNER);
+      return false;
+    }
+    if (parsed.problems.length > 0) {
+      console.warn("[dashboard] saved layout needed repairs:", parsed.problems);
+    }
+    revision = nextRevision;
+    host.setDocument(parsed.document, { persist: false });
+    return true;
+  };
+
   const flush = (): void => {
     saveTimer = null;
     const doc = pending;
     pending = null;
     if (!doc || typeof shell.saveDashboard !== "function") return;
-    void Promise.resolve(shell.saveDashboard(serializeDashboardDocument(doc)))
+    const base = revision;
+    void Promise.resolve(shell.saveDashboard(serializeDashboardDocument(doc), base))
       .then((res) => {
-        if (!res.ok) console.error("[dashboard] save failed:", res.error);
+        if (res.ok) {
+          revision = res.revision ?? null;
+          return;
+        }
+        if (res.conflict) {
+          // Somebody else -- the brain, another window -- rewrote the file
+          // between our load and our save. Take theirs and say so; silently
+          // winning would throw away a change the user cannot see.
+          console.warn("[dashboard] save conflicted with a newer layout on disk");
+          if (typeof res.raw === "string") {
+            if (adopt(res.raw, res.revision ?? null)) host.setBanner(CONFLICT_BANNER);
+          } else {
+            revision = res.revision ?? null;
+            host.setBanner(CONFLICT_BANNER);
+          }
+          return;
+        }
+        console.error("[dashboard] save failed:", res.error);
       })
       .catch((err) => console.error("[dashboard] save failed:", err));
   };
@@ -103,7 +167,7 @@ export function initDashboard(container: HTMLElement): DashboardBootstrap {
     const seq = ++loadSeq;
     host.setBanner("");
     if (typeof shell.loadDashboard !== "function") return;
-    let res: { ok: true; raw: string | null } | { ok: false; error: string };
+    let res: LoadResult;
     try {
       res = await shell.loadDashboard();
     } catch (err) {
@@ -116,23 +180,47 @@ export function initDashboard(container: HTMLElement): DashboardBootstrap {
       return;
     }
     // No file yet is the normal first run, not a problem worth a banner.
-    if (res.raw === null || res.raw.trim() === "") return;
-
-    const parsed = parseDashboardDocument(res.raw);
-    if (!parsed.ok) {
-      console.error("[dashboard] saved layout rejected:", parsed.problems);
-      host.setBanner(CORRUPT_BANNER);
+    if (res.raw === null || res.raw.trim() === "") {
+      revision = res.revision ?? null;
       return;
     }
-    if (parsed.problems.length > 0) {
-      console.warn("[dashboard] saved layout needed repairs:", parsed.problems);
+    adopt(res.raw, res.revision ?? null);
+  };
+
+  /**
+   * Has something else rewritten the file? Skipped while a local change is
+   * queued -- that write is about to run its own compare-and-swap, which is
+   * where a real conflict is reported.
+   */
+  const checkForExternalChange = async (): Promise<void> => {
+    if (pending || saveTimer) return;
+    if (typeof shell.loadDashboard !== "function") return;
+    const seq = loadSeq;
+    let res: LoadResult;
+    try {
+      res = await shell.loadDashboard();
+    } catch {
+      return;
     }
-    host.setDocument(parsed.document, { persist: false });
+    if (seq !== loadSeq || pending || saveTimer) return;
+    if (!res.ok) return;
+    const next = res.revision ?? null;
+    if (next === revision) return;
+    if (res.raw === null || res.raw.trim() === "") {
+      revision = next;
+      return;
+    }
+    if (adopt(res.raw, next)) host.setBanner("");
   };
 
   void load();
   void sources.refreshActivity();
   void sources.refreshFiles();
+
+  const poll =
+    typeof shell.loadDashboard === "function"
+      ? setInterval(() => void checkForExternalChange(), EXTERNAL_CHECK_MS)
+      : null;
 
   return {
     host,
@@ -141,12 +229,15 @@ export function initDashboard(container: HTMLElement): DashboardBootstrap {
     refreshFromFiles: () => {
       void sources.refreshActivity();
       void sources.refreshFiles();
+      // The desktop watcher fires here; the poll above covers the web shell.
+      void checkForExternalChange();
     },
     reloadForCwd: () => {
       // A save queued against the previous analysis must not land in the new
       // one: the shell resolves the filename against whatever cwd is current
       // by the time the write happens.
       cancelPendingSave();
+      revision = null;
       sources.reset();
       // Back to the default first: the new workspace may have no layout of its
       // own, and `load` returning early must not leave the old one on screen.
@@ -154,6 +245,10 @@ export function initDashboard(container: HTMLElement): DashboardBootstrap {
       void load();
       void sources.refreshActivity();
       void sources.refreshFiles();
+    },
+    stop: () => {
+      cancelPendingSave();
+      if (poll) clearInterval(poll);
     },
   };
 }

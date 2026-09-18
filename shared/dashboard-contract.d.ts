@@ -88,6 +88,13 @@ export function createDefaultDashboardDocument(): DashboardDocument;
 export function serializeDashboardDocument(document: DashboardDocument): string;
 
 /**
+ * A short content fingerprint for the layout file: the compare-and-swap token a
+ * save carries to prove which version it was based on. Returns null for a
+ * non-string (i.e. no file).
+ */
+export function dashboardRevision(raw: unknown): string | null;
+
+/**
  * Normalize an untrusted value into a dashboard document. Never throws.
  *
  * `ok: true` carries the document plus every repair that was made. `ok: false`

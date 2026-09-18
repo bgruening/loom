@@ -11,6 +11,16 @@
      follow the pane's width, not the viewport's. */
   container-type: inline-size;
   container-name: dashboard;
+  /* --bg-surface (the panel) and --bg-artifact (the pane) are both #ffffff in
+     the light theme, which leaves a panel with no edge. */
+  background: var(--bg);
+}
+
+/* styles.css toggles visibility with a `.hidden` class and has no unscoped rule
+   for the attribute, so anything here that is display:flex and toggled with
+   [hidden] would stay on screen. */
+#dashboard-view [hidden] {
+  display: none !important;
 }
 
 #dashboard-view.hidden {
@@ -60,8 +70,13 @@
 }
 
 .dash-grid {
+  --dash-row: 72px;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* Height in the same system as width: `rows` is a grid-row span, not a CSS
+     height, so two panels of different heights in one row stop leaving a
+     ragged gap under the shorter one. */
+  grid-auto-rows: var(--dash-row);
   gap: 12px;
   align-content: start;
 }
@@ -72,28 +87,37 @@
 @media (max-width: 560px) {
   .dash-grid {
     grid-template-columns: minmax(0, 1fr);
+    /* One column: a fixed height is all dead space. Let a short panel shrink
+       and cap a long one where its author said. */
+    grid-auto-rows: min-content;
   }
   .dash-panel {
     grid-column: span 1 !important;
+    grid-row: auto !important;
+    max-height: calc(var(--dash-row) * var(--dash-panel-rows) + 6px);
   }
 }
 
 @container dashboard (max-width: 560px) {
   .dash-grid {
     grid-template-columns: minmax(0, 1fr);
+    /* One column: a fixed height is all dead space. Let a short panel shrink
+       and cap a long one where its author said. */
+    grid-auto-rows: min-content;
   }
   .dash-panel {
     grid-column: span 1 !important;
+    grid-row: auto !important;
+    max-height: calc(var(--dash-row) * var(--dash-panel-rows) + 6px);
   }
 }
 
 .dash-panel {
-  --dash-row: 108px;
   --dash-panel-rows: 2;
   display: flex;
   flex-direction: column;
   min-width: 0;
-  height: calc(var(--dash-row) * var(--dash-panel-rows));
+  min-height: 0;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg-surface);
@@ -133,12 +157,22 @@
   gap: 4px;
 }
 
+/* --text-dim is under the 4.5:1 floor over the panel surface in both themes,
+   and a dashboard is mostly 10-11px meta text. */
+.dash-panel {
+  --dash-text-meta: rgba(248, 250, 252, 0.72);
+}
+
+:root[data-theme="light"] .dash-panel {
+  --dash-text-meta: rgba(31, 41, 55, 0.72);
+}
+
 .dash-panel-btn {
   appearance: none;
   border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
-  color: var(--text-dim);
+  color: var(--dash-text-meta);
   font: inherit;
   font-size: 11px;
   font-weight: 500;
@@ -178,7 +212,7 @@
   border: 1px dashed var(--border-strong);
   border-radius: 4px;
   padding: 10px;
-  color: var(--text-dim);
+  color: var(--dash-text-meta);
 }
 
 .dash-card-title {
@@ -192,13 +226,26 @@
   line-height: 1.5;
 }
 
+/* Deliberately not red. Red in this app means the analysis is in trouble, and
+   "the box that draws your jobs broke" is not that. */
 .dash-card-error {
   border-style: solid;
-  border-color: var(--error);
 }
 
-.dash-card-error .dash-card-title {
-  color: var(--error);
+.dash-card-detail-raw {
+  margin-top: 8px;
+  font-size: 11px;
+}
+
+.dash-card-detail-raw pre {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+}
+
+.dash-card-retry {
+  margin-top: 8px;
 }
 
 /* Notebook widget. */

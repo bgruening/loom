@@ -233,6 +233,10 @@ export class DashboardHost implements DashboardHostApi {
     section.dataset.panelId = panel.id;
     section.dataset.widget = panel.widget;
     section.style.gridColumn = `span ${panel.layout.span}`;
+    // Width and height in one system: the grid's own rows, not a CSS height, so
+    // two panels of different heights in a row do not leave a ragged gap. The
+    // custom property is what the one-column rule caps against.
+    section.style.gridRow = `span ${panel.layout.rows}`;
     section.style.setProperty("--dash-panel-rows", String(panel.layout.rows));
 
     const head = el("header", "dash-panel-head");
@@ -323,7 +327,7 @@ export class DashboardHost implements DashboardHostApi {
       // Its header controls belong to a widget that is no longer running.
       actions.textContent = "";
       body.textContent = "";
-      body.append(this.errorCard(def.type, messageFor(err)));
+      body.append(this.errorCard(panel.title ?? def.label, messageFor(err), () => this.render()));
     };
 
     const ctx: WidgetContext = {
@@ -420,10 +424,32 @@ export class DashboardHost implements DashboardHostApi {
     return card;
   }
 
-  private errorCard(widgetType: string, message: string): HTMLElement {
+  /**
+   * A widget that cannot draw is not a failed analysis, and must not look like
+   * one: no red, no developer type string in the headline, and a clear line
+   * saying the work itself is untouched. The raw message is still there for
+   * anyone who wants it.
+   */
+  private errorCard(label: string, message: string, retry: () => void): HTMLElement {
     const card = el("div", "dash-card dash-card-error");
-    card.append(el("p", "dash-card-title", `${widgetType} stopped working`));
-    card.append(el("p", "dash-card-detail", message));
+    card.append(el("p", "dash-card-title", "This panel isn't working"));
+    card.append(
+      el(
+        "p",
+        "dash-card-detail",
+        `Something went wrong drawing ${label}. Your analysis is unaffected.`,
+      ),
+    );
+
+    const button = el("button", "dash-panel-btn dash-card-retry", "Try again");
+    button.type = "button";
+    button.addEventListener("click", retry);
+    card.append(button);
+
+    const details = el("details", "dash-card-detail-raw");
+    details.append(el("summary", undefined, "Details"));
+    details.append(el("pre", undefined, message));
+    card.append(details);
     return card;
   }
 

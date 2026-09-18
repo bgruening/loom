@@ -65,7 +65,7 @@ describe("rendering", () => {
     ).toEqual(["notebook", "jobs", "plan"]);
   });
 
-  it("applies span and rows to the grid", () => {
+  it("expresses both span and rows as grid spans, not a CSS height", () => {
     registry.register(stubWidget("a", () => {}));
     const host = makeHost();
     const next = doc("a");
@@ -73,7 +73,10 @@ describe("rendering", () => {
     host.setDocument(next, { persist: false });
     const panel = root.querySelector(".dash-panel") as HTMLElement;
     expect(panel.style.gridColumn).toBe("span 2");
+    expect(panel.style.gridRow).toBe("span 4");
+    // Still published for the one-column rule, which caps rather than fixes.
     expect(panel.style.getPropertyValue("--dash-panel-rows")).toBe("4");
+    expect(panel.style.height).toBe("");
   });
 
   it("prefers a panel title over the widget label", () => {
@@ -134,8 +137,30 @@ describe("failure isolation", () => {
     expect(goodMounted).toBe(true);
     const cards = root.querySelectorAll(".dash-card-error");
     expect(cards).toHaveLength(1);
-    expect(cards[0].textContent).toContain("mount exploded");
+    // Says the panel broke, not the analysis, and keeps the raw message.
+    expect(cards[0].textContent).toContain("This panel isn't working");
+    expect(cards[0].textContent).toContain("Your analysis is unaffected");
+    expect(cards[0].querySelector("details pre")?.textContent).toBe("mount exploded");
     expect(root.textContent).toContain("fine");
+  });
+
+  it("offers a retry that re-mounts the widget", () => {
+    let attempts = 0;
+    registry.register(
+      stubWidget("a", (el) => {
+        attempts++;
+        if (attempts === 1) throw new Error("first time unlucky");
+        el.textContent = "recovered";
+      }),
+    );
+    const host = makeHost();
+    host.setDocument(doc("a"), { persist: false });
+    expect(root.querySelector(".dash-card-error")).not.toBeNull();
+
+    (root.querySelector(".dash-card-retry") as HTMLButtonElement).click();
+
+    expect(root.querySelector(".dash-card-error")).toBeNull();
+    expect(root.textContent).toContain("recovered");
   });
 
   it("isolates a widget whose subscription callback throws on a later update", () => {

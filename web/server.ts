@@ -9,7 +9,15 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { createServer } from "node:http";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, lstatSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  mkdirSync,
+  lstatSync,
+  renameSync,
+  rmSync,
+} from "node:fs";
 import { join, resolve, dirname, basename } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -25,7 +33,11 @@ import { isForwardableUiResponse } from "./rpc-guard.js";
 import { isCustomProvider } from "../shared/custom-provider.js";
 import { hasProviderKey, llmKeyEnvVar } from "./llm-credentials.js";
 import { resolveShutdownGraceMs } from "./shutdown-grace.js";
-import { DASHBOARD_FILENAME, DASHBOARD_MAX_BYTES } from "../shared/dashboard-contract.js";
+import {
+  DASHBOARD_FILENAME,
+  DASHBOARD_MAX_BYTES,
+  dashboardRevision,
+} from "../shared/dashboard-contract.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // In dev this file runs from web/; the container bundles it to web/build/ and
@@ -542,7 +554,7 @@ wss.on("connection", (socket) => {
       const file = join(cwd, DASHBOARD_FILENAME);
       try {
         if (!existsSync(file)) {
-          respond(id, { ok: true, raw: null });
+          respond(id, { ok: true, raw: null, revision: null });
           return;
         }
         const stat = lstatSync(file);
@@ -557,7 +569,8 @@ wss.on("connection", (socket) => {
           });
           return;
         }
-        respond(id, { ok: true, raw: readFileSync(file, "utf-8") });
+        const raw = readFileSync(file, "utf-8");
+        respond(id, { ok: true, raw, revision: dashboardRevision(raw) });
       } catch (err) {
         respond(id, { ok: false, error: err instanceof Error ? err.message : String(err) });
       }
@@ -576,19 +589,46 @@ wss.on("connection", (socket) => {
         });
         return;
       }
+      const baseRevision = args.length > 1 ? (args[1] as string | null) : undefined;
       try {
         const file = join(cwd, DASHBOARD_FILENAME);
         // A layout save is automatic and unprompted, so it must not be able to
         // follow a symlink the agent planted at this name.
-        if (existsSync(file) && lstatSync(file).isSymbolicLink()) {
+        const present = existsSync(file);
+        if (present && lstatSync(file).isSymbolicLink()) {
           respond(id, {
             ok: false,
             error: `${DASHBOARD_FILENAME} is a symlink; refusing to write through it`,
           });
           return;
         }
-        writeFileSync(file, raw);
-        respond(id, { ok: true });
+
+        // Compare-and-swap: the editor, a widget's config change and the brain
+        // all write this file, so a save that was based on a version somebody
+        // else has replaced is refused rather than applied over the top.
+        const currentRaw = present ? readFileSync(file, "utf-8") : null;
+        const currentRevision = dashboardRevision(currentRaw);
+        if (baseRevision !== undefined && baseRevision !== currentRevision) {
+          respond(id, {
+            ok: false,
+            conflict: true,
+            error: "the dashboard changed on disk since it was loaded",
+            raw: currentRaw,
+            revision: currentRevision,
+          });
+          return;
+        }
+
+        // Temp file plus rename, so a reader never sees a half-written document.
+        const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+        writeFileSync(tmp, raw);
+        try {
+          renameSync(tmp, file);
+        } catch (err) {
+          rmSync(tmp, { force: true });
+          throw err;
+        }
+        respond(id, { ok: true, revision: dashboardRevision(raw) });
       } catch (err) {
         respond(id, { ok: false, error: err instanceof Error ? err.message : String(err) });
       }

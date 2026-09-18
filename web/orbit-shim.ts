@@ -232,7 +232,8 @@ async function fetchMode(): Promise<"remote" | "desktop"> {
   // and the dashboard layout that sits beside it.
   loadNotebook: () => invoke("notebook:load"),
   loadDashboard: () => invoke("dashboard:load"),
-  saveDashboard: (raw: string) => invoke("dashboard:save", raw),
+  saveDashboard: (raw: string, baseRevision?: string | null) =>
+    invoke("dashboard:save", raw, baseRevision),
   checkVersion: () => Promise.resolve(null),
   openReleasePage: () => Promise.resolve({ opened: false }),
   restartToUpdate: () => Promise.resolve({ restarting: false }),
