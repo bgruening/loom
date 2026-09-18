@@ -625,7 +625,10 @@ const STYLE = `
   display: inline-block; margin-top: 4px; font-size: 11px;
   color: var(--jobs-running); text-decoration: none;
 }
-.dash-jobs-link:hover { text-decoration: underline; }
+/* The product's global a:hover swaps in --accent-hover, which over the
+   tinted failure row in dark is 3.9:1. Keep our own colour and add the
+   underline, which is the affordance the hover was for. */
+.dash-jobs-link:hover { color: var(--jobs-running); text-decoration: underline; }
 .dash-jobs-raw { margin-top: 5px; font-size: 11px; }
 .dash-jobs-raw > summary { cursor: pointer; color: var(--dash-text-meta); }
 .dash-jobs-raw dl {
