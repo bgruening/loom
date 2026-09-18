@@ -1,6 +1,11 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { currentPlan, planWidget } from "../app/src/renderer/dashboard/widgets/plan.js";
+import {
+  currentPlan,
+  OPEN_KEYS_MAX,
+  PANEL_MEMORY_MAX,
+  planWidget,
+} from "../app/src/renderer/dashboard/widgets/plan.js";
 import { DashboardSources, parsePlanSections } from "../app/src/renderer/dashboard/data-sources.js";
 import type { DataSource, WidgetContext } from "../app/src/renderer/dashboard/widget-api.js";
 
@@ -720,6 +725,49 @@ describe("plan widget -- lifecycle", () => {
     second.notebook(TWO_PLANS);
     expect(second.el.querySelector(".dash-plan-older-row")?.getAttribute("aria-expanded")).toBe(
       "true",
+    );
+  });
+
+  it("forgets a row the notebook no longer offers", () => {
+    const three = `${TWO_PLANS}\n## Plan C: Extra [local]\n\n- [ ] 1. **Gamma**\n`;
+    const h = harness({ plan: "all" }, "p-prune");
+    planWidget.mount(h.el, h.ctx);
+    h.notebook(three);
+    const opened = h.el.querySelector(".dash-plan-older-row") as HTMLButtonElement;
+    opened.click();
+    expect(opened.getAttribute("aria-expanded")).toBe("true");
+
+    // The plan leaves the notebook, so its entry has nothing to belong to...
+    h.notebook(ONE_PLAN);
+    // ...and a plan arriving back in the same slot inherits nothing from it.
+    h.notebook(three);
+    expect(h.el.querySelector(".dash-plan-older-row")?.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("bounds what it remembers, per panel and per panel id", () => {
+    // Both caps are load-bearing: the map outlives every mount, so without
+    // them a long session accumulates a set for every panel id it has ever
+    // seen and a key for every plan that was ever expanded.
+    expect(PANEL_MEMORY_MAX).toBe(40);
+    expect(OPEN_KEYS_MAX).toBe(200);
+
+    const first = harness({ plan: "all" }, "p-evicted");
+    const dispose = planWidget.mount(first.el, first.ctx);
+    first.notebook(TWO_PLANS);
+    (first.el.querySelector(".dash-plan-older-row") as HTMLButtonElement).click();
+    dispose?.();
+
+    // Enough other panels to push it out of the map.
+    for (let i = 0; i <= PANEL_MEMORY_MAX; i++) {
+      const other = harness({ plan: "all" }, `p-filler-${i}`);
+      planWidget.mount(other.el, other.ctx)?.();
+    }
+
+    const again = harness({ plan: "all" }, "p-evicted");
+    planWidget.mount(again.el, again.ctx);
+    again.notebook(TWO_PLANS);
+    expect(again.el.querySelector(".dash-plan-older-row")?.getAttribute("aria-expanded")).toBe(
+      "false",
     );
   });
 

@@ -31,17 +31,76 @@ const EMPTY = "No plan yet -- ask Loom to draft one.";
  * Not in the config, because idly opening an old plan should not write to
  * disk, and not in the closure, because `setConfig` re-mounts the widget: both
  * header buttons would otherwise silently collapse everything the reader had
- * opened. Bounded by the 40 panels a document may hold.
+ * opened.
+ *
+ * Two caveats, both of which cost this map a bound it did not have.
+ *
+ * A panel id is unique within a dashboard and deliberately reused across them
+ * -- `host.ts` says so, and both shipped presets name their plan panel
+ * `p-plan` -- so two plan panels on two dashboards share one entry here. They
+ * read the same notebook, so a shared key still means the same plan and the
+ * only symptom is that opening a row on one dashboard opens it on the other.
+ * Keying on the dashboard as well needs the host to put its id on the widget
+ * context; until it does, this is the honest description of what the map is.
+ *
+ * And nothing used to be removed from it, so "bounded by the 40 panels a
+ * document may hold" was true of neither dimension: a session that opens
+ * several analyses accumulates a set per panel id it has ever seen, and each
+ * set accumulates a key per plan that has ever been expanded. Both are bounded
+ * below.
  */
+export const PANEL_MEMORY_MAX = 40;
+export const OPEN_KEYS_MAX = 200;
+
 const openedByPanel = new Map<string, Set<string>>();
 
 function openedFor(panelId: string): Set<string> {
-  let set = openedByPanel.get(panelId);
-  if (!set) {
-    set = new Set<string>();
-    openedByPanel.set(panelId, set);
+  const existing = openedByPanel.get(panelId);
+  if (existing) {
+    // Re-insert so the eviction below drops the panel nobody has mounted for
+    // longest rather than the one that happens to have been created first.
+    openedByPanel.delete(panelId);
+    openedByPanel.set(panelId, existing);
+    return existing;
+  }
+  const set = new Set<string>();
+  openedByPanel.set(panelId, set);
+  while (openedByPanel.size > PANEL_MEMORY_MAX) {
+    const oldest = openedByPanel.keys().next();
+    if (oldest.done) break;
+    openedByPanel.delete(oldest.value);
   }
   return set;
+}
+
+/**
+ * The open/closed key for one "other plan" row. Plan ids are slugged from the
+ * heading and two plans can slug alike, so the key carries the plan's position
+ * in the notebook as well -- the position it has in the notebook, not in the
+ * filtered list, because which plan is current changes as steps get ticked and
+ * a key numbered within the list would shift under the reader.
+ */
+function openKey(index: number, plan: PlanSection): string {
+  return `${index}:${plan.title}`;
+}
+
+/**
+ * Forget the rows that are no longer on offer. The keys carry a plan's position
+ * in the notebook, so editing the notebook retires old ones for good; without
+ * this the set only ever grows, and a stale key can hand its open state to a
+ * different plan that later lands in the same position.
+ */
+function pruneOpened(opened: Set<string>, live: ReadonlySet<string>): void {
+  for (const key of opened) {
+    if (!live.has(key)) opened.delete(key);
+  }
+  // A notebook with more expandable plans than this is not a reading surface,
+  // and the set must not be allowed to grow without one.
+  while (opened.size > OPEN_KEYS_MAX) {
+    const oldest = opened.values().next();
+    if (oldest.done) break;
+    opened.delete(oldest.value);
+  }
 }
 
 /**
@@ -407,6 +466,11 @@ export const planWidget: WidgetDefinition<PlanConfig> = {
         return;
       }
 
+      // Against every plan the notebook still has, not just the ones on offer
+      // as "other": which plan is current changes as steps get ticked, and a
+      // row the reader opened should survive its plan taking a turn at the top.
+      pruneOpened(opened, new Set(plans.map((plan, index) => openKey(index, plan))));
+
       const current = currentPlan(plans);
       if (!current) return;
       const counts = countSteps(current.steps);
@@ -458,10 +522,7 @@ function olderPlans(
 ): HTMLElement {
   const wrap = el("div", "dash-plan-older");
   // Each entry keeps the position it has in the notebook, not its position in
-  // this filtered list. The open/closed key is built from it, and which plan is
-  // current can change as steps get ticked -- a key numbered within this list
-  // would then shift under the reader, collapsing the row they had open or,
-  // where two plans are titled alike, transferring it to the wrong one.
+  // this filtered list -- see `openKey`.
   const others = plans
     .map((plan, index) => ({ plan, index }))
     .filter((entry) => entry.plan !== current);
@@ -475,9 +536,7 @@ function olderPlans(
 
   for (let i = others.length - 1; i >= 0; i--) {
     const { plan, index } = others[i];
-    // Plan ids are slugged from the heading and two plans can slug alike, so
-    // the open/closed key carries the notebook position as well.
-    const key = `${index}:${plan.title}`;
+    const key = openKey(index, plan);
     const counts = countSteps(plan.steps);
     // The same verdict the current plan gets, so the two never disagree about
     // what "finished" or "stopped" means.
