@@ -88,6 +88,11 @@ export function setPollTickHook(hook: PollTickHook | null): void {
   tickHook = hook;
 }
 
+/** For tests: whether anything is registered, and what. */
+export function getPollTickHook(): PollTickHook | null {
+  return tickHook;
+}
+
 /**
  * Hand a finished run back to the agent as a queued follow-up, so it verifies
  * outputs itself instead of the toast asking the user to relay. Null when

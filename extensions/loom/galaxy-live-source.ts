@@ -503,7 +503,10 @@ export class GalaxyLiveTicker {
 
   private emit(payload: GalaxyLivePayload, now: number): void {
     const fingerprint = payloadFingerprint(payload);
-    const stale = now - this.lastPushAt >= STALE_REFRESH_MS;
+    // Only a payload the panel draws a "checked N ago" line under is worth
+    // re-sending unchanged. An `unavailable` sentence has no clock on it, so
+    // re-pushing it every minute would be a wire message that changes nothing.
+    const stale = Boolean(payload.history) && now - this.lastPushAt >= STALE_REFRESH_MS;
     if (fingerprint === this.lastFingerprint && !stale) return;
     this.lastFingerprint = fingerprint;
     this.lastPayload = payload;
