@@ -226,6 +226,51 @@ describe("plan steps that are not steps", () => {
     expect(parsePlanSections(unclosed)[0].steps.map((s) => s.title)).toEqual(["Real"]);
   });
 
+  it("does not let the other marker close a fence it did not open", () => {
+    // The toggle flipped on either marker without remembering which opened the
+    // block, so a `~~~` line INSIDE a ```markdown example closed it, the ```
+    // that really ended it opened a new one, and every checkbox in between came
+    // back as a real step -- the exact phantom the fence tracking exists to
+    // stop, reintroduced by the tracking.
+    const md = [
+      "## Plan A: Real work [local]",
+      "",
+      "- [ ] 1. **Align reads**",
+      "- [ ] 2. **Call variants**",
+      "",
+      "Write steps like this:",
+      "",
+      "```markdown",
+      "- [ ] 1. **Example step**",
+      "~~~",
+      "- [ ] 3. **PHANTOM from inside a fence**",
+      "```",
+      "",
+    ].join("\n");
+    const [plan] = parsePlanSections(md);
+    expect(plan.steps.map((s) => s.title)).toEqual(["Align reads", "Call variants"]);
+  });
+
+  it("closes a fence only on a marker at least as long as its opener", () => {
+    // CommonMark: a longer opener is closed by a run at least that long, and a
+    // shorter run inside it is content. Without the length check a ``` line in
+    // a ````-fenced example ends the block early.
+    const md = [
+      "## Plan A: Real work [local]",
+      "",
+      "- [ ] 1. **Align reads**",
+      "",
+      "````markdown",
+      "```",
+      "- [ ] 2. **PHANTOM inside the inner block**",
+      "```",
+      "````",
+      "",
+    ].join("\n");
+    const [plan] = parsePlanSections(md);
+    expect(plan.steps.map((s) => s.title)).toEqual(["Align reads"]);
+  });
+
   it("parses a step whose detail holds a long run of spaces, quickly", () => {
     // The old separator pattern backtracked: `split` tried every position and
     // the leading \s+ re-consumed the run each time, so this took 3.2 s at
