@@ -150,7 +150,7 @@ export function parsePlanSections(markdown: string): PlanSection[] {
   const plans: PlanSection[] = [];
   let current: PlanSection | null = null;
 
-  for (const line of markdown.split("\n")) {
+  for (const line of markdown.split(/\r?\n/)) {
     const heading = line.match(PLAN_HEADING);
     if (heading) {
       let title = heading[1].trim();
@@ -222,7 +222,7 @@ function unquote(value: string): string {
  */
 export function parseJobBlocks(content: string): DashboardJob[] {
   const out: DashboardJob[] = [];
-  const lines = content.split("\n");
+  const lines = content.split(/\r?\n/);
   let i = 0;
   while (i < lines.length) {
     if (lines[i].trim() !== JOB_FENCE_OPEN) {

@@ -3,15 +3,13 @@
  *
  * Reads `ctx.sources.plan`, which the host derives from the notebook markdown
  * per `docs/agent/notebook-schema.md`, so the desktop and the web shell show
- * the same thing without either of them reading a file. The one exception is a
- * notebook with Windows line endings; see `plansFor`.
+ * the same thing without either of them reading a file.
  *
  * The target reader cannot read a terminal, so nothing here shows a machine
  * word: `[hybrid]` becomes a sentence, `- [!]` becomes "Failed", and a step
  * carries a glyph and a word before it carries a colour.
  */
 
-import { parsePlanSections } from "../data-sources.js";
 import type {
   PlanSection,
   PlanSnapshot,
@@ -172,27 +170,6 @@ function summarize(counts: PlanCounts): { text: string; state: string; glyph: st
     state: "state-running",
     glyph: "●",
   };
-}
-
-/**
- * The host's plan source, except on a notebook with Windows line endings.
- *
- * `parsePlanSections` anchors its patterns with `$` and splits on `\n`, and a
- * JS `.` does not match a carriage return, so every line of a CRLF notebook
- * keeps a trailing `\r` that no pattern can reach: the source comes back with
- * no plans at all. Rather than keep a second parser in step with the host's,
- * re-run the host's own on normalised text. Delete this once `data-sources.ts`
- * splits on `/\r?\n/` -- the source will then be right and the branch is dead.
- *
- * Only CRLF pairs are touched. A lone carriage return inside a line -- pasted
- * terminal output in a step detail, say -- is left exactly where it is, so
- * this produces the same sections the fixed parser would and the panel can
- * never disagree with the notebook beside it about what a step says.
- */
-function plansFor(snapshot: PlanSnapshot, ctx: WidgetContext<PlanConfig>): PlanSection[] {
-  const markdown = ctx.sources.notebook.get().markdown;
-  if (!markdown.includes("\r\n")) return snapshot.plans;
-  return parsePlanSections(markdown.replace(/\r\n/g, "\n"));
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -371,7 +348,7 @@ export const planWidget: WidgetDefinition<PlanConfig> = {
 
     const draw = (snapshot: PlanSnapshot): void => {
       body.textContent = "";
-      const plans = plansFor(snapshot, ctx);
+      const plans = snapshot.plans;
       // Hidden with one plan, because "all" and "latest" then draw the same
       // thing -- but never hidden while the config says "all", or a layout
       // written when there were two plans could not be turned back.

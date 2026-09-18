@@ -145,9 +145,8 @@ describe("plan widget -- empty and odd notebooks", () => {
     expect(has(h, "with a detail")).toBe(true);
   });
 
-  // The host's own parser reads nothing out of a CRLF notebook today, so this
-  // is really a test of the widget's normalisation. It keeps passing, for the
-  // right reason, once the parser is fixed.
+  // Now a test of the host's parser rather than of a normalisation step in the
+  // widget: the widget reads `ctx.sources.plan` straight through.
   it("reads a CRLF notebook the same as an LF one", () => {
     const lf = harness();
     planWidget.mount(lf.el, lf.ctx);

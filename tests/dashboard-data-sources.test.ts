@@ -6,6 +6,7 @@ import {
   parseJobBlocks,
   parsePlanSections,
 } from "../app/src/renderer/dashboard/data-sources.js";
+import { parseInvocationBlocks } from "../app/src/renderer/galaxy-invocations.js";
 
 const NOTEBOOK = `# Analysis
 
@@ -192,6 +193,41 @@ describe("parseJobBlocks", () => {
 
   it("returns nothing for a notebook with no job blocks", () => {
     expect(parseJobBlocks("# nothing here")).toEqual([]);
+  });
+});
+
+describe("Windows line endings", () => {
+  // A notebook written on Windows, or round-tripped through a tool that
+  // rewrites newlines, reaches these parsers with a trailing CR on every line.
+  // A JS `.` does not match a carriage return and `$` will not step over one,
+  // so before the split was made CRLF-tolerant every field regex here missed
+  // and the panels drew an empty analysis against a full notebook.
+  const CRLF = NOTEBOOK.replace(/\n/g, "\r\n");
+
+  it("reads the same plan sections out of a CRLF notebook", () => {
+    expect(parsePlanSections(CRLF)).toEqual(parsePlanSections(NOTEBOOK));
+  });
+
+  it("reads the same job blocks out of a CRLF notebook", () => {
+    expect(parseJobBlocks(CRLF)).toEqual(parseJobBlocks(NOTEBOOK));
+    expect(parseJobBlocks(CRLF)).toHaveLength(1);
+  });
+
+  it("reads the same invocation blocks out of a CRLF notebook", () => {
+    expect(parseInvocationBlocks(CRLF)).toEqual(parseInvocationBlocks(NOTEBOOK));
+    expect(parseInvocationBlocks(CRLF)).toHaveLength(1);
+  });
+
+  it("does not treat a bare carriage return as a line break", () => {
+    // The split is CRLF-only on purpose. A bare CR turns up in pasted terminal
+    // output (a progress line rewriting itself), and treating it as a newline
+    // would invent step boundaries that are not in the notebook. The cost is
+    // that a step line containing one is not parsed at all, because the step
+    // pattern ends in `$` and a JS `.` will not step over a CR. That is
+    // unchanged from before the CRLF fix and is pinned here so that nobody
+    // "completes" the fix by splitting on /\r/ as well.
+    const twoOnALine = "## Plan A: X\n\n- [ ] **A** -- one\r- [ ] **B** -- two\n";
+    expect(parsePlanSections(twoOnALine)[0].steps).toEqual([]);
   });
 });
 
