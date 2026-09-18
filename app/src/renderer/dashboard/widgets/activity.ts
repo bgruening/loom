@@ -505,12 +505,21 @@ export function isAtBottom(m: ScrollMetrics, threshold = STICK_THRESHOLD_PX): bo
  */
 const STYLE_ID = "dash-activity-styles";
 const STYLE_TEXT = `
-.dash-activity { padding: 0; overflow: hidden; position: relative; }
-.dash-activity-scroll { height: 100%; overflow-y: auto; padding: 8px 10px; }
+.dash-activity {
+  padding: 0; overflow: hidden; position: relative;
+  display: flex; flex-direction: column;
+}
+.dash-activity-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 10px; }
 .dash-activity-scroll::-webkit-scrollbar { width: 6px; }
 .dash-activity-scroll::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
 .dash-activity-note { margin: 0; color: var(--dash-text-meta); line-height: 1.5; }
-.dash-activity-trim { margin: 0 0 6px; font-size: 11px; color: var(--dash-text-meta); }
+/* Outside the scroller: with the newest entry at the bottom, a line at the top
+   of the list is the first thing to scroll out of sight. */
+.dash-activity-trim {
+  flex: 0 0 auto; margin: 0; padding: 4px 10px; font-size: 11px;
+  color: var(--dash-text-meta); border-bottom: 1px solid var(--border);
+}
+.dash-activity-trim[hidden] { display: none; }
 .dash-activity-day {
   margin: 8px 0 4px; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;
   text-transform: uppercase; color: var(--dash-text-meta);
@@ -530,7 +539,11 @@ const STYLE_TEXT = `
   display: inline-block; min-width: 52px; font-family: var(--font); font-size: 10.5px;
   color: var(--dash-text-meta); font-variant-numeric: tabular-nums;
 }
-.dash-activity-glyph { display: inline-block; width: 13px; text-align: center; font-size: 11px; }
+/* min-width, not width: the blocked glyph is wider than the box and would sit
+   on top of the first word of its own sentence. */
+.dash-activity-glyph {
+  display: inline-block; min-width: 13px; margin-right: 4px; text-align: center; font-size: 11px;
+}
 .dash-activity-text { overflow-wrap: anywhere; color: var(--text); }
 .dash-activity-tone-ok .dash-activity-glyph { color: var(--success); }
 .dash-activity-tone-failed .dash-activity-glyph { color: var(--error); }
@@ -587,6 +600,10 @@ export const activityWidget: WidgetDefinition<ActivityConfig> = {
     ensureStyles();
     el.classList.add("dash-activity");
 
+    const trim = document.createElement("p");
+    trim.className = "dash-activity-trim";
+    trim.hidden = true;
+
     const scroller = document.createElement("div");
     scroller.className = "dash-activity-scroll";
     const list = document.createElement("div");
@@ -600,7 +617,7 @@ export const activityWidget: WidgetDefinition<ActivityConfig> = {
     jump.className = "dash-panel-btn dash-activity-jump";
     jump.textContent = "Jump to latest";
     jump.hidden = true;
-    el.append(scroller, jump);
+    el.append(trim, scroller, jump);
 
     // Deliberately not in the panel config: a config write re-renders the whole
     // dashboard, so persisting this would remount the widget on every keystroke.
@@ -676,30 +693,45 @@ export const activityWidget: WidgetDefinition<ActivityConfig> = {
       return details;
     };
 
+    const setTrim = (text: string): void => {
+      trim.textContent = text;
+      trim.hidden = text === "";
+    };
+
     const draw = (): void => {
+      // Emptying the list collapses the scroll height, and the browser clamps
+      // scrollTop to 0 for us. Put the reader back where they were, or this
+      // rebuilds them to the bottom every time the log grows.
+      const wasAt = scroller.scrollTop;
       list.textContent = "";
-      if (!latestAvailable) {
-        list.append(note(UNAVAILABLE_TEXT));
+      const finish = (): void => {
+        if (following) scrollToLatest();
+        else scroller.scrollTop = wasAt;
         paintJump();
+      };
+
+      if (!latestAvailable) {
+        setTrim("");
+        list.append(note(UNAVAILABLE_TEXT));
+        finish();
         return;
       }
       if (latest.length === 0) {
+        setTrim("");
         list.append(note(EMPTY_TEXT));
-        paintJump();
+        finish();
         return;
       }
       const rows = buildRows(latest, ctx.config, filterText);
       if (rows.length === 0) {
+        setTrim("");
         list.append(note(NO_MATCH_TEXT));
-        paintJump();
+        finish();
         return;
       }
-      if (rows.length < latest.length) {
-        const trim = document.createElement("p");
-        trim.className = "dash-activity-trim";
-        trim.textContent = `Showing ${rows.length} of ${latest.length} entries.`;
-        list.append(trim);
-      }
+      setTrim(
+        rows.length < latest.length ? `Showing ${rows.length} of ${latest.length} entries.` : "",
+      );
       for (const row of rows) {
         if (row.day) {
           const day = document.createElement("div");
@@ -709,8 +741,7 @@ export const activityWidget: WidgetDefinition<ActivityConfig> = {
         }
         list.append(rowNode(row));
       }
-      if (following) scrollToLatest();
-      paintJump();
+      finish();
     };
 
     filter.addEventListener("input", () => {

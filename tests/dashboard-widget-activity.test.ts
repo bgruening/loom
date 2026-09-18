@@ -706,4 +706,38 @@ describe("mounted activity widget", () => {
     expect(h.rows()).toHaveLength(2);
     expect(textOf(h)).toContain("--:--:--");
   });
+
+  it("puts the reader back where they were when the log grows under them", () => {
+    const h = harness();
+    activityWidget.mount(h.el, h.ctx);
+    h.emit([event("tool.end", { toolName: "a" })]);
+    const scroller = h.scroller();
+    Object.defineProperty(scroller, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(scroller, "clientHeight", { value: 100, configurable: true });
+    scroller.scrollTop = 250;
+    scroller.dispatchEvent(new Event("scroll"));
+
+    h.emit([event("tool.end", { toolName: "a" }), event("tool.end", { toolName: "b" })]);
+    expect(scroller.scrollTop).toBe(250);
+  });
+
+  it("keeps the count of what it is hiding out of the scrolling list", () => {
+    const h = harness({ maxEntries: 2 });
+    activityWidget.mount(h.el, h.ctx);
+    h.emit(Array.from({ length: 6 }, (_, i) => event("tool.end", { toolName: `t${i}` })));
+    const trim = h.el.querySelector(".dash-activity-trim") as HTMLElement;
+    expect(trim.hidden).toBe(false);
+    expect(trim.textContent).toBe("Showing 2 of 6 entries.");
+    expect(h.el.querySelector(".dash-activity-scroll")?.contains(trim)).toBe(false);
+  });
+
+  it("does not also count what it is hiding when nothing matches at all", () => {
+    const h = harness();
+    activityWidget.mount(h.el, h.ctx);
+    h.emit([event("tool.end", { toolName: "bash" })]);
+    const filter = h.header.querySelector("input") as HTMLInputElement;
+    filter.value = "zzzz";
+    filter.dispatchEvent(new Event("input"));
+    expect((h.el.querySelector(".dash-activity-trim") as HTMLElement).hidden).toBe(true);
+  });
 });
