@@ -668,18 +668,20 @@ export const activityWidget: WidgetDefinition<ActivityConfig> = {
     filter.placeholder = "filter";
     filter.setAttribute("aria-label", "Filter the analysis log");
 
+    // Through the same coercion the rows use, or a document saying
+    // `"showDetail": "false"` gets a button that reads "on" over rows that are
+    // off, and one click that appears to do nothing.
+    const showingDetail = normalizeBool(ctx.config.showDetail, true);
     const detailBtn = document.createElement("button");
     detailBtn.type = "button";
     detailBtn.className = "dash-panel-btn";
     detailBtn.textContent = "detail";
-    detailBtn.classList.toggle("active", ctx.config.showDetail);
-    detailBtn.title = ctx.config.showDetail
+    detailBtn.classList.toggle("active", showingDetail);
+    detailBtn.title = showingDetail
       ? "Hide the raw record under each entry"
       : "Show the raw record under each entry";
-    detailBtn.setAttribute("aria-pressed", ctx.config.showDetail ? "true" : "false");
-    detailBtn.addEventListener("click", () =>
-      ctx.setConfig({ showDetail: !ctx.config.showDetail }),
-    );
+    detailBtn.setAttribute("aria-pressed", showingDetail ? "true" : "false");
+    detailBtn.addEventListener("click", () => ctx.setConfig({ showDetail: !showingDetail }));
     ctx.header.append(filter, detailBtn);
 
     const scrollToLatest = (): void => {

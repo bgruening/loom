@@ -668,6 +668,19 @@ describe("mounted activity widget", () => {
     expect(h.setConfig).toHaveBeenCalledWith({ showDetail: false });
   });
 
+  it("reads a boolean a document wrote as a string the same way the rows do", () => {
+    const h = harness({ showDetail: "false" as unknown as boolean });
+    activityWidget.mount(h.el, h.ctx);
+    h.emit([event("tool.end", { toolName: "bash" })]);
+    const detail = [...h.header.querySelectorAll("button")].find(
+      (b) => b.textContent === "detail",
+    ) as HTMLButtonElement;
+    expect(h.el.querySelector("details")).toBeNull();
+    expect(detail.getAttribute("aria-pressed")).toBe("false");
+    detail.click();
+    expect(h.setConfig).toHaveBeenCalledWith({ showDetail: true });
+  });
+
   it("draws plain rows with no disclosure when detail is off", () => {
     const h = harness({ showDetail: false });
     activityWidget.mount(h.el, h.ctx);
