@@ -400,6 +400,16 @@ describe("plan widget -- more than one plan", () => {
     expect(h.text()).not.toContain("Reference index");
   });
 
+  it("puts the state word for an earlier plan in the button's name, not only in a glyph", () => {
+    const h = harness({ plan: "all" });
+    planWidget.mount(h.el, h.ctx);
+    h.notebook(TWO_PLANS);
+    const row = h.el.querySelector(".dash-plan-older-row") as HTMLButtonElement;
+    expect(row.getAttribute("aria-label")).toBe(
+      "Plan A: chrM Variant Calling -- In progress -- 2 of 4 steps done",
+    );
+  });
+
   it("expands an earlier plan in place and collapses it again", () => {
     const h = harness({ plan: "all" });
     planWidget.mount(h.el, h.ctx);

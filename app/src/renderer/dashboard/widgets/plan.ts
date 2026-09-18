@@ -376,18 +376,16 @@ function olderPlans(
     // the open/closed key carries the position as well.
     const key = `${i}:${plan.title}`;
     const counts = countSteps(plan.steps);
-    const look =
-      counts.failed > 0
-        ? STEP_LOOK.failed
-        : counts.done >= counts.total && counts.total > 0
-          ? STEP_LOOK.done
-          : STEP_LOOK.pending;
+    // The same verdict the current plan gets, so the two never disagree about
+    // what "finished" or "stopped" means.
+    const verdict = summarize(counts);
 
+    const title = plan.title || "Untitled plan";
     const row = el("button", "dash-plan-older-row");
     row.type = "button";
-    row.append(stateChip(look));
-    const label = el("span", "dash-row-title", plan.title || "Untitled plan");
-    label.title = plan.title;
+    row.append(stateChip({ glyph: verdict.glyph, word: verdict.text, state: verdict.state }));
+    const label = el("span", "dash-row-title", title);
+    label.title = title;
     row.append(label);
     row.append(
       el(
@@ -396,6 +394,10 @@ function olderPlans(
         counts.total > 0 ? `${counts.done}/${counts.total}` : "--",
       ),
     );
+    // The row is too narrow for the state word beside the title, and the glyph
+    // is aria-hidden decoration, so the word reaches a screen reader through
+    // the button's name instead.
+    row.setAttribute("aria-label", `${title} -- ${verdict.text}`);
 
     const detail = el("div", "dash-plan-older-detail");
     const paint = (): void => {
@@ -447,6 +449,10 @@ const PLAN_STYLES = `
   --plan-done: var(--success);
   --plan-running: var(--accent);
   --plan-failed: #fca5a5;
+  /* Inherited by everything below. A step detail is usually a file path, and
+     one unbroken 180-character path will otherwise scroll the whole panel
+     sideways in a pane that is 360px wide. */
+  overflow-wrap: anywhere;
 }
 :root[data-theme="light"] .dash-plan {
   --plan-running: var(--accent-hover);
