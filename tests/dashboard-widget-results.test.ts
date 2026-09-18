@@ -442,14 +442,47 @@ describe("readHead", () => {
     ).toBeNull();
   });
 
-  it("falls back to text() for a response with no body", async () => {
+  it("falls back to text() for a small response with no body", async () => {
     (globalThis as unknown as { fetch: unknown }).fetch = async () => ({
       ok: true,
       body: null,
+      headers: { get: () => "8" },
       text: async () => "a\tb\n1\t2\n",
     });
     const head = await readHead("orbit-artifact://cwd/x.tsv", 4096, new AbortController().signal);
     expect(head).toEqual({ text: "a\tb\n1\t2\n", truncated: false });
+  });
+
+  it("will not materialise a huge body to slice a head out of it", async () => {
+    // The whole promise of this function is that it does not read more than it
+    // shows. The fallback cannot stream, so against a 200 MB table the only
+    // options are the whole file or nothing -- and the caller draws a plain row
+    // on nothing, which costs a preview rather than the main thread.
+    const text = vi.fn(async () => "x".repeat(200_000_000));
+    (globalThis as unknown as { fetch: unknown }).fetch = async () => ({
+      ok: true,
+      body: null,
+      headers: { get: () => String(200_000_000) },
+      text,
+    });
+    expect(
+      await readHead("orbit-artifact://cwd/big.tsv", 4096, new AbortController().signal),
+    ).toBeNull();
+    expect(text).not.toHaveBeenCalled();
+  });
+
+  it("will not read a body-less response that declares no length at all", async () => {
+    const text = vi.fn(async () => "a\tb\n");
+    (globalThis as unknown as { fetch: unknown }).fetch = async () => ({
+      ok: true,
+      body: null,
+      headers: { get: () => null },
+      text,
+    });
+    expect(
+      await readHead("orbit-artifact://cwd/x.tsv", 4096, new AbortController().signal),
+    ).toBeNull();
+    expect(text).not.toHaveBeenCalled();
   });
 
   it("does not call a whole body truncated because it exactly fills the budget", async () => {

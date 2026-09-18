@@ -400,9 +400,19 @@ export function artifactUrl(relPath: string, cacheKey?: number | null): string {
 // ── Reading a head over the artifact scheme ──────────────────────────────────
 
 /**
+ * How far past the budget a body-less response may declare itself and still be
+ * worth reading whole. Generous, because a text file is not compressible into
+ * exactly its head and a few multiples of 32 KB is nothing; bounded, because
+ * the alternative on that path is the whole file.
+ */
+const NO_BODY_BUDGET_MULTIPLE = 8;
+
+/**
  * Pull at most `budget` bytes and stop. The stream is cancelled rather than
- * drained, so a 2 GB counts table costs the same as a 2 KB one. Exported so
- * that "does not read more than it shows" is a test rather than a claim.
+ * drained, so a 2 GB counts table costs the same as a 2 KB one, and the
+ * fallback for a response with no body at all refuses to read one it cannot
+ * prove is small. Exported so that "does not read more than it shows" is a
+ * test rather than a claim.
  */
 export async function readHead(
   url: string,
@@ -414,9 +424,17 @@ export async function readHead(
     const res = await fetch(url, { signal });
     if (!res.ok) return null;
     if (!res.body) {
-      // A Response with no body cannot be read incrementally, so there is no
-      // read to save here and the budget is applied in characters rather than
-      // bytes. Electron's net.fetch always gives a body; this is the fallback.
+      // A Response with no body cannot be read incrementally, so the only way
+      // to slice a head out of it is to materialise the whole thing -- which is
+      // the one thing this function promises not to do, and against a 200 MB
+      // counts table it is 200 MB on the main thread. So this path reads only
+      // what the response has proved is small: no declared length, or a length
+      // well past the budget, and the caller gets nothing and draws a plain row
+      // instead. Electron's net.fetch always gives a body, so this is a
+      // fallback for shells that do not.
+      const declared = res.headers?.get?.("content-length");
+      const bytes = declared === null || declared === undefined ? NaN : Number(declared);
+      if (!Number.isFinite(bytes) || bytes > budget * NO_BODY_BUDGET_MULTIPLE) return null;
       const all = await res.text();
       return { text: all.slice(0, budget), truncated: all.length > budget };
     }
