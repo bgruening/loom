@@ -682,7 +682,7 @@ export function metaLine(row: RunRow, now: number): string {
   // nobody has asked. A job is only stamped when something changed, so the same
   // gap means the opposite -- we have been asking and the answer is the same.
   else if (row.live) bits.push(row.kind === "job" ? "no change yet" : "not checked yet");
-  if (row.serverHost) bits.push(row.serverHost);
+  if (row.serverHost) bits.push(safeName(row.serverHost));
   if (row.unconfirmed) bits.push("unconfirmed by Galaxy");
   return bits.join(" · ");
 }
@@ -693,8 +693,10 @@ function detailRows(row: RunRow, now: number): Array<[string, string]> {
   else if (row.anchor) out.push(["Notebook anchor", safeName(row.anchor)]);
   if (row.toolId) out.push(["Tool", safeName(row.toolId)]);
   out.push([row.kind === "invocation" ? "Invocation" : "Job", safeName(row.id)]);
-  if (row.serverHost) out.push(["Galaxy", row.serverHost]);
-  if (row.galaxyState) out.push(["Galaxy state", row.galaxyState]);
+  // hostOf falls back to the raw notebook string when the URL will not parse,
+  // and the Galaxy state is a notebook field like any other.
+  if (row.serverHost) out.push(["Galaxy", safeName(row.serverHost)]);
+  if (row.galaxyState) out.push(["Galaxy state", safeName(row.galaxyState)]);
   if (row.jobs.total > 1) {
     const left = Math.max(0, row.jobs.total - row.jobs.done - row.jobs.failed);
     out.push([
