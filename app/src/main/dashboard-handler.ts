@@ -9,27 +9,18 @@
  * Text in, text out. Validation is the renderer's job through
  * shared/dashboard-contract, so there is exactly one implementation of it.
  *
- * Both handlers lstat first. The agent can write inside the analysis directory,
- * so it can put a symlink at this filename; `resolveWithin` is string math and
- * `writeFile` follows symlinks, which would turn an automatic background layout
- * save into an unconsented overwrite of whatever the link points at.
- *
- * Three things will write this file -- the pane's editor, a widget's own config
- * change, and the brain -- so a save carries the revision it was based on and is
- * refused if the file moved underneath it, and the write itself is a temp file
- * plus a rename so a reader never sees half a document.
+ * The reading and writing itself lives in `shared/dashboard-layout-store.ts`,
+ * shared with the web server and the brain, because three hand-mirrored copies
+ * of "lstat, read, check the revision, stage, rename" had already drifted apart
+ * and none of them was actually a compare-and-swap. This file is now just the
+ * cwd clamp plus the IPC shape.
  */
 
 import { ipcMain } from "electron";
-import { randomBytes } from "node:crypto";
-import * as fsp from "node:fs/promises";
 import { createIdempotentIpc } from "./ipc-registry.js";
 import { resolveWithin } from "./files-handler.js";
-import {
-  DASHBOARD_FILENAME,
-  DASHBOARD_MAX_BYTES,
-  dashboardRevision,
-} from "../../../shared/dashboard-contract.js";
+import { DASHBOARD_FILENAME, DASHBOARD_MAX_BYTES } from "../../../shared/dashboard-contract.js";
+import { casWriteLayoutFile, readLayoutFile } from "../../../shared/dashboard-layout-store.js";
 
 export function registerDashboardIpc(getCwd: () => string): void {
   // Idempotent for the same reason files-handler is: a macOS reopen-after-close
@@ -38,91 +29,20 @@ export function registerDashboardIpc(getCwd: () => string): void {
 
   ipc.handle("dashboard:load", async () => {
     try {
-      const abs = resolveWithin(getCwd(), DASHBOARD_FILENAME);
-      const stat = await fsp.lstat(abs);
-      if (stat.isSymbolicLink()) {
-        return {
-          ok: false as const,
-          error: `${DASHBOARD_FILENAME} is a symlink; refusing to read`,
-        };
-      }
-      if (!stat.isFile()) {
-        return { ok: false as const, error: `${DASHBOARD_FILENAME} is not a regular file` };
-      }
-      if (stat.size > DASHBOARD_MAX_BYTES) {
-        return {
-          ok: false as const,
-          error: `dashboard layout is larger than ${DASHBOARD_MAX_BYTES} bytes`,
-        };
-      }
-      const raw = await fsp.readFile(abs, "utf8");
-      return { ok: true as const, raw, revision: dashboardRevision(raw) };
+      return await readLayoutFile(resolveWithin(getCwd(), DASHBOARD_FILENAME), DASHBOARD_MAX_BYTES);
     } catch (err) {
-      // No layout saved yet is the common case, not an error.
-      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
-        return { ok: true as const, raw: null, revision: null };
-      }
       return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
     }
   });
 
   ipc.handle("dashboard:save", async (_e, raw: string, baseRevision?: string | null) => {
-    if (typeof raw !== "string") {
-      return { ok: false as const, error: "expected dashboard JSON text" };
-    }
-    if (Buffer.byteLength(raw, "utf8") > DASHBOARD_MAX_BYTES) {
-      return {
-        ok: false as const,
-        error: `dashboard layout is larger than ${DASHBOARD_MAX_BYTES} bytes`,
-      };
-    }
     try {
-      const abs = resolveWithin(getCwd(), DASHBOARD_FILENAME);
-
-      let currentRaw: string | null = null;
-      try {
-        if ((await fsp.lstat(abs)).isSymbolicLink()) {
-          return {
-            ok: false as const,
-            error: `${DASHBOARD_FILENAME} is a symlink; refusing to write through it`,
-          };
-        }
-        currentRaw = await fsp.readFile(abs, "utf8");
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
-      }
-
-      const currentRevision = dashboardRevision(currentRaw);
-      if (baseRevision !== undefined && baseRevision !== currentRevision) {
-        return {
-          ok: false as const,
-          conflict: true as const,
-          error: "the dashboard changed on disk since it was loaded",
-          raw: currentRaw,
-          revision: currentRevision,
-        };
-      }
-
-      // Temp file in the same directory, then rename: rename is atomic within a
-      // filesystem, so a concurrent reader sees the old file or the new one and
-      // never a truncated one. The scratch name is random and the write is
-      // `wx` (O_CREAT | O_EXCL) for the same reason the handler lstats the real
-      // filename: the agent can write in this directory, and a predictable
-      // scratch name is a second place to plant a symlink that a following
-      // write would go through, after the guard on the real name has passed.
-      const tmp = `${abs}.tmp.${randomBytes(8).toString("hex")}`;
-      // The cleanup covers the write as well as the rename: `wx` creates the
-      // file before it writes to it, so a write that fails part-way (no space,
-      // I/O error, quota) leaves a scratch file behind that nothing else will
-      // ever look for, under a random name no sweep can match.
-      try {
-        await fsp.writeFile(tmp, raw, { encoding: "utf8", flag: "wx" });
-        await fsp.rename(tmp, abs);
-      } catch (err) {
-        await fsp.rm(tmp, { force: true });
-        throw err;
-      }
-      return { ok: true as const, revision: dashboardRevision(raw) };
+      return await casWriteLayoutFile(
+        resolveWithin(getCwd(), DASHBOARD_FILENAME),
+        raw,
+        baseRevision,
+        DASHBOARD_MAX_BYTES,
+      );
     } catch (err) {
       return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
     }

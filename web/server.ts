@@ -7,18 +7,9 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
 import { createServer } from "node:http";
-import {
-  readFileSync,
-  writeFileSync,
-  existsSync,
-  mkdirSync,
-  lstatSync,
-  renameSync,
-  rmSync,
-} from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, resolve, dirname, basename } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -34,11 +25,8 @@ import { isForwardableUiResponse } from "./rpc-guard.js";
 import { isCustomProvider } from "../shared/custom-provider.js";
 import { hasProviderKey, llmKeyEnvVar } from "./llm-credentials.js";
 import { resolveShutdownGraceMs } from "./shutdown-grace.js";
-import {
-  DASHBOARD_FILENAME,
-  DASHBOARD_MAX_BYTES,
-  dashboardRevision,
-} from "../shared/dashboard-contract.js";
+import { DASHBOARD_FILENAME, DASHBOARD_MAX_BYTES } from "../shared/dashboard-contract.js";
+import { casWriteLayoutFile, readLayoutFile } from "../shared/dashboard-layout-store.js";
 import { listFilesForWeb, readFileForWeb, readNotebookForWeb } from "./files-surface.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -562,94 +550,25 @@ wss.on("connection", (socket) => {
     // the renderer is the only thing that reads it. No path argument, so there
     // is nothing to traverse with.
     if (channel === "dashboard:load") {
-      const file = join(cwd, DASHBOARD_FILENAME);
-      try {
-        if (!existsSync(file)) {
-          respond(id, { ok: true, raw: null, revision: null });
-          return;
-        }
-        const stat = lstatSync(file);
-        if (stat.isSymbolicLink() || !stat.isFile()) {
-          respond(id, { ok: false, error: `${DASHBOARD_FILENAME} is not a regular file` });
-          return;
-        }
-        if (stat.size > DASHBOARD_MAX_BYTES) {
-          respond(id, {
-            ok: false,
-            error: `dashboard layout is larger than ${DASHBOARD_MAX_BYTES} bytes`,
-          });
-          return;
-        }
-        const raw = readFileSync(file, "utf-8");
-        respond(id, { ok: true, raw, revision: dashboardRevision(raw) });
-      } catch (err) {
-        respond(id, { ok: false, error: err instanceof Error ? err.message : String(err) });
-      }
+      void readLayoutFile(join(cwd, DASHBOARD_FILENAME), DASHBOARD_MAX_BYTES).then(
+        (result) => respond(id, result),
+        (err) =>
+          respond(id, { ok: false, error: err instanceof Error ? err.message : String(err) }),
+      );
       return;
     }
     if (channel === "dashboard:save") {
-      const raw = args[0];
-      if (typeof raw !== "string") {
-        respond(id, { ok: false, error: "expected dashboard JSON text" });
-        return;
-      }
-      if (Buffer.byteLength(raw, "utf8") > DASHBOARD_MAX_BYTES) {
-        respond(id, {
-          ok: false,
-          error: `dashboard layout is larger than ${DASHBOARD_MAX_BYTES} bytes`,
-        });
-        return;
-      }
       const baseRevision = args.length > 1 ? (args[1] as string | null) : undefined;
-      try {
-        const file = join(cwd, DASHBOARD_FILENAME);
-        // A layout save is automatic and unprompted, so it must not be able to
-        // follow a symlink the agent planted at this name.
-        const present = existsSync(file);
-        if (present && lstatSync(file).isSymbolicLink()) {
-          respond(id, {
-            ok: false,
-            error: `${DASHBOARD_FILENAME} is a symlink; refusing to write through it`,
-          });
-          return;
-        }
-
-        // Compare-and-swap: the editor, a widget's config change and the brain
-        // all write this file, so a save that was based on a version somebody
-        // else has replaced is refused rather than applied over the top.
-        const currentRaw = present ? readFileSync(file, "utf-8") : null;
-        const currentRevision = dashboardRevision(currentRaw);
-        if (baseRevision !== undefined && baseRevision !== currentRevision) {
-          respond(id, {
-            ok: false,
-            conflict: true,
-            error: "the dashboard changed on disk since it was loaded",
-            raw: currentRaw,
-            revision: currentRevision,
-          });
-          return;
-        }
-
-        // Temp file plus rename, so a reader never sees a half-written document.
-        // Random name and `wx` (O_CREAT | O_EXCL) for the same reason the real
-        // filename is lstat'd above: a guessable scratch name in a directory
-        // the agent can write is a second place to plant a symlink, and this
-        // write would follow it after the guard on the real name has passed.
-        const tmp = `${file}.tmp.${randomBytes(8).toString("hex")}`;
-        // The cleanup covers the write as well as the rename: `wx` creates the
-        // file before it writes to it, so a write that fails part-way leaves a
-        // scratch file behind under a random name nothing will ever look for.
-        try {
-          writeFileSync(tmp, raw, { flag: "wx" });
-          renameSync(tmp, file);
-        } catch (err) {
-          rmSync(tmp, { force: true });
-          throw err;
-        }
-        respond(id, { ok: true, revision: dashboardRevision(raw) });
-      } catch (err) {
-        respond(id, { ok: false, error: err instanceof Error ? err.message : String(err) });
-      }
+      void casWriteLayoutFile(
+        join(cwd, DASHBOARD_FILENAME),
+        args[0] as string,
+        baseRevision,
+        DASHBOARD_MAX_BYTES,
+      ).then(
+        (result) => respond(id, result),
+        (err) =>
+          respond(id, { ok: false, error: err instanceof Error ? err.message : String(err) }),
+      );
       return;
     }
     // The read-only file surface. The desktop answers these from the main

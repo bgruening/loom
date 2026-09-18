@@ -15,6 +15,7 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { withLayoutLock } from "../../shared/dashboard-layout-store.js";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import {
@@ -265,6 +266,19 @@ export async function updateDashboardDocument(
   const filePath = getDashboardPath();
   if (!filePath) return { ok: false, error: NO_SESSION };
 
+  // Serialized per path, for the same reason the shells are: two tool calls in
+  // the same turn could otherwise both read, both apply and both write, and the
+  // second would silently replace the first.
+  return withLayoutLock(filePath, () => updateLocked(filePath, apply));
+}
+
+async function updateLocked(
+  filePath: string,
+  apply: (
+    current: DashboardDocument,
+    exists: boolean,
+  ) => { ok: true; document: DashboardDocument } | DashboardStoreFailure,
+): Promise<DashboardWriteResult> {
   for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
     const refusal = await refuseSymlink(filePath);
     if (refusal) return { ok: false, error: refusal };
