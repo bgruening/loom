@@ -275,6 +275,21 @@ export function projectHistory(
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 /**
+ * How many contents rows we will look at before deciding Galaxy is not
+ * answering the question we asked.
+ *
+ * We request `GALAXY_LIVE_MAX_ITEMS + 1`. A server that honours `limit` never
+ * comes near this; one that hands back fifty times what it was asked for has
+ * ignored the query string, and `projectRow` plus the sort then run over the
+ * lot on the brain's 15 s timer.
+ *
+ * This bounds the work, NOT the transfer -- by the time it is consulted the
+ * body has already been buffered and parsed, because `galaxyGet` ends in
+ * `resp.json()`. A real byte bound has to go there, which is outside this file.
+ */
+const MAX_CONTENTS_ROWS = 10_000;
+
+/**
  * Which failure the user is looking at. The split that matters is 401 from
  * 403: Galaxy answers 401 for a key it rejects, and 403 for a good key on a
  * history that is not yours. Collapsing them sends someone to rotate a
@@ -406,6 +421,7 @@ export async function fetchGalaxyLiveSnapshot(
   // an HTML login page a proxy substituted, drew a confident "No datasets yet"
   // over an analysis that has them. Refuse the shape instead.
   if (!Array.isArray(contents)) return bare("unreachable");
+  if (contents.length > MAX_CONTENTS_ROWS) return bare("unreachable");
 
   return {
     payload: {

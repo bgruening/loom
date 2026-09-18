@@ -439,6 +439,32 @@ describe("fetchGalaxyLiveSnapshot", () => {
     expect(res.payload!.history).toBeNull();
   });
 
+  it("refuses a contents response from a server that ignored the limit entirely", async () => {
+    // We ask for 201 rows. A server handing back fifty times that has ignored
+    // the query string, and projecting and sorting the lot happens on the
+    // brain's 15 s timer. This bounds that work -- it does not bound the
+    // transfer, which galaxyGet has already buffered by this point.
+    const rows = Array.from({ length: 10_001 }, (_, i) => ({
+      id: `d${i}`,
+      hid: i + 1,
+      state: "ok",
+    }));
+    const get = vi.fn(async (path: string) =>
+      path.includes("/contents") ? rows : { update_time: "t1", name: "mine" },
+    ) as unknown as GalaxyLiveDeps["get"];
+    const res = await fetchGalaxyLiveSnapshot(HID, {}, deps(get));
+    expect(res.payload!.unavailable).toBe("unreachable");
+
+    // A response that merely overflows the row cap is the ordinary case and is
+    // still drawn, with the overflow reported rather than refused.
+    const ok = vi.fn(async (path: string) =>
+      path.includes("/contents") ? rows.slice(0, 201) : { update_time: "t1", name: "mine" },
+    ) as unknown as GalaxyLiveDeps["get"];
+    const fine = await fetchGalaxyLiveSnapshot(HID, {}, deps(ok));
+    expect(fine.payload!.unavailable).toBeUndefined();
+    expect(fine.payload!.history!.truncated).toBe(1);
+  });
+
   it("bounds a Galaxy that never answers, so ticks cannot stack", async () => {
     // galaxyGet is a bare fetch with no timeout of its own and this runs on a
     // repeating timer, so the bound has to come from here.
