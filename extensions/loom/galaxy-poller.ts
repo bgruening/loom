@@ -489,12 +489,19 @@ async function runTick(): Promise<void> {
     // Before the early returns below: a hook that only ran when the notebook
     // had in-flight blocks would be a hook that stops the moment the analysis
     // goes quiet, which is exactly when a panel still has to say something.
+    //
+    // Deliberately not awaited. A hook is an extra, and this tick's real work
+    // -- advancing in-flight invocations and jobs -- must not wait behind one
+    // that is talking to a Galaxy that has stopped answering. The hook is
+    // responsible for its own re-entrancy; both failure paths are swallowed
+    // here so a rejection cannot surface as an unhandled one.
     if (tickHook) {
       try {
-        await tickHook(content);
+        void tickHook(content).catch((err) => {
+          console.error("[galaxy-poller] tick hook failed:", err);
+        });
       } catch (err) {
-        // A hook is an extra, never the reason the poller's own work is skipped.
-        console.error("[galaxy-poller] tick hook failed:", err);
+        console.error("[galaxy-poller] tick hook threw:", err);
       }
     }
     if (content === null) {

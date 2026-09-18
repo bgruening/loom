@@ -298,17 +298,23 @@ export function renderGalaxyHistory(
   }
 
   // Say out loud when the counts describe a page rather than the history, so
-  // the number above the list can never be read as a total it is not.
-  const summary = summarizeCounts(payload.history.counts);
-  body.append(
-    el(
-      "p",
-      "gx-live-counts",
-      payload.history.countsComplete
-        ? summary
-        : `${summary} (newest ${payload.history.items.length})`,
-    ),
-  );
+  // the number above the list can never be read as a total it is not. Skipped
+  // for a history with nothing in it: "nothing yet" directly above "this
+  // history has no datasets yet" is two lines of a narrow panel saying one
+  // thing.
+  const empty = payload.history.items.length === 0 && payload.history.truncated === 0;
+  if (!empty) {
+    const summary = summarizeCounts(payload.history.counts);
+    body.append(
+      el(
+        "p",
+        "gx-live-counts",
+        payload.history.countsComplete
+          ? summary
+          : `${summary} (newest ${payload.history.items.length})`,
+      ),
+    );
+  }
 
   // Above the list, not below it: showing numbers nobody has refreshed as if
   // they were live is the worst thing this surface could do, and in a short

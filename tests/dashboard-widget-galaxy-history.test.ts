@@ -246,6 +246,17 @@ describe("renderGalaxyHistory", () => {
     expect(root.querySelector(".gx-live-more")?.textContent).toBe("+ 12 more");
   });
 
+  it("does not say 'nothing yet' directly above 'no datasets yet'", () => {
+    // Two lines of a 400px panel saying one thing. The counts line earns its
+    // place only when there is something to count.
+    const history = projectHistory("dead", fixture("empty.summary"), fixture("empty.contents"));
+    const root = draw({ ...payload(), history });
+    expect(root.querySelector(".gx-live-counts")).toBeNull();
+    // ...but a page with nothing on it still says how much is behind it.
+    const withheld = projectHistory("x", { contents_active: { active: 40 } }, [], 5);
+    expect(draw({ ...payload(), history: withheld }).querySelector(".gx-live-counts")).toBeTruthy();
+  });
+
   it("says the history is empty only when Galaxy agrees it is", () => {
     const history = projectHistory("dead", fixture("empty.summary"), fixture("empty.contents"));
     const root = draw({ ...payload(), history });
