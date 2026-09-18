@@ -414,6 +414,23 @@ describe("redaction", () => {
     expect(Object.keys(out).length).toBeLessThanOrEqual(41);
   });
 
+  it("bounds a shared subtree, which cutting a cycle does not", () => {
+    // The cycle guard is a path set, so a node reachable by N paths used to be
+    // materialised N times. Seven distinct objects, six deep, twenty wide: no
+    // cycle anywhere, and the old code spent twenty seconds on it before
+    // JSON.stringify threw.
+    let level: Record<string, unknown> = { leaf: true };
+    for (let d = 0; d < 6; d++) {
+      const wide: Record<string, unknown> = {};
+      for (let i = 0; i < 20; i++) wide[`k${i}`] = level;
+      level = wide;
+    }
+    const started = Date.now();
+    const out = redactForDisplay(level);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(() => JSON.stringify(out)).not.toThrow();
+  });
+
   it("treats a __proto__ key as data, not as a prototype", () => {
     const payload = JSON.parse('{"__proto__": {"polluted": true}, "normal": 1}');
     const out = redactForDisplay(payload) as Record<string, unknown>;

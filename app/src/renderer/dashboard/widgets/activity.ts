@@ -49,6 +49,20 @@ const DETAIL_STRING_MAX = 400;
 const DETAIL_TOTAL_MAX = 2000;
 const DETAIL_DEPTH_MAX = 6;
 const DETAIL_KEYS_MAX = 40;
+/**
+ * How many nodes one payload may expand to.
+ *
+ * The cycle guard is a *path* set -- an object is added on the way down and
+ * removed on the way back up -- which cuts cycles correctly and puts no bound
+ * at all on sharing: a node reachable by N paths is materialised N times, so a
+ * six-deep graph over seven distinct objects blocked the main thread for
+ * twenty seconds and then threw out of `JSON.stringify`. `JSON.parse` only
+ * ever yields a tree, so activity.jsonl cannot do this today -- but
+ * `ActivityEvent.payload` is a plain record in the contract and the galaxy
+ * source already establishes brain-pushed in-process payloads, so the bound is
+ * cheaper than the assumption.
+ */
+const DETAIL_NODES_MAX = 5000;
 /** Within this many pixels of the bottom still counts as "following". */
 const STICK_THRESHOLD_PX = 24;
 /** How many opened entries the widget remembers across a rebuild. */
@@ -470,10 +484,17 @@ function describe(
 /**
  * Copy a payload for display: credential-shaped keys keep their name and lose
  * their value, strings are capped, cycles are cut, and anything JSON cannot
- * carry is dropped. Bounded in depth and in breadth, because the input is a
- * file on disk that the user or a model can write.
+ * carry is dropped. Bounded in depth, in breadth and in total nodes, because
+ * the input is a file on disk that the user or a model can write -- and
+ * because cutting a cycle is not the same as bounding a shared subtree, which
+ * is what `DETAIL_NODES_MAX` is for.
  */
-export function redactForDisplay(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
+export function redactForDisplay(
+  value: unknown,
+  depth = 0,
+  seen = new WeakSet<object>(),
+  budget: { left: number } = { left: DETAIL_NODES_MAX },
+): unknown {
   if (value === null) return null;
   const t = typeof value;
   if (t === "string") return truncate(value as string, DETAIL_STRING_MAX);
@@ -485,6 +506,8 @@ export function redactForDisplay(value: unknown, depth = 0, seen = new WeakSet<o
   const obj = value as object;
   if (seen.has(obj)) return "[circular]";
   if (depth >= DETAIL_DEPTH_MAX) return "[…]";
+  if (budget.left <= 0) return "[…]";
+  budget.left--;
   seen.add(obj);
   try {
     if (Array.isArray(obj)) {
@@ -493,7 +516,7 @@ export function redactForDisplay(value: unknown, depth = 0, seen = new WeakSet<o
       for (const v of obj.slice(0, DETAIL_KEYS_MAX)) {
         if (typeof v !== "string") {
           hideNext = false;
-          items.push(redactForDisplay(v, depth + 1, seen));
+          items.push(redactForDisplay(v, depth + 1, seen, budget));
           continue;
         }
         if (hideNext) {
@@ -531,7 +554,7 @@ export function redactForDisplay(value: unknown, depth = 0, seen = new WeakSet<o
       // the most useful line in the block -- it can stop one filling the row.
       put(
         truncate(key, DETAIL_KEY_MAX),
-        CREDENTIAL_KEY.test(key) ? HIDDEN : redactForDisplay(v, depth + 1, seen),
+        CREDENTIAL_KEY.test(key) ? HIDDEN : redactForDisplay(v, depth + 1, seen, budget),
       );
     }
     return out;
