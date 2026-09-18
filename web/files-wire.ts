@@ -31,6 +31,17 @@ export type OrbitListResult =
 
 const NO_SURFACE = "this shell has no file surface";
 
+/**
+ * The shim's `invoke` rejects while the socket is down, and the file tree and
+ * the file viewer both call these without a catch. A rejection there is an
+ * unhandled promise and, for the viewer, nothing on screen at all -- so a
+ * transport failure becomes the same refusal shape everything else returns.
+ */
+export function transportRefusal(err: unknown, fallback: string): { ok: false; error: string } {
+  const message = err instanceof Error ? err.message : "";
+  return { ok: false, error: message || fallback };
+}
+
 export function base64ToBytes(b64: string): Uint8Array {
   const binary = atob(b64);
   const bytes = new Uint8Array(binary.length);

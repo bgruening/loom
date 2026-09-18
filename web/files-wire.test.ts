@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { base64ToBytes, decodeListResponse, decodeReadResponse } from "./files-wire.js";
+import {
+  base64ToBytes,
+  decodeListResponse,
+  decodeReadResponse,
+  transportRefusal,
+} from "./files-wire.js";
 
 describe("base64ToBytes", () => {
   it("round-trips every byte value", () => {
@@ -106,5 +111,18 @@ describe("decodeListResponse", () => {
   it("tolerates a missing cwd", () => {
     const root = { name: "a", relPath: "", type: "directory", children: [] };
     expect(decodeListResponse({ ok: true, root })).toEqual({ ok: true, root, cwd: "" });
+  });
+});
+
+describe("transportRefusal", () => {
+  it("carries the transport's own message", () => {
+    expect(transportRefusal(new Error("WebSocket disconnected"), "fallback")).toEqual({
+      ok: false,
+      error: "WebSocket disconnected",
+    });
+  });
+
+  it.each([[new Error("")], ["a string"], [null], [undefined]])("falls back for %o", (err) => {
+    expect(transportRefusal(err, "fallback")).toEqual({ ok: false, error: "fallback" });
   });
 });
