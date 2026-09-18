@@ -344,3 +344,82 @@ describe("a shell with no dashboard channels", () => {
     expect(root.querySelectorAll(".dash-panel").length).toBeGreaterThan(0);
   });
 });
+
+describe("a layout file that will not parse", () => {
+  it("lets the next deliberate change replace it, as the banner promises", async () => {
+    // `adopt` advanced the revision only on a successful parse, so an
+    // unreadable file left it at null forever: every later save went out
+    // against a revision the file never had, the compare-and-swap refused it,
+    // the conflict branch re-adopted the same corrupt text and it never
+    // converged. The user rearranged their dashboard, was told nothing, and
+    // lost it on reload -- under a banner saying "changing anything here will
+    // replace it".
+    const corrupt = '{"version":1,"activeId":"current-analysis","dashboards":[{"id":"current-ana';
+    const saveDashboard = vi.fn(async () => ({ ok: true as const, revision: "r-new" }));
+    installShell({
+      loadDashboard: vi.fn(async () => ({
+        ok: true as const,
+        raw: corrupt,
+        revision: "r-corrupt",
+      })),
+      saveDashboard,
+    });
+    const dash = initDashboard(root);
+    await settle();
+
+    dash.host.setDocument(createDefaultDashboardDocument());
+    await vi.advanceTimersByTimeAsync(400);
+
+    expect(saveDashboard).toHaveBeenCalledTimes(1);
+    // The revision it carries is the corrupt file's, so the swap matches and
+    // the write lands instead of conflicting forever.
+    expect(saveDashboard.mock.calls[0][1]).toBe("r-corrupt");
+    dash.stop();
+  });
+});
+
+describe("a save that was queued behind one that conflicted", () => {
+  it("is dropped rather than written under the revision we just adopted", async () => {
+    // Edit A goes out, edit B queues behind it, A comes back conflicted. B was
+    // built on the revision A lost, so writing it now would stamp it with the
+    // revision being adopted and quietly overwrite the external edit the user
+    // was just told about.
+    const theirs = serializeDashboardDocument(createDefaultDashboardDocument());
+    let releaseFirst: (v: unknown) => void = () => {};
+    const first = new Promise((resolve) => {
+      releaseFirst = resolve;
+    });
+    const saveDashboard = vi
+      .fn()
+      .mockReturnValueOnce(first)
+      .mockResolvedValue({ ok: true, revision: "r-mine" });
+    installShell({
+      loadDashboard: vi.fn(async () => ({ ok: true as const, raw: null, revision: null })),
+      saveDashboard,
+    });
+    const dash = initDashboard(root);
+    await settle();
+
+    dash.host.setDocument(createDefaultDashboardDocument());
+    await vi.advanceTimersByTimeAsync(400);
+    expect(saveDashboard).toHaveBeenCalledTimes(1);
+
+    // Edit B, queued while A is still in flight.
+    dash.host.setDocument(createDefaultDashboardDocument());
+
+    releaseFirst({
+      ok: false,
+      conflict: true,
+      error: "changed on disk",
+      raw: theirs,
+      revision: "r-theirs",
+    });
+    await settle();
+    await vi.advanceTimersByTimeAsync(400);
+    await settle();
+
+    // B never went out: it was based on a revision that no longer exists.
+    expect(saveDashboard).toHaveBeenCalledTimes(1);
+    dash.stop();
+  });
+});

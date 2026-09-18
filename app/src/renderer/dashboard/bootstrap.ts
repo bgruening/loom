@@ -121,6 +121,16 @@ export function initDashboard(
     const parsed = parseDashboardDocument(raw);
     if (!parsed.ok) {
       console.error("[dashboard] saved layout rejected:", parsed.problems);
+      // Take the revision anyway. The file is unreadable, not unknown, and
+      // leaving `revision` at null meant every later save went out against a
+      // revision the file never had: the compare-and-swap refused it, the
+      // conflict branch re-adopted the same corrupt text, and it never
+      // converged -- so the banner's promise that "changing anything here will
+      // replace it" was false, and the 5-second poll logged a parse failure
+      // for the life of the session. With the revision held, the first
+      // deliberate change wins the swap and replaces the file, which is what
+      // the banner says and what the design note intended.
+      revision = nextRevision;
       host.setBanner(CORRUPT_BANNER);
       return false;
     }
@@ -149,6 +159,14 @@ export function initDashboard(
           // between our load and our save. Take theirs and say so; silently
           // winning would throw away a change the user cannot see.
           console.warn("[dashboard] save conflicted with a newer layout on disk");
+          // And drop anything queued behind the rejected save. That document
+          // was built on the revision we just lost, so writing it now would
+          // stamp it with the revision we are about to adopt and overwrite the
+          // external edit we are in the middle of accepting -- the conflict
+          // would be reported to the user and then quietly undone a moment
+          // later. The queued edit is lost either way; this way the file and
+          // the screen agree about which version survived.
+          cancelPendingSave();
           if (typeof res.raw === "string") {
             if (adopt(res.raw, res.revision ?? null)) host.setBanner(CONFLICT_BANNER);
           } else {
