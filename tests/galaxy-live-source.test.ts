@@ -412,6 +412,33 @@ describe("fetchGalaxyLiveSnapshot", () => {
     expect(res.payload).toBeNull();
   });
 
+  it.each([
+    ["JSON null", null],
+    ["a bare list", []],
+    ["a string a proxy substituted", "<html>login</html>"],
+  ])("refuses a 200 whose history summary is %s", async (_label, body) => {
+    // Never-throws is this function's whole contract, and `null` broke it: the
+    // TypeError escaped into the poller's catch, so the tick died with no
+    // payload, no backoff and nothing on screen to say anything had happened.
+    const get = vi.fn(async () => body) as unknown as GalaxyLiveDeps["get"];
+    const res = await fetchGalaxyLiveSnapshot(HID, {}, deps(get));
+    expect(res.payload!.unavailable).toBe("unreachable");
+    expect(res.payload!.history).toBeNull();
+    // One request, not two: there is nothing to compare an update_time against.
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a 200 whose contents are not a list, rather than drawing it empty", async () => {
+    // The projection turns a non-array into no rows, which on screen is
+    // "No datasets yet." -- a confident answer about someone's real history.
+    const get = vi.fn(async (path: string) =>
+      path.includes("/contents") ? { err: "not a list" } : { update_time: "t1", name: "mine" },
+    ) as unknown as GalaxyLiveDeps["get"];
+    const res = await fetchGalaxyLiveSnapshot(HID, {}, deps(get));
+    expect(res.payload!.unavailable).toBe("unreachable");
+    expect(res.payload!.history).toBeNull();
+  });
+
   it("bounds a Galaxy that never answers, so ticks cannot stack", async () => {
     // galaxyGet is a bare fetch with no timeout of its own and this runs on a
     // repeating timer, so the bound has to come from here.

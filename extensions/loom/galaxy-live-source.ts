@@ -187,9 +187,14 @@ export function projectRow(raw: unknown): GalaxyLiveItem | null {
   return item;
 }
 
+/** A JSON object, as opposed to null, an array, or a string a proxy sent. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 function activeCount(raw: unknown): number | null {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const active = (raw as Record<string, unknown>).active;
+  if (!isPlainObject(raw)) return null;
+  const active = raw.active;
   return typeof active === "number" && active >= 0 ? active : null;
 }
 
@@ -366,13 +371,20 @@ export async function fetchGalaxyLiveSnapshot(
   /** A caller-cancelled tick is not a Galaxy failure; a timeout is. */
   const cancelled = (): boolean => Boolean(opts.signal?.aborted);
 
-  let summary: HistorySummary;
+  let raw: unknown;
   try {
-    summary = await deps.get<HistorySummary>(historySummaryPath(historyId), signal);
+    raw = await deps.get<unknown>(historySummaryPath(historyId), signal);
   } catch (err) {
     if (cancelled()) return quiet(true);
     return bare(classifyError(err));
   }
+  // A 200 is not an answer. Galaxy returning JSON `null` here -- which a proxy
+  // in front of it can do too -- used to throw straight out of a function whose
+  // whole contract is that it does not, so the tick died in the poller's catch
+  // with no payload and no backoff. Anything that is not an object is the same
+  // problem: unreadable, retry, say so.
+  if (!isPlainObject(raw)) return bare("unreachable");
+  const summary = raw as HistorySummary;
 
   const updateTime = typeof summary.update_time === "string" ? summary.update_time : "";
   if (opts.knownUpdateTime && updateTime && opts.knownUpdateTime === updateTime) {
@@ -389,6 +401,11 @@ export async function fetchGalaxyLiveSnapshot(
     if (cancelled()) return quiet(true);
     return bare(classifyError(err));
   }
+  // `projectHistory` turns a non-array into no rows, which is indistinguishable
+  // from an empty history -- so a server answering 200 with an error object, or
+  // an HTML login page a proxy substituted, drew a confident "No datasets yet"
+  // over an analysis that has them. Refuse the shape instead.
+  if (!Array.isArray(contents)) return bare("unreachable");
 
   return {
     payload: {
