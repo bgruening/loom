@@ -6,7 +6,7 @@ import { humanizeAgentError } from "./chat/error-humanizer.js";
 import { detectStopIntent } from "./chat/stop-intent.js";
 import { ShellPanel } from "./chat/shell-panel.js";
 import { ArtifactPanel } from "./artifacts/artifact-panel.js";
-import { initDashboard } from "./dashboard/bootstrap.js";
+import { initDashboard, type DashboardBootstrap } from "./dashboard/bootstrap.js";
 import { FilesPanel } from "./files/files-panel.js";
 import { FileViewer } from "./files/file-viewer.js";
 import { shouldRefreshOpenFile } from "./files/file-change-match.js";
@@ -110,7 +110,15 @@ const modelIndicatorNameEl = document.getElementById("model-indicator-name")!;
 
 const chat = new ChatPanel(messagesEl);
 const artifacts = new ArtifactPanel();
-const dashboard = initDashboard(artifacts.getDashboardContainer());
+// Guarded, and every use below is optional: this runs during module evaluation,
+// ahead of the chat, files, Galaxy and IPC wiring, so an exception here would
+// replace the whole window with a blank page rather than one broken tab.
+let dashboard: DashboardBootstrap | null = null;
+try {
+  dashboard = initDashboard(artifacts.getDashboardContainer());
+} catch (err) {
+  console.error("[orbit] the dashboard failed to start:", err);
+}
 const shell = new ShellPanel(document.getElementById("agent-shell-body")!);
 
 // File tree sidebar + file viewer (wired up further below).
@@ -354,7 +362,7 @@ function renderUsage(): void {
     usageCostEl.classList.add("hidden");
   }
 
-  dashboard.setSession({
+  dashboard?.setSession({
     streaming,
     cwd: cwdPathEl.textContent ?? "",
     model: currentModel || null,
@@ -676,7 +684,7 @@ window.orbit.onFilesChanged((changedPaths) => {
   }
   void refreshGalaxyInvocations(window.orbit);
   void refreshGalaxyHistory(window.orbit);
-  dashboard.refreshFromFiles();
+  dashboard?.refreshFromFiles();
 });
 
 // ── Galaxy connection indicator ──────────────────────────────────────────────
@@ -1618,7 +1626,7 @@ function applyCwdChange(dir: string): void {
   void filesPanel.refresh();
   void refreshGalaxyInvocations(window.orbit);
   void loadNotebookFromDisk();
-  dashboard.reloadForCwd();
+  dashboard?.reloadForCwd();
 }
 
 cwdChangeBtn.addEventListener("click", async () => {
@@ -1640,7 +1648,7 @@ async function loadNotebookFromDisk(): Promise<void> {
   if (seq !== notebookLoadSeq) return;
   if (r.ok && r.content) {
     artifacts.setNotebookMarkdown(`> \`${r.path}\`\n\n${r.content}`);
-    dashboard.setNotebook(r.content, r.path);
+    dashboard?.setNotebook(r.content, r.path);
     setArtifactCollapsed(false);
   }
 }
@@ -3125,7 +3133,7 @@ window.orbit.onUiRequest((request) => {
       notebookLoadSeq++;
       const markdown = decodeMarkdownWidget(lines);
       artifacts.setNotebookMarkdown(markdown);
-      dashboard.setNotebook(markdown);
+      dashboard?.setNotebook(markdown);
       setArtifactCollapsed(false);
     }
   }
@@ -3227,7 +3235,7 @@ function tickHeartbeat(): void {
 
 window.orbit.onAgentStatus((status, msg) => {
   setStatusBadge(status, msg);
-  dashboard.setSession({ status });
+  dashboard?.setSession({ status });
 
   // Brain transitioned to stopped/error: clear the "we're streaming" UI
   // so the user has a clean Send button + no stuck "thinking…" card.

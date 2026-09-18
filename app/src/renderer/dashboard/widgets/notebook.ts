@@ -68,19 +68,21 @@ export const notebookWidget: WidgetDefinition<NotebookConfig> = {
     // A panel in a hidden tab has no height, so the scroll above lands on a
     // scrollHeight of 0 and the newest entry is not what the user sees when
     // they switch to the Dashboard tab. Catch the moment the panel gains size.
-    let observer: ResizeObserver | undefined;
     if (typeof ResizeObserver !== "undefined") {
       let lastHeight = 0;
-      observer = new ResizeObserver(() => {
+      const observer = new ResizeObserver(() => {
         const height = scroller.clientHeight;
         if (height > 0 && lastHeight === 0) scrollToNewest();
         lastHeight = height;
       });
       observer.observe(scroller);
+      // Through onDispose, not the returned dispose: if rendering throws later
+      // the panel becomes an error card and never gets to return one, and this
+      // observer would keep firing against a detached node.
+      ctx.onDispose(() => observer.disconnect());
     }
 
     return () => {
-      observer?.disconnect();
       el.classList.remove("dash-notebook");
       el.textContent = "";
     };

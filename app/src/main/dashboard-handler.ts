@@ -8,6 +8,11 @@
  *
  * Text in, text out. Validation is the renderer's job through
  * shared/dashboard-contract, so there is exactly one implementation of it.
+ *
+ * Both handlers lstat first. The agent can write inside the analysis directory,
+ * so it can put a symlink at this filename; `resolveWithin` is string math and
+ * `writeFile` follows symlinks, which would turn an automatic background layout
+ * save into an unconsented overwrite of whatever the link points at.
  */
 
 import { ipcMain } from "electron";
@@ -24,8 +29,23 @@ export function registerDashboardIpc(getCwd: () => string): void {
   ipc.handle("dashboard:load", async () => {
     try {
       const abs = resolveWithin(getCwd(), DASHBOARD_FILENAME);
-      const raw = await fsp.readFile(abs, "utf8");
-      return { ok: true as const, raw };
+      const stat = await fsp.lstat(abs);
+      if (stat.isSymbolicLink()) {
+        return {
+          ok: false as const,
+          error: `${DASHBOARD_FILENAME} is a symlink; refusing to read`,
+        };
+      }
+      if (!stat.isFile()) {
+        return { ok: false as const, error: `${DASHBOARD_FILENAME} is not a regular file` };
+      }
+      if (stat.size > DASHBOARD_MAX_BYTES) {
+        return {
+          ok: false as const,
+          error: `dashboard layout is larger than ${DASHBOARD_MAX_BYTES} bytes`,
+        };
+      }
+      return { ok: true as const, raw: await fsp.readFile(abs, "utf8") };
     } catch (err) {
       // No layout saved yet is the common case, not an error.
       if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
@@ -47,6 +67,16 @@ export function registerDashboardIpc(getCwd: () => string): void {
     }
     try {
       const abs = resolveWithin(getCwd(), DASHBOARD_FILENAME);
+      try {
+        if ((await fsp.lstat(abs)).isSymbolicLink()) {
+          return {
+            ok: false as const,
+            error: `${DASHBOARD_FILENAME} is a symlink; refusing to write through it`,
+          };
+        }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
+      }
       await fsp.writeFile(abs, raw, "utf8");
       return { ok: true as const };
     } catch (err) {

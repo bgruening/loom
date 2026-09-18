@@ -84,6 +84,10 @@ export function initDashboard(container: HTMLElement): DashboardBootstrap {
   const host = new DashboardHost(container, {
     sources: sources.sources,
     persist: (doc) => {
+      // A change made while the startup load is still in flight wins: otherwise
+      // the load lands after it, puts the disk version back on screen, and the
+      // queued save writes the user's version to disk. Screen and file disagree.
+      loadSeq++;
       pending = doc;
       if (saveTimer) clearTimeout(saveTimer);
       saveTimer = setTimeout(flush, SAVE_DEBOUNCE_MS);

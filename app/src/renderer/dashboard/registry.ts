@@ -9,13 +9,21 @@ import type { WidgetDefinition } from "./widget-api.js";
 export class WidgetRegistry {
   private defs = new Map<string, WidgetDefinition>();
 
-  register(def: WidgetDefinition): void {
+  /**
+   * Two widgets claiming one type is a build-time mistake and should be loud,
+   * but not fatal: registration runs at module load, on the import chain the
+   * whole renderer boots through, so throwing here would replace Orbit with a
+   * blank window over a widget-name typo. First one wins, second is reported.
+   */
+  register(def: WidgetDefinition): boolean {
     if (this.defs.has(def.type)) {
-      // Two widgets claiming one type is a build-time mistake, not a runtime
-      // condition -- say so loudly rather than letting import order decide.
-      throw new Error(`dashboard: widget type "${def.type}" is already registered`);
+      console.error(
+        `[dashboard] widget type "${def.type}" is registered twice; keeping the first`,
+      );
+      return false;
     }
     this.defs.set(def.type, def);
+    return true;
   }
 
   get(type: string): WidgetDefinition | undefined {
@@ -30,6 +38,6 @@ export class WidgetRegistry {
 /** The registry the shipped dashboard uses. */
 export const widgetRegistry = new WidgetRegistry();
 
-export function registerWidget(def: WidgetDefinition): void {
-  widgetRegistry.register(def);
+export function registerWidget(def: WidgetDefinition): boolean {
+  return widgetRegistry.register(def);
 }

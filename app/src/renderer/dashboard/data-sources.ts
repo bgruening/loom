@@ -39,16 +39,26 @@ class MutableSource<T> implements DataSource<T> {
     return this.value;
   }
 
-  set(next: T): void {
+  /** Swap the value without telling anyone. Pair with `notify`. */
+  stage(next: T): void {
     this.value = next;
+  }
+
+  notify(): void {
+    const value = this.value;
     // Copy first: a listener that unsubscribes itself must not skip the next one.
     for (const listener of [...this.listeners]) {
       try {
-        listener(next);
+        listener(value);
       } catch (err) {
         console.error("[dashboard] data source listener threw:", err);
       }
     }
+  }
+
+  set(next: T): void {
+    this.stage(next);
+    this.notify();
   }
 
   subscribe(listener: (value: T) => void): Unsubscribe {
@@ -216,6 +226,20 @@ export interface DashboardShellApi {
   }) => Promise<{ ok: true; root: FileNode } | { ok: false; error?: string }>;
 }
 
+function sessionsEqual(a: SessionSnapshot, b: SessionSnapshot): boolean {
+  return (
+    a.status === b.status &&
+    a.streaming === b.streaming &&
+    a.cwd === b.cwd &&
+    a.model === b.model &&
+    a.costUsd === b.costUsd &&
+    a.tokens.input === b.tokens.input &&
+    a.tokens.output === b.tokens.output &&
+    a.tokens.cacheRead === b.tokens.cacheRead &&
+    a.tokens.cacheWrite === b.tokens.cacheWrite
+  );
+}
+
 function emptySession(): SessionSnapshot {
   return {
     status: "unknown",
@@ -258,6 +282,13 @@ export class DashboardSources {
    * slow file read cannot land the old workspace's data in the new one.
    */
   private generation = 0;
+  /**
+   * `files:changed` arrives in bursts. Two overlapping reads of the same file
+   * can resolve out of order and leave the older tail on screen, so a refresh
+   * that arrives while one is in flight is collapsed into a single re-run.
+   */
+  private inFlight = { activity: false, files: false };
+  private again = { activity: false, files: false };
 
   constructor(private api: DashboardShellApi = {}) {
     this.sources = {
@@ -276,18 +307,37 @@ export class DashboardSources {
    */
   setNotebook(markdown: string, path: string | null = null): void {
     const updatedAt = Date.now();
-    this.notebook.set({ markdown, path, updatedAt });
-    this.invocations.set({ invocations: parseInvocationBlocks(markdown), updatedAt });
-    this.plan.set({ plans: parsePlanSections(markdown), updatedAt });
+    // Stage all three before notifying any: three of the widgets read from the
+    // same markdown, and a listener on `notebook` that reaches for
+    // `sources.plan.get()` must not see the previous plan.
+    this.notebook.stage({ markdown, path, updatedAt });
+    this.invocations.stage({ invocations: parseInvocationBlocks(markdown), updatedAt });
+    this.plan.stage({ plans: parsePlanSections(markdown), updatedAt });
+    this.notebook.notify();
+    this.invocations.notify();
+    this.plan.notify();
   }
 
+  /**
+   * Called from the renderer's usage accounting, which runs on essentially
+   * every streaming token, so an unchanged patch must not wake every session
+   * widget. Only `tokens` is nested, and it is compared field by field.
+   */
   setSession(patch: Partial<Omit<SessionSnapshot, "updatedAt">>): void {
-    this.session.set({ ...this.session.get(), ...patch, updatedAt: Date.now() });
+    const current = this.session.get();
+    const next = { ...current, ...patch, updatedAt: Date.now() };
+    if (sessionsEqual(current, next)) return;
+    this.session.set(next);
   }
 
   /** Re-read the activity log tail. No-op where the shell has no file read. */
   async refreshActivity(): Promise<void> {
     if (typeof this.api.readFile !== "function") return;
+    if (this.inFlight.activity) {
+      this.again.activity = true;
+      return;
+    }
+    this.inFlight.activity = true;
     const generation = this.generation;
     let events: ActivityEvent[] = [];
     let available = false;
@@ -300,13 +350,23 @@ export class DashboardSources {
     } catch {
       /* no activity log yet, or no file surface at all */
     }
+    this.inFlight.activity = false;
     if (generation !== this.generation) return;
     this.activity.set({ events, available, updatedAt: Date.now() });
+    if (this.again.activity) {
+      this.again.activity = false;
+      await this.refreshActivity();
+    }
   }
 
   /** Re-read the workspace file tree. No-op where the shell has no listing. */
   async refreshFiles(): Promise<void> {
     if (typeof this.api.listFiles !== "function") return;
+    if (this.inFlight.files) {
+      this.again.files = true;
+      return;
+    }
+    this.inFlight.files = true;
     const generation = this.generation;
     let root: FileNode | null = null;
     let available = false;
@@ -319,13 +379,20 @@ export class DashboardSources {
     } catch {
       /* no file surface */
     }
+    this.inFlight.files = false;
     if (generation !== this.generation) return;
     this.files.set({ root, available, updatedAt: Date.now() });
+    if (this.again.files) {
+      this.again.files = false;
+      await this.refreshFiles();
+    }
   }
 
   /** Called on a cwd switch or /new so a new analysis does not inherit the old one's data. */
   reset(): void {
     this.generation++;
+    this.again.activity = false;
+    this.again.files = false;
     const updatedAt = Date.now();
     this.notebook.set({ markdown: "", path: null, updatedAt });
     this.invocations.set({ invocations: [], updatedAt });

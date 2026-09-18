@@ -7,6 +7,10 @@
   inset: 0;
   overflow-y: auto;
   padding: 16px;
+  /* The pane is a draggable fraction of the window, so column count has to
+     follow the pane's width, not the viewport's. */
+  container-type: inline-size;
+  container-name: dashboard;
 }
 
 #dashboard-view.hidden {
@@ -62,8 +66,19 @@
   align-content: start;
 }
 
-/* One column in a narrow pane: two 50% columns of a 300px pane are unreadable. */
+/* One column in a narrow pane: two 50% columns of a 300px pane are unreadable.
+   The media query is the fallback for a renderer without container queries;
+   the container query is the one that is actually right. */
 @media (max-width: 560px) {
+  .dash-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .dash-panel {
+    grid-column: span 1 !important;
+  }
+}
+
+@container dashboard (max-width: 560px) {
   .dash-grid {
     grid-template-columns: minmax(0, 1fr);
   }

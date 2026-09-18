@@ -3,7 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DashboardHost } from "../app/src/renderer/dashboard/host.js";
 import { WidgetRegistry } from "../app/src/renderer/dashboard/registry.js";
 import { DashboardSources } from "../app/src/renderer/dashboard/data-sources.js";
-import type { WidgetDefinition } from "../app/src/renderer/dashboard/widget-api.js";
+import type {
+  DashboardEditor,
+  DashboardEditorContext,
+  WidgetDefinition,
+} from "../app/src/renderer/dashboard/widget-api.js";
 import {
   createDefaultDashboardDocument,
   type DashboardDocument,
@@ -206,6 +210,58 @@ describe("failure isolation", () => {
     expect(root.querySelector(".dash-card-error")?.textContent).toContain("cannot draw this");
   });
 
+  it("runs a failed widget's onDispose cleanups", () => {
+    let cleaned = 0;
+    registry.register(
+      stubWidget("a", (_el, ctx) => {
+        ctx.onDispose(() => {
+          cleaned++;
+        });
+        ctx.subscribe(ctx.sources.notebook, (snap) => {
+          if (snap.markdown) throw new Error("later");
+        });
+      }),
+    );
+    const host = makeHost();
+    host.setDocument(doc("a"), { persist: false });
+    expect(cleaned).toBe(0);
+    sources.setNotebook("go");
+    expect(root.querySelectorAll(".dash-card-error")).toHaveLength(1);
+    expect(cleaned).toBe(1);
+  });
+
+  it("runs cleanups a widget registered before it threw in mount", () => {
+    let cleaned = 0;
+    registry.register(
+      stubWidget("a", (_el, ctx) => {
+        ctx.onDispose(() => {
+          cleaned++;
+        });
+        throw new Error("mount exploded");
+      }),
+    );
+    const host = makeHost();
+    host.setDocument(doc("a"), { persist: false });
+    expect(cleaned).toBe(1);
+  });
+
+  it("runs a cleanup immediately if it is registered after disposal", () => {
+    let kept: Parameters<WidgetDefinition["mount"]>[1] | undefined;
+    registry.register(
+      stubWidget("a", (_el, ctx) => {
+        kept = ctx;
+      }),
+    );
+    const host = makeHost();
+    host.setDocument(doc("a"), { persist: false });
+    host.dispose();
+    let cleaned = 0;
+    kept!.onDispose(() => {
+      cleaned++;
+    });
+    expect(cleaned).toBe(1);
+  });
+
   it("survives a widget whose dispose throws", () => {
     registry.register(
       stubWidget("a", () => () => {
@@ -367,6 +423,8 @@ describe("document management", () => {
     );
     const host = makeHost();
     host.setDocument(doc("a"), { persist: false });
+    // It really did re-render (so the queue works) and really did stop.
+    expect(mounts).toBeGreaterThan(1);
     expect(mounts).toBeLessThanOrEqual(4);
     expect(root.querySelectorAll(".dash-panel")).toHaveLength(1);
   });
@@ -386,6 +444,46 @@ describe("document management", () => {
     next.dashboards[0].panels[0].config = { depth: 9 };
     host.setDocument(next, { persist: false });
     expect(seen).toEqual({ follow: true, depth: 9 });
+  });
+
+  it("writes a late config change to the dashboard the widget was mounted from", () => {
+    // Panel ids are unique per dashboard, and the shipped presets reuse them.
+    let kept: Parameters<WidgetDefinition["mount"]>[1] | undefined;
+    registry.register(
+      stubWidget("a", (_el, ctx) => {
+        kept ??= ctx;
+      }),
+    );
+    const host = makeHost();
+    host.setDocument(
+      {
+        version: 1,
+        activeId: "one",
+        dashboards: [
+          {
+            id: "one",
+            title: "One",
+            panels: [{ id: "shared", widget: "a", config: {}, layout: { span: 1, rows: 2 } }],
+          },
+          {
+            id: "two",
+            title: "Two",
+            panels: [{ id: "shared", widget: "a", config: {}, layout: { span: 1, rows: 2 } }],
+          },
+        ],
+      },
+      { persist: false },
+    );
+
+    const fromDashboardOne = kept!;
+    host.setActiveDashboardId("two");
+    fromDashboardOne.setConfig({ late: true });
+
+    const doc = host.getDocument();
+    // Disposed with its panel, so it writes nowhere -- and certainly not onto
+    // the same-named panel of the dashboard the user switched to.
+    expect(doc.dashboards[1].panels[0].config).toEqual({});
+    expect(doc.dashboards[0].panels[0].config).toEqual({});
   });
 
   it("switches the active dashboard and ignores an id that does not exist", () => {
@@ -423,6 +521,84 @@ describe("document management", () => {
   });
 });
 
+describe("the editor extension point", () => {
+  function makeHostWithEditor(editor: DashboardEditor | null): DashboardHost {
+    return new DashboardHost(root, { sources: sources.sources, registry, editor });
+  }
+
+  it("attaches once, with a toolbar of its own and the host api", () => {
+    const attach = vi.fn();
+    const host = makeHostWithEditor({ attach });
+    expect(attach).toHaveBeenCalledTimes(1);
+    const ctx = attach.mock.calls[0][0] as DashboardEditorContext;
+    expect(ctx.host).toBe(host);
+    expect(ctx.toolbar.classList.contains("dash-toolbar")).toBe(true);
+  });
+
+  it("decorates every panel with its own header slot", () => {
+    registry.register(stubWidget("a", () => {}));
+    const decoratePanel = vi.fn();
+    const host = makeHostWithEditor({ attach: () => {}, decoratePanel });
+    // The constructor already drew the default document; count this render only.
+    decoratePanel.mockClear();
+    host.setDocument(doc("a", "a"), { persist: false });
+    expect(decoratePanel).toHaveBeenCalledTimes(2);
+    const tools = decoratePanel.mock.calls[0][1] as HTMLElement;
+    expect(tools.classList.contains("dash-panel-tools")).toBe(true);
+  });
+
+  it("disposes what decoratePanel returned when the panel is re-rendered", () => {
+    registry.register(stubWidget("a", () => {}));
+    let disposed = 0;
+    const host = makeHostWithEditor({
+      attach: () => {},
+      decoratePanel: () => () => {
+        disposed++;
+      },
+    });
+    host.setDocument(doc("a"), { persist: false });
+    disposed = 0;
+    host.refresh();
+    expect(disposed).toBe(1);
+  });
+
+  it("re-renders on refresh without touching or persisting the document", () => {
+    const persist = vi.fn();
+    let mounts = 0;
+    registry.register(
+      stubWidget("a", () => {
+        mounts++;
+      }),
+    );
+    const host = new DashboardHost(root, {
+      sources: sources.sources,
+      registry,
+      persist,
+      editor: null,
+    });
+    host.setDocument(doc("a"), { persist: false });
+    const before = host.getDocument();
+    host.refresh();
+    expect(mounts).toBe(2);
+    expect(host.getDocument()).toEqual(before);
+    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it("keeps rendering when the editor throws on attach or decorate", () => {
+    registry.register(stubWidget("a", () => {}));
+    const host = makeHostWithEditor({
+      attach: () => {
+        throw new Error("attach exploded");
+      },
+      decoratePanel: () => {
+        throw new Error("decorate exploded");
+      },
+    });
+    host.setDocument(doc("a"), { persist: false });
+    expect(root.querySelectorAll(".dash-panel")).toHaveLength(1);
+  });
+});
+
 describe("banner", () => {
   it("shows and hides the note above the grid", () => {
     const host = makeHost();
@@ -437,9 +613,14 @@ describe("banner", () => {
 });
 
 describe("registry", () => {
-  it("refuses two widgets claiming the same type", () => {
-    registry.register(stubWidget("a", () => {}));
-    expect(() => registry.register(stubWidget("a", () => {}))).toThrow(/already registered/);
+  it("keeps the first of two widgets claiming the same type, without throwing", () => {
+    // Registration happens on the import chain the whole renderer boots
+    // through, so a duplicate type must not be able to blank the window.
+    const first = stubWidget("a", () => {});
+    expect(registry.register(first)).toBe(true);
+    expect(registry.register(stubWidget("a", () => {}))).toBe(false);
+    expect(registry.get("a")).toBe(first);
+    expect(registry.list()).toHaveLength(1);
   });
 
   it("registers every built-in widget under a distinct type", async () => {

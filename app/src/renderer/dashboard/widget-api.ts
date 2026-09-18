@@ -25,7 +25,7 @@ export interface DataSource<T> {
 }
 
 /** Every snapshot carries the epoch-ms it was produced so a widget can show staleness. */
-interface Snapshot {
+export interface Snapshot {
   updatedAt: number;
 }
 
@@ -143,6 +143,13 @@ export interface WidgetContext<C extends Record<string, unknown> = Record<string
     listener: (value: T) => void,
     opts?: { immediate?: boolean },
   ): Unsubscribe;
+  /**
+   * Register cleanup that runs when the panel goes away **and when the widget
+   * fails**. Anything that outlives `mount` -- a timer, an observer, a window
+   * listener, a socket -- belongs here rather than in the returned dispose,
+   * because a widget that throws never gets to return one.
+   */
+  onDispose(fn: () => void): void;
   /** Turn this panel into an error card. */
   fail(err: unknown): void;
 }
@@ -168,6 +175,12 @@ export interface DashboardHostApi {
   getActiveDashboard(): Dashboard | null;
   setActiveDashboardId(id: string): void;
   listWidgets(): WidgetDefinition[];
+  /**
+   * Re-render the current document without changing or persisting it. For the
+   * editor entering or leaving edit mode: `setDocument(getDocument())` would
+   * work but would also write to disk.
+   */
+  refresh(): void;
 }
 
 export interface DashboardEditorContext {

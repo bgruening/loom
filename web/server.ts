@@ -9,7 +9,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { createServer } from "node:http";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, lstatSync } from "node:fs";
 import { join, resolve, dirname, basename } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -541,7 +541,23 @@ wss.on("connection", (socket) => {
     if (channel === "dashboard:load") {
       const file = join(cwd, DASHBOARD_FILENAME);
       try {
-        respond(id, { ok: true, raw: existsSync(file) ? readFileSync(file, "utf-8") : null });
+        if (!existsSync(file)) {
+          respond(id, { ok: true, raw: null });
+          return;
+        }
+        const stat = lstatSync(file);
+        if (stat.isSymbolicLink() || !stat.isFile()) {
+          respond(id, { ok: false, error: `${DASHBOARD_FILENAME} is not a regular file` });
+          return;
+        }
+        if (stat.size > DASHBOARD_MAX_BYTES) {
+          respond(id, {
+            ok: false,
+            error: `dashboard layout is larger than ${DASHBOARD_MAX_BYTES} bytes`,
+          });
+          return;
+        }
+        respond(id, { ok: true, raw: readFileSync(file, "utf-8") });
       } catch (err) {
         respond(id, { ok: false, error: err instanceof Error ? err.message : String(err) });
       }
@@ -561,7 +577,17 @@ wss.on("connection", (socket) => {
         return;
       }
       try {
-        writeFileSync(join(cwd, DASHBOARD_FILENAME), raw);
+        const file = join(cwd, DASHBOARD_FILENAME);
+        // A layout save is automatic and unprompted, so it must not be able to
+        // follow a symlink the agent planted at this name.
+        if (existsSync(file) && lstatSync(file).isSymbolicLink()) {
+          respond(id, {
+            ok: false,
+            error: `${DASHBOARD_FILENAME} is a symlink; refusing to write through it`,
+          });
+          return;
+        }
+        writeFileSync(file, raw);
         respond(id, { ok: true });
       } catch (err) {
         respond(id, { ok: false, error: err instanceof Error ? err.message : String(err) });

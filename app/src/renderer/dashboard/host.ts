@@ -28,6 +28,7 @@ import { widgetRegistry, type WidgetRegistry } from "./registry.js";
 import { dashboardEditor } from "./editor.js";
 import type {
   DashboardDataSources,
+  DashboardEditor,
   DashboardEditorContext,
   DashboardHostApi,
   DataSource,
@@ -42,6 +43,8 @@ export interface DashboardHostOptions {
   registry?: WidgetRegistry;
   /** Called with the serialized document whenever a change should be saved. */
   persist?: (document: DashboardDocument) => void;
+  /** Overrides the editor from `editor.ts`. For tests; `null` disables it. */
+  editor?: DashboardEditor | null;
 }
 
 /** How many times one render may be restarted by a widget reconfiguring itself. */
@@ -86,6 +89,7 @@ export class DashboardHost implements DashboardHostApi {
   private editorCtx: DashboardEditorContext | null = null;
   private rendering = false;
   private renderQueued = false;
+  private editor: DashboardEditor | null;
 
   constructor(
     private root: HTMLElement,
@@ -94,6 +98,7 @@ export class DashboardHost implements DashboardHostApi {
     this.sources = opts.sources;
     this.registry = opts.registry ?? widgetRegistry;
     this.persist = opts.persist;
+    this.editor = opts.editor !== undefined ? opts.editor : dashboardEditor;
 
     this.root.classList.add("dash-root");
     this.root.textContent = "";
@@ -103,10 +108,10 @@ export class DashboardHost implements DashboardHostApi {
     this.gridEl = el("div", "dash-grid");
     this.root.append(this.bannerEl, this.toolbarEl, this.gridEl);
 
-    if (dashboardEditor) {
+    if (this.editor) {
       this.editorCtx = { host: this, toolbar: this.toolbarEl };
       try {
-        dashboardEditor.attach(this.editorCtx);
+        this.editor.attach(this.editorCtx);
       } catch (err) {
         console.error("[dashboard] editor attach failed:", err);
         this.editorCtx = null;
@@ -150,6 +155,11 @@ export class DashboardHost implements DashboardHostApi {
 
   listWidgets(): WidgetDefinition[] {
     return this.registry.list();
+  }
+
+  /** Re-render the current document. No document change, no write. */
+  refresh(): void {
+    this.render();
   }
 
   // ── Banner ────────────────────────────────────────────────────────────────
@@ -212,11 +222,11 @@ export class DashboardHost implements DashboardHostApi {
     }
 
     for (const panel of dashboard.panels) {
-      this.gridEl.append(this.renderPanel(panel));
+      this.gridEl.append(this.renderPanel(dashboard.id, panel));
     }
   }
 
-  private renderPanel(panel: DashboardPanel): HTMLElement {
+  private renderPanel(dashboardId: string, panel: DashboardPanel): HTMLElement {
     const def = this.registry.get(panel.widget);
 
     const section = el("section", "dash-panel");
@@ -238,13 +248,13 @@ export class DashboardHost implements DashboardHostApi {
     if (!def) {
       body.append(this.unknownCard(panel.widget));
     } else {
-      const dispose = this.mountWidget(def, panel, body, actions);
+      const dispose = this.mountWidget(def, dashboardId, panel, body, actions);
       if (dispose) disposers.push(dispose);
     }
 
-    if (this.editorCtx && dashboardEditor?.decoratePanel) {
+    if (this.editorCtx && this.editor?.decoratePanel) {
       try {
-        const dispose = dashboardEditor.decoratePanel(panel, tools, this.editorCtx);
+        const dispose = this.editor.decoratePanel(panel, tools, this.editorCtx);
         if (dispose) disposers.push(dispose);
       } catch (err) {
         console.error("[dashboard] editor decoratePanel failed:", err);
@@ -269,11 +279,13 @@ export class DashboardHost implements DashboardHostApi {
 
   private mountWidget(
     def: WidgetDefinition,
+    dashboardId: string,
     panel: DashboardPanel,
     body: HTMLElement,
     actions: HTMLElement,
   ): WidgetDispose | null {
     const unsubscribes: Unsubscribe[] = [];
+    const cleanups: WidgetDispose[] = [];
     let failed = false;
     // A widget that keeps `ctx` past its dispose -- in a timer, an await, a
     // stray callback -- would otherwise re-subscribe to a source nobody will
@@ -288,6 +300,17 @@ export class DashboardHost implements DashboardHostApi {
           off?.();
         } catch {
           /* an unsubscribe that throws must not block the rest */
+        }
+      }
+      // Runs on the failure path too: a widget that threw still left its
+      // timers, observers and listeners attached, and it never got to return
+      // a dispose.
+      while (cleanups.length) {
+        const fn = cleanups.pop();
+        try {
+          fn?.();
+        } catch (err) {
+          console.error(`[dashboard] widget "${def.type}" cleanup threw:`, err);
         }
       }
     };
@@ -310,7 +333,18 @@ export class DashboardHost implements DashboardHostApi {
       header: actions,
       setConfig: (patch) => {
         if (disposed) return;
-        this.updatePanelConfig(panel.id, patch);
+        this.updatePanelConfig(dashboardId, panel.id, patch);
+      },
+      onDispose: (fn) => {
+        if (disposed) {
+          try {
+            fn();
+          } catch (err) {
+            console.error(`[dashboard] widget "${def.type}" cleanup threw:`, err);
+          }
+          return;
+        }
+        cleanups.push(fn);
       },
       subscribe: <T>(
         source: DataSource<T>,
@@ -353,9 +387,20 @@ export class DashboardHost implements DashboardHostApi {
     };
   }
 
-  private updatePanelConfig(panelId: string, patch: Record<string, unknown>): void {
+  /**
+   * Panel ids are unique within a dashboard, not across them -- the shipped
+   * presets deliberately reuse `p-notebook` and `p-jobs`. So a config write has
+   * to name the dashboard the widget was mounted from, or a late write from a
+   * widget on a dashboard the user has since left lands on a same-named panel
+   * somewhere else and is persisted there.
+   */
+  private updatePanelConfig(
+    dashboardId: string,
+    panelId: string,
+    patch: Record<string, unknown>,
+  ): void {
     const next = this.getDocument();
-    const dashboard = next.dashboards.find((d) => d.id === next.activeId);
+    const dashboard = next.dashboards.find((d) => d.id === dashboardId);
     const panel = dashboard?.panels.find((p) => p.id === panelId);
     if (!panel) return;
     panel.config = { ...panel.config, ...patch };
@@ -390,9 +435,9 @@ export class DashboardHost implements DashboardHostApi {
 
   dispose(): void {
     this.disposePanels();
-    if (this.editorCtx && dashboardEditor?.detach) {
+    if (this.editorCtx && this.editor?.detach) {
       try {
-        dashboardEditor.detach();
+        this.editor.detach();
       } catch (err) {
         console.error("[dashboard] editor detach failed:", err);
       }

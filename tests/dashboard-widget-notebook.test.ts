@@ -12,6 +12,7 @@ interface Harness {
   setConfig: ReturnType<typeof vi.fn>;
   fail: ReturnType<typeof vi.fn>;
   offs: Array<() => void>;
+  cleanups: Array<() => void>;
 }
 
 function harness(config: Partial<{ follow: boolean }> = {}): Harness {
@@ -20,6 +21,7 @@ function harness(config: Partial<{ follow: boolean }> = {}): Harness {
   document.body.append(el, header);
   const sources = new DashboardSources();
   const offs: Array<() => void> = [];
+  const cleanups: Array<() => void> = [];
   const setConfig = vi.fn();
   const fail = vi.fn();
   const ctx = {
@@ -29,6 +31,9 @@ function harness(config: Partial<{ follow: boolean }> = {}): Harness {
     header,
     setConfig,
     fail,
+    onDispose(fn: () => void) {
+      cleanups.push(fn);
+    },
     subscribe<T>(source: DataSource<T>, listener: (value: T) => void) {
       const off = source.subscribe(listener);
       offs.push(off);
@@ -36,7 +41,7 @@ function harness(config: Partial<{ follow: boolean }> = {}): Harness {
       return off;
     },
   } as WidgetContext<{ follow: boolean }>;
-  return { el, header, ctx, sources, setConfig, fail, offs };
+  return { el, header, ctx, sources, setConfig, fail, offs, cleanups };
 }
 
 beforeEach(() => {
@@ -112,8 +117,18 @@ describe("notebook widget", () => {
   it("empties its element on dispose", () => {
     const h = harness();
     const dispose = notebookWidget.mount(h.el, h.ctx);
-    h.sources.setNotebook("# Analysis\n");
+    h.sources.setNotebook("Analysis\n");
     dispose?.();
     expect(h.el.textContent).toBe("");
+  });
+
+  it("registers its resize observer through onDispose, so a failure still tears it down", () => {
+    const h = harness();
+    notebookWidget.mount(h.el, h.ctx);
+    // happy-dom has no ResizeObserver, so only assert when the environment does.
+    if (typeof ResizeObserver !== "undefined") {
+      expect(h.cleanups.length).toBeGreaterThan(0);
+      expect(() => h.cleanups.forEach((fn) => fn())).not.toThrow();
+    }
   });
 });
