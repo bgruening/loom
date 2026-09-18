@@ -1,4 +1,6 @@
 // @vitest-environment happy-dom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   activityWidget,
@@ -117,6 +119,46 @@ function textOf(h: Harness): string {
 
 beforeEach(() => {
   document.body.innerHTML = "";
+});
+
+/**
+ * The jump-to-latest pill carries `dash-panel-btn` from the shared sheet and
+ * `dash-activity-jump` from this widget's. Both are one class, so nothing but
+ * source order decides which wins, and the widget sheet has to be loaded after
+ * the shared one for the pill to keep its surface. Lifting these stylesheets
+ * out of TypeScript once got that order wrong and quietly flattened the pill
+ * into a plain button, so the order is pinned here rather than trusted.
+ *
+ * Resolved from the repo root, not from `import.meta.url`: under happy-dom that
+ * is an http URL and `fileURLToPath` refuses it.
+ */
+describe("stylesheet order against the shared dashboard sheet", () => {
+  const load = (rel: string): void => {
+    const style = document.createElement("style");
+    style.textContent = readFileSync(resolve(process.cwd(), rel), "utf8");
+    document.head.append(style);
+  };
+
+  it("lets the widget's own rule win on an element that carries both classes", () => {
+    document.head.innerHTML = "";
+    // The order index.html links them in.
+    load("app/src/renderer/dashboard/dashboard.css");
+    load("app/src/renderer/dashboard/widgets/activity.css");
+
+    const pill = document.createElement("button");
+    pill.className = "dash-panel-btn dash-activity-jump";
+    document.body.append(pill);
+    const plain = document.createElement("button");
+    plain.className = "dash-panel-btn";
+    document.body.append(plain);
+
+    expect(getComputedStyle(pill).borderRadius).toBe("10px");
+    expect(getComputedStyle(pill).padding).toBe("2px 9px");
+    // And the shared button is untouched, so this is a tie-break and not the
+    // widget sheet bleeding onto everything.
+    expect(getComputedStyle(plain).borderRadius).toBe("4px");
+    document.head.innerHTML = "";
+  });
 });
 
 // -- contract ----------------------------------------------------------------

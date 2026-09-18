@@ -20,6 +20,16 @@
     <title>orbit</title>
     <link rel="stylesheet" href="./styles.css" />
     <link rel="stylesheet" href="./dashboard/dashboard.css" />
+    <!-- After dashboard.css on purpose: a widget rule and a shared rule are often
+         both one class on the same element, so the widget sheet has to come last
+         to win the tie. -->
+    <link rel="stylesheet" href="./dashboard/widgets/jobs.css" />
+    <link rel="stylesheet" href="./dashboard/widgets/plan.css" />
+    <link rel="stylesheet" href="./dashboard/widgets/activity.css" />
+    <link rel="stylesheet" href="./dashboard/widgets/results.css" />
+    <link rel="stylesheet" href="./dashboard/widgets/galaxy-history.css" />
+    <link rel="stylesheet" href="./dashboard/widgets/html-sandbox.css" />
+    <link rel="stylesheet" href="./dashboard/editor/editor.css" />
   </head>
   <body>
     <div id="app">

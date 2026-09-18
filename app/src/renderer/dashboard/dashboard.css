@@ -2,15 +2,13 @@
    styles.css, which several branches edit at once. Every custom property used
    here is already defined in styles.css. */
 
-/* Per-widget and editor styles live next to the code that draws them. @import
-   has to precede every rule below it, so new ones go here. */
-@import "./widgets/jobs.css";
-@import "./widgets/plan.css";
-@import "./widgets/activity.css";
-@import "./widgets/results.css";
-@import "./widgets/galaxy-history.css";
-@import "./widgets/html-sandbox.css";
-@import "./editor/editor.css";
+/* Per-widget and editor styles live next to the code that draws them, and are
+   linked from index.html AFTER this file rather than @imported from it. An
+   @import has to precede every rule in its own stylesheet, which would put
+   every widget sheet ahead of the shared rules below -- and a widget rule and a
+   shared rule are often both a single class on the same element (a widget's own
+   button also carries .dash-panel-btn), so source order is the whole tie-break.
+   Importing here silently handed those to the shared rule. */
 
 #dashboard-view {
   position: absolute;
