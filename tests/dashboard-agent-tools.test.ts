@@ -27,6 +27,7 @@ import {
   isProtectedPanel,
   presetLines,
   provenanceViolations,
+  reassertProvenance,
   registerDashboardTools,
   sandboxWidgetEnabled,
   widgetCatalogLines,
@@ -633,5 +634,201 @@ describe("applyDashboardActions on its own", () => {
     const before = JSON.stringify(document);
     applyDashboardActions(document, [{ action: "add_panel", widget: "jobs" }], "why");
     expect(JSON.stringify(document)).toBe(before);
+  });
+});
+
+describe("provenance is the host's to assign", () => {
+  it("will not let a whole-document replace stamp a panel as the user's", async () => {
+    const result = await run("dashboard_update", {
+      reason: "you asked for a jobs panel",
+      document: JSON.stringify(
+        documentWith([
+          {
+            id: "p-smuggled",
+            widget: "jobs",
+            config: {},
+            layout: { span: 1, rows: 2 },
+            addedBy: "user",
+            pinned: true,
+            reason: "the user definitely wanted this",
+          },
+        ]),
+      ),
+    });
+    expect(result.success).toBe(true);
+    const panel = onDisk().dashboards[0].panels[0];
+    expect(panel.addedBy).toBe("agent");
+    expect(panel.pinned).toBeUndefined();
+    expect(panel.reason).toBe("you asked for a jobs panel");
+  });
+
+  it("keeps the provenance a panel already had through a replace", async () => {
+    seed(
+      documentWith([
+        {
+          id: "p-mine",
+          widget: "notebook",
+          config: {},
+          layout: { span: 1, rows: 2 },
+          addedBy: "user",
+          pinned: true,
+          reason: "I keep my own notes here",
+        },
+      ]),
+    );
+    const result = await run("dashboard_update", {
+      reason: "you asked to add the jobs panel",
+      document: JSON.stringify(
+        documentWith([
+          {
+            id: "p-mine",
+            widget: "notebook",
+            config: {},
+            layout: { span: 1, rows: 2 },
+            addedBy: "agent",
+          },
+          { id: "p-jobs", widget: "jobs", config: {}, layout: { span: 1, rows: 2 } },
+        ]),
+      ),
+    });
+    expect(result.success).toBe(true);
+    const [mine, jobs] = onDisk().dashboards[0].panels;
+    expect(mine.addedBy).toBe("user");
+    expect(mine.pinned).toBe(true);
+    expect(mine.reason).toBe("I keep my own notes here");
+    expect(jobs.addedBy).toBe("agent");
+  });
+
+  it("will not rewrite the reason on a panel the user pinned", async () => {
+    seed(
+      documentWith([
+        {
+          id: "p-mine",
+          widget: "notebook",
+          config: {},
+          layout: { span: 1, rows: 2 },
+          addedBy: "user",
+          pinned: true,
+          reason: "I keep my own notes here",
+        },
+      ]),
+    );
+    await run("dashboard_update", {
+      reason: "the agent's own reason",
+      actions: [{ action: "update_panel", panelId: "p-mine", rows: 3 }],
+    });
+    expect(onDisk().dashboards[0].panels[0].reason).toBe("I keep my own notes here");
+    expect(onDisk().dashboards[0].panels[0].layout.rows).toBe(2);
+  });
+
+  it("stamps a panel whose widget type changed as the agent's", () => {
+    const before = documentWith([
+      { id: "p-x", widget: "jobs", config: {}, layout: { span: 1, rows: 2 }, addedBy: "preset" },
+    ]);
+    const after = reassertProvenance(
+      before,
+      documentWith([
+        { id: "p-x", widget: "plan", config: {}, layout: { span: 1, rows: 2 }, addedBy: "preset" },
+      ]),
+      "you asked for the plan instead",
+    );
+    expect(after.dashboards[0].panels[0].addedBy).toBe("agent");
+    expect(after.dashboards[0].panels[0].reason).toBe("you asked for the plan instead");
+  });
+});
+
+describe("which dashboard an action lands on", () => {
+  const jobs = (rows: number) => ({
+    id: "p-jobs",
+    widget: "jobs",
+    config: {},
+    layout: { span: 1 as const, rows },
+    addedBy: "preset" as const,
+  });
+
+  it("resolves an unqualified panel id against the dashboard on screen", async () => {
+    // The shipped presets reuse "p-jobs" and "p-notebook" across dashboards on
+    // purpose, so first-match-wins edits one the user is not looking at.
+    seed({
+      version: 1,
+      activeId: "second",
+      dashboards: [
+        { id: "first", title: "First", panels: [jobs(2)] },
+        { id: "second", title: "Second", panels: [jobs(2)] },
+      ],
+    });
+    await run("dashboard_update", {
+      reason: "you asked for a taller jobs panel",
+      actions: [{ action: "update_panel", panelId: "p-jobs", rows: 6 }],
+    });
+    const after = onDisk();
+    expect(after.dashboards.find((d) => d.id === "second")!.panels[0].layout.rows).toBe(6);
+    expect(after.dashboards.find((d) => d.id === "first")!.panels[0].layout.rows).toBe(2);
+  });
+
+  it("still honours an explicit dashboardId", async () => {
+    seed({
+      version: 1,
+      activeId: "second",
+      dashboards: [
+        { id: "first", title: "First", panels: [jobs(2)] },
+        { id: "second", title: "Second", panels: [jobs(2)] },
+      ],
+    });
+    await run("dashboard_update", {
+      reason: "you asked to change the other one",
+      actions: [{ action: "update_panel", panelId: "p-jobs", dashboardId: "first", rows: 5 }],
+    });
+    expect(onDisk().dashboards.find((d) => d.id === "first")!.panels[0].layout.rows).toBe(5);
+  });
+});
+
+describe("what the model is told", () => {
+  it("reports what the validator repaired in a document it was handed", async () => {
+    const result = await run("dashboard_update", {
+      reason: "you asked for a rebuild",
+      document: JSON.stringify({
+        version: 1,
+        activeId: "d",
+        dashboards: [
+          {
+            id: "d",
+            title: "D",
+            panels: [
+              { id: "p-jobs", widget: "jobs", config: {}, layout: { span: 1, rows: 2 } },
+              { id: "p-bad", config: {} },
+            ],
+          },
+        ],
+      }),
+    });
+    expect(result.success).toBe(true);
+    const repairs = JSON.stringify(result.repairs);
+    expect(repairs).toContain("dashboards[0].panels[1].widget");
+    expect(repairs).toContain("missing a widget type");
+    // The dropped panel really is gone -- the repair is not cosmetic.
+    expect(onDisk().dashboards[0].panels.map((p) => p.id)).toEqual(["p-jobs"]);
+  });
+
+  it("refuses an update_panel that would change nothing", async () => {
+    seed(
+      documentWith([
+        {
+          id: "p-jobs",
+          widget: "jobs",
+          config: {},
+          layout: { span: 1, rows: 2 },
+          addedBy: "agent",
+        },
+      ]),
+    );
+    const before = fs.readFileSync(dashPath, "utf-8");
+    const result = await run("dashboard_update", {
+      reason: "why",
+      actions: [{ action: "update_panel", panelId: "p-jobs" }],
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("something to change");
+    expect(fs.readFileSync(dashPath, "utf-8")).toBe(before);
   });
 });

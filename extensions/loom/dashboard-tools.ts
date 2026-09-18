@@ -118,6 +118,9 @@ function samePanel(a: DashboardPanel, b: DashboardPanel): boolean {
     a.layout.rows === b.layout.rows &&
     a.pinned === b.pinned &&
     a.addedBy === b.addedBy &&
+    // `reason` is the user-visible "why is this here". Leaving it out of the
+    // comparison let an update_panel rewrite it on a panel the user pinned.
+    (a.reason ?? "") === (b.reason ?? "") &&
     stableJson(a.config) === stableJson(b.config)
   );
 }
@@ -177,6 +180,43 @@ export function provenanceViolations(
 }
 
 /**
+ * Take provenance out of the model's hands.
+ *
+ * `actions` cannot set `addedBy` or `pinned` -- the schema has no field for
+ * them -- but a whole-document replace hands the model the raw JSON, and a
+ * panel it stamps `addedBy: "user"` or `pinned: true` is a panel it has
+ * laundered into one nothing here will ever touch again, including the user's
+ * own reading of who put it there. So: a panel that was already in this
+ * dashboard keeps exactly the provenance it had, and a panel this write
+ * introduces is the agent's, with the agent's reason.
+ */
+export function reassertProvenance(
+  before: DashboardDocument,
+  candidate: DashboardDocument,
+  reason: string,
+): DashboardDocument {
+  for (const dashboard of candidate.dashboards) {
+    const previous = before.dashboards.find((d) => d.id === dashboard.id);
+    for (const panel of dashboard.panels) {
+      const existing = previous?.panels.find((p) => p.id === panel.id);
+      if (existing && existing.widget === panel.widget) {
+        if (existing.addedBy === undefined) delete panel.addedBy;
+        else panel.addedBy = existing.addedBy;
+        if (existing.pinned === undefined) delete panel.pinned;
+        else panel.pinned = existing.pinned;
+        if (existing.reason === undefined) delete panel.reason;
+        else panel.reason = existing.reason;
+      } else {
+        panel.addedBy = "agent";
+        panel.reason = reason;
+        delete panel.pinned;
+      }
+    }
+  }
+  return candidate;
+}
+
+/**
  * Widget types this change brings into the document: a panel id the dashboard
  * did not have, or one whose widget type changed. Panels already on disk are
  * left alone even when their type is unknown to this build, because that is how
@@ -226,7 +266,8 @@ export type DashboardAction = {
 };
 
 export type ApplyResult =
-  { ok: true; document: DashboardDocument; notes: string[] } | { ok: false; error: string };
+  | { ok: true; document: DashboardDocument; notes: string[]; problems?: DashboardProblem[] }
+  | { ok: false; error: string };
 
 function fail(error: string): ApplyResult {
   return { ok: false, error };
@@ -304,10 +345,20 @@ function locatePanel(document: DashboardDocument, action: DashboardAction): Loca
   const panelId = (action.panelId ?? "").trim();
   if (!panelId) return { error: `${action.action} needs a panelId.` };
   const wanted = action.dashboardId?.trim();
-  const scoped = wanted ? document.dashboards.filter((d) => d.id === wanted) : document.dashboards;
-  if (wanted && scoped.length === 0) {
+  if (wanted && !document.dashboards.some((d) => d.id === wanted)) {
     return { error: `no dashboard "${wanted}". Have: ${dashboardIds(document)}.` };
   }
+  // Panel ids are unique per dashboard, not per document, and the shipped
+  // presets reuse "p-jobs" and "p-notebook" deliberately. Without the active
+  // dashboard first, an unqualified action edits whichever dashboard happens to
+  // be first in the file -- one the user is not even looking at.
+  const scoped = wanted
+    ? document.dashboards.filter((d) => d.id === wanted)
+    : [...document.dashboards].sort((a, b) => {
+        if (a.id === document.activeId) return -1;
+        if (b.id === document.activeId) return 1;
+        return 0;
+      });
   for (const dashboard of scoped) {
     const index = dashboard.panels.findIndex((p) => p.id === panelId);
     if (index >= 0) return { dashboard, panel: dashboard.panels[index], index };
@@ -373,6 +424,17 @@ export function applyDashboardActions(
       case "update_panel": {
         const found = locatePanel(next, action);
         if ("error" in found) return fail(`${at}: ${found.error}`);
+        if (
+          action.widget === undefined &&
+          action.title === undefined &&
+          action.config === undefined &&
+          action.span === undefined &&
+          action.rows === undefined
+        ) {
+          // Reporting "updated" for a call that changed nothing would have the
+          // model tell the user their dashboard moved when it did not.
+          return fail(`${at}: update_panel needs something to change.`);
+        }
         const panel = found.panel;
         if (action.widget && action.widget.trim()) panel.widget = action.widget.trim();
         if (action.title !== undefined) {
@@ -389,7 +451,6 @@ export function applyDashboardActions(
         }
         if (action.span !== undefined) panel.layout.span = action.span === 2 ? 2 : 1;
         if (action.rows !== undefined) panel.layout.rows = clampRows(action.rows);
-        panel.reason = reason;
         notes.push(`updated "${panel.id}" in "${found.dashboard.id}"`);
         break;
       }
@@ -475,9 +536,10 @@ type Refusal = { error: string; problems?: DashboardProblem[] };
  */
 export async function commitDashboardChange(
   build: (current: DashboardDocument, exists: boolean) => ApplyResult,
-  options: { enforceProvenance?: boolean } = {},
+  options: { enforceProvenance?: boolean; reason?: string } = {},
 ): Promise<CommitOutcome> {
   const enforce = options.enforceProvenance !== false;
+  const buildReason = options.reason ?? "";
   // A holder rather than plain locals: the callback below runs inside the
   // store's retry loop, and what it learns has to survive back out here.
   const seen: { problems: DashboardProblem[]; notes: string[]; refusal: Refusal | null } = {
@@ -497,7 +559,10 @@ export async function commitDashboardChange(
       return { ok: false, error: built.error };
     }
 
-    const validated = validateDashboardDocument(built.document);
+    const proposed = enforce
+      ? reassertProvenance(current, built.document, buildReason)
+      : built.document;
+    const validated = validateDashboardDocument(proposed);
     if (!validated.ok) {
       seen.refusal = {
         error: "That layout is not a valid dashboard document.",
@@ -505,7 +570,10 @@ export async function commitDashboardChange(
       };
       return { ok: false, error: seen.refusal.error };
     }
-    seen.problems = validated.problems;
+    // Repairs the build step already made -- a panel the model's document was
+    // missing a widget for, say -- are the model's to hear about, and they are
+    // gone by the time the result is re-validated.
+    seen.problems = [...(built.problems ?? []), ...validated.problems];
     seen.notes = built.notes;
 
     if (enforce) {
@@ -614,7 +682,8 @@ const UPDATE_DESCRIPTION = [
   'alignment run".',
   "",
   `Widget types: ${widgetCatalogLines().join("; ")}.`,
-  `Presets for create_dashboard: ${presetLines().join("; ")}.`,
+  "Presets for create_dashboard:",
+  ...presetLines().map((line) => `  ${line}`),
   "Panels sit in a two-column grid: span is 1 or 2 columns, rows is 1-6 height",
   "units, position is the index within the dashboard (omit it to append).",
 ].join("\n");
@@ -750,21 +819,29 @@ export function registerDashboardTools(pi: ExtensionAPI): void {
         return toolFailure("Nothing to do: pass actions or document.");
       }
 
-      const outcome = await commitDashboardChange((current) => {
-        if (documentText !== undefined) {
-          const parsed = parseDashboardDocument(documentText);
-          if (!parsed.ok) {
+      const outcome = await commitDashboardChange(
+        (current) => {
+          if (documentText !== undefined) {
+            const parsed = parseDashboardDocument(documentText);
+            if (!parsed.ok) {
+              return {
+                ok: false,
+                error: `document could not be read: ${parsed.problems
+                  .map((p) => `${p.path || "document"}: ${p.message}`)
+                  .join("; ")}`,
+              };
+            }
             return {
-              ok: false,
-              error: `document could not be read: ${parsed.problems
-                .map((p) => `${p.path || "document"}: ${p.message}`)
-                .join("; ")}`,
+              ok: true,
+              document: parsed.document,
+              notes: ["replaced the whole layout"],
+              problems: parsed.problems,
             };
           }
-          return { ok: true, document: parsed.document, notes: ["replaced the whole layout"] };
-        }
-        return applyDashboardActions(current, actions, reason);
-      });
+          return applyDashboardActions(current, actions, reason);
+        },
+        { reason },
+      );
 
       if (!outcome.ok) return toolFailure(outcome.error, outcome.problems);
 
