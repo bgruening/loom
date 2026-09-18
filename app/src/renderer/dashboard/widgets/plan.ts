@@ -10,13 +10,7 @@
  * carries a glyph and a word before it carries a colour.
  */
 
-import type {
-  PlanSection,
-  PlanSnapshot,
-  PlanStep,
-  WidgetContext,
-  WidgetDefinition,
-} from "../widget-api.js";
+import type { PlanSection, PlanSnapshot, PlanStep, WidgetDefinition } from "../widget-api.js";
 
 /**
  * A `type`, not an `interface`: an interface has no implicit index signature
