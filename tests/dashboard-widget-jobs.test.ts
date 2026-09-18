@@ -320,13 +320,12 @@ describe("state folding", () => {
   });
 
   it("still raises the alarm for a run that is failing rather than stopping", () => {
-    // Be careful with this fixture. The summary below is *also* what the brain
-    // writes while a cancel is settling, because rollUpInvocationJobs scores a
-    // `deleted` job in the same counter as an errored one and the block has no
-    // word for a cancel in flight -- so this test pins "a run reporting failed
-    // jobs alarms", not "a cancel alarms". Until checkInvocations says which it
-    // is, the widget cannot tell them apart and the exemption above only fires
-    // once the brain names it.
+    // This fixture used to be ambiguous: checkInvocations wrote the same
+    // sentence for a settling cancel, because rollUpInvocationJobs scores a
+    // `deleted` job in the same counter as an errored one. It now writes
+    // "Workflow cancelling" for that case, so the string below means a genuine
+    // failure and nothing else, and the exemption above fires on the cancel.
+    // The pairing is pinned from the brain side in invocation-check.test.ts.
     const row = rowFor({
       status: "in_progress",
       summary: "Workflow in progress: 9 job(s) failed, 3 still running",
