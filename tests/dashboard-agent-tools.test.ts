@@ -1018,6 +1018,45 @@ describe("panels the user pinned keep their place", () => {
     expect(onDisk().dashboards[0].panels.map((p) => p.id)).toEqual(["p-pinned", "p-jobs"]);
   });
 
+  it("will not move the pinned panel itself, however far", async () => {
+    // The pin held the panel's content and not its place: with one pinned
+    // panel and three agent panels, the protected-subsequence check saw the
+    // same one-element sequence however far the pinned panel travelled, so
+    // move_panel pushed it from the top to the bottom and reported success.
+    seed(
+      documentWith([
+        pinned,
+        { id: "x0", widget: "jobs", config: {}, layout: { span: 1, rows: 2 }, addedBy: "agent" },
+        { id: "x1", widget: "plan", config: {}, layout: { span: 1, rows: 2 }, addedBy: "agent" },
+        { id: "x2", widget: "results", config: {}, layout: { span: 1, rows: 2 }, addedBy: "agent" },
+      ]),
+    );
+    const result = await run("dashboard_update", {
+      reason: "tidying up",
+      actions: [{ action: "move_panel", panelId: "p-pinned", position: 3 }],
+    });
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toMatch(/pinned/);
+    expect(onDisk().dashboards[0].panels.map((p) => p.id)).toEqual(["p-pinned", "x0", "x1", "x2"]);
+  });
+
+  it("will not push a pinned panel down by moving another panel above it", async () => {
+    seed(
+      documentWith([
+        pinned,
+        { id: "x0", widget: "jobs", config: {}, layout: { span: 1, rows: 2 }, addedBy: "agent" },
+      ]),
+    );
+    await run("dashboard_update", {
+      reason: "jobs on top",
+      actions: [{ action: "move_panel", panelId: "x0", position: 0 }],
+    });
+    // The existing pinned floor clamps the destination rather than refusing the
+    // call, so this reports success having changed nothing. What matters is
+    // that the pinned panel kept its place.
+    expect(onDisk().dashboards[0].panels.map((p) => p.id)).toEqual(["p-pinned", "x0"]);
+  });
+
   it("still lets the agent reorder above a panel the user merely placed", async () => {
     seed(
       documentWith([
@@ -1092,5 +1131,83 @@ describe("what a refusal says", () => {
     expect(outcome.ok).toBe(false);
     expect(outcome.ok === false && outcome.error).toContain("feature flag");
     expect(fs.existsSync(dashPath)).toBe(false);
+  });
+});
+
+describe("a whole-document replace that would not fit", () => {
+  const panel = (id: string) => ({
+    id,
+    widget: "plan" as const,
+    config: {},
+    layout: { span: 1 as const, rows: 2 },
+    addedBy: "agent" as const,
+  });
+
+  it("refuses rather than dropping the panels past the cap", async () => {
+    // The validator enforces the cap by keeping the first N and calling it a
+    // repair, so the document arrived already truncated and the guard that
+    // exists for this compared it against itself. Prepending one panel to a
+    // full dashboard reported success and deleted the last one.
+    seed(documentWith(Array.from({ length: 40 }, (_, i) => panel(`a${i}`))));
+    const before = onDisk().dashboards[0].panels.map((p) => p.id);
+
+    const result = await run("dashboard_update", {
+      reason: "rebuilding",
+      document: JSON.stringify({
+        version: 1,
+        activeId: "current-analysis",
+        dashboards: [
+          {
+            id: "current-analysis",
+            title: "Current analysis",
+            panels: [panel("new"), ...Array.from({ length: 40 }, (_, i) => panel(`a${i}`))],
+          },
+        ],
+      }),
+    });
+
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toMatch(/at most 40 panels/);
+    expect(onDisk().dashboards[0].panels.map((p) => p.id)).toEqual(before);
+  });
+
+  it("refuses a document with more dashboards than a layout holds", async () => {
+    seed(documentWith([panel("a")]));
+    const result = await run("dashboard_update", {
+      reason: "rebuilding",
+      document: JSON.stringify({
+        version: 1,
+        activeId: "d0",
+        dashboards: Array.from({ length: 21 }, (_, i) => ({
+          id: `d${i}`,
+          title: `D${i}`,
+          panels: [panel(`p${i}`)],
+        })),
+      }),
+    });
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toMatch(/at most 20 dashboards/);
+    expect(onDisk().dashboards.map((d) => d.id)).toEqual(["current-analysis"]);
+  });
+
+  it("still accepts a document that fits, and still reports ordinary repairs", async () => {
+    seed(documentWith([panel("a")]));
+    const result = await run("dashboard_update", {
+      reason: "rebuilding",
+      document: JSON.stringify({
+        version: 1,
+        activeId: "current-analysis",
+        dashboards: [
+          {
+            id: "current-analysis",
+            title: "Current analysis",
+            panels: [panel("kept"), { id: "p-bad", config: {} }],
+          },
+        ],
+      }),
+    });
+    expect(result.success).toBe(true);
+    expect(JSON.stringify(result.repairs)).toContain("widget");
+    expect(onDisk().dashboards[0].panels.map((p) => p.id)).toEqual(["kept"]);
   });
 });

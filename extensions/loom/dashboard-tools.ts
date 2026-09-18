@@ -26,6 +26,8 @@ import * as path from "node:path";
 import {
   DASHBOARD_PRESETS,
   KNOWN_WIDGET_TYPES,
+  MAX_DASHBOARDS,
+  MAX_PANELS,
   dashboardFromPreset,
   parseDashboardDocument,
   validateDashboardDocument,
@@ -175,7 +177,8 @@ export function provenanceViolations(
 
     // Relative order of the protected panels, compared as a subsequence: new
     // panels may land between them, but they may not be shuffled past each
-    // other.
+    // other. Displacing a panel the user merely placed is allowed -- placing is
+    // not pinning.
     const expected = protectedPanels
       .map((p) => p.id)
       .filter((id) => target.panels.some((p) => p.id === id));
@@ -184,6 +187,39 @@ export function provenanceViolations(
       violations.push(
         `reordering the panels the user placed in "${dashboard.id}" is not the agent's to do`,
       );
+    }
+
+    // A pin, though, holds a panel's place as well as its content.
+    //
+    // The subsequence check above compares protected panels only against each
+    // other, so with one pinned panel and three agent panels it saw the same
+    // one-element sequence however far the pinned panel moved: `move_panel`
+    // pushed a pinned panel from the top to the bottom and reported success.
+    // A pin that does not survive one tool call is not much of a pin, and
+    // "keep this where I can see it" is most of why someone pins a panel.
+    //
+    // So for a pinned panel, the already-existing panels ahead of it must stay
+    // the same. New panels may still be inserted anywhere, and unprotected
+    // panels may still be removed.
+    const surviving = new Set(
+      dashboard.panels.map((p) => p.id).filter((id) => target.panels.some((q) => q.id === id)),
+    );
+    const aheadIn = (panels: { id: string }[], id: string): Set<string> => {
+      const ahead = new Set<string>();
+      for (const p of panels) {
+        if (p.id === id) break;
+        if (surviving.has(p.id)) ahead.add(p.id);
+      }
+      return ahead;
+    };
+    const sameSet = (a: Set<string>, b: Set<string>): boolean =>
+      a.size === b.size && [...a].every((id) => b.has(id));
+
+    for (const panel of protectedPanels) {
+      if (panel.pinned !== true || !surviving.has(panel.id)) continue;
+      if (!sameSet(aheadIn(dashboard.panels, panel.id), aheadIn(target.panels, panel.id))) {
+        violations.push(`panel "${panel.id}" is pinned, so the agent cannot move it`);
+      }
     }
   }
   return violations;
@@ -281,6 +317,43 @@ export function truncatedByValidation(
   const kept = count(validated);
   if (kept < count(proposed)) {
     return `that dashboard is full (${kept} panels), so adding to it would push another panel off the end`;
+  }
+  return null;
+}
+
+/**
+ * Did the model's document exceed a cap, so that saving it would drop panels?
+ *
+ * The actions path catches this by comparing the proposal with the validated
+ * result, but a whole-document replace is validated on the way in, so there is
+ * nothing un-truncated left to compare against -- `commitDashboardChange` ends
+ * up comparing the truncated document with itself and finding nothing missing.
+ * That is why prepending one panel to a full dashboard reported success and
+ * deleted the last one.
+ *
+ * Tested against the caps rather than by counting survivors, because the
+ * validator also drops genuinely malformed panels, and that is a repair to
+ * report rather than a refusal to raise.
+ */
+export function documentOverflow(documentText: string): string | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(documentText);
+  } catch {
+    return null; // Unparseable text never got this far.
+  }
+  const dashboards = (raw as { dashboards?: unknown } | null)?.dashboards;
+  if (!Array.isArray(dashboards)) return null;
+
+  if (dashboards.length > MAX_DASHBOARDS) {
+    return `Nothing was changed: a layout holds at most ${MAX_DASHBOARDS} dashboards and that one has ${dashboards.length}, so ${dashboards.length - MAX_DASHBOARDS} would have been dropped.`;
+  }
+  for (const dashboard of dashboards) {
+    const panels = (dashboard as { panels?: unknown } | null)?.panels;
+    if (!Array.isArray(panels) || panels.length <= MAX_PANELS) continue;
+    const id = (dashboard as { id?: unknown })?.id;
+    const name = typeof id === "string" ? `"${id}"` : "a dashboard";
+    return `Nothing was changed: ${name} holds at most ${MAX_PANELS} panels and that one has ${panels.length}, so ${panels.length - MAX_PANELS} would have been dropped. Remove some first.`;
   }
   return null;
 }
@@ -976,6 +1049,15 @@ export function registerDashboardTools(pi: ExtensionAPI): void {
                   .join("; ")}`,
               };
             }
+            // The caps have already been applied by the time we get here: the
+            // validator enforces them by keeping the first N and calling it a
+            // repair, so `commitDashboardChange` would compare this truncated
+            // document against itself and find nothing missing. That is why
+            // prepending one panel to a full dashboard reported success and
+            // deleted the last one -- the guard that exists for exactly this
+            // is unreachable on this path. Count what the model actually sent.
+            const overflow = documentOverflow(documentText);
+            if (overflow) return { ok: false, error: overflow };
             return {
               ok: true,
               document: parsed.document,
