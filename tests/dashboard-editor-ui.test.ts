@@ -5,7 +5,10 @@ import { WidgetRegistry } from "../app/src/renderer/dashboard/registry.js";
 import { DashboardSources } from "../app/src/renderer/dashboard/data-sources.js";
 import { createDashboardEditor } from "../app/src/renderer/dashboard/editor.js";
 import type { DashboardEditorController } from "../app/src/renderer/dashboard/editor/controller.js";
-import type { WidgetDefinition } from "../app/src/renderer/dashboard/widget-api.js";
+import type {
+  DashboardHostApi,
+  WidgetDefinition,
+} from "../app/src/renderer/dashboard/widget-api.js";
 import {
   createDefaultDashboardDocument,
   type DashboardDocument,
@@ -16,7 +19,6 @@ let registry: WidgetRegistry;
 let sources: DashboardSources;
 let editor: DashboardEditorController;
 let host: DashboardHost;
-let clock: number;
 let mounts: Record<string, number>;
 
 function stubWidget(type: string, extra: Partial<WidgetDefinition> = {}): WidgetDefinition {
@@ -56,8 +58,13 @@ function doc(...widgets: string[]): DashboardDocument {
  * for the saved layout the bootstrap reads off disk, so the settle window has
  * to still be open when it lands.
  */
-function build(document_?: DashboardDocument, settleMs = 5000): void {
-  editor = createDashboardEditor({ now: () => clock, settleMs });
+/**
+ * A host with the editor attached, starting from `document_` -- which stands in
+ * for the saved layout the bootstrap reads off disk, so it must look to the
+ * editor like the first thing to replace the default.
+ */
+function build(document_?: DashboardDocument): void {
+  editor = createDashboardEditor();
   host = new DashboardHost(root, { sources: sources.sources, registry, editor });
   if (document_) host.setDocument(document_, { persist: false });
 }
@@ -114,7 +121,6 @@ beforeEach(() => {
   root = document.getElementById("root")!;
   registry = new WidgetRegistry();
   sources = new DashboardSources();
-  clock = 1_000_000;
   mounts = {};
   vi.spyOn(console, "error").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -282,7 +288,7 @@ describe("reordering and resizing", () => {
 });
 
 describe("adding and removing panels", () => {
-  it("offers every registered widget with its description, and marks the ones in use", () => {
+  it("offers each advertisable widget with its description, and marks the ones in use", () => {
     build(doc("notebook"));
     startEditing();
     act("add-panel").click();
@@ -570,7 +576,6 @@ describe("panel settings", () => {
     expect(root.querySelector(".dash-editor-stepper output")?.textContent).toBe("2 rows");
 
     // Somebody else -- the agent, another window -- moves the panel on.
-    clock += 60_000;
     const changed = host.getDocument();
     changed.dashboards[0].panels[0].layout.rows = 5;
     changed.dashboards[0].panels[0].config = { follow: false, limit: 99 };
@@ -650,9 +655,7 @@ describe("a widget type this build does not know", () => {
 });
 
 describe("changes the editor did not make", () => {
-  it("offers Undo for one, and says who did it, even outside edit mode", () => {
-    build(doc("notebook"));
-    clock += 60_000;
+  function agentAddsAPanel(): void {
     const next = host.getDocument();
     next.dashboards[0].panels.push({
       id: "agent-panel",
@@ -663,63 +666,334 @@ describe("changes the editor did not make", () => {
       reason: "an invocation started",
     });
     host.setDocument(next, { persist: false });
+  }
 
+  it("says what happened rather than that something happened", () => {
+    build(doc("notebook"));
+    agentAddsAPanel();
     const note = root.querySelector(".dash-editor-note")!;
     expect(note.hasAttribute("hidden")).toBe(false);
-    expect(note.querySelector(".dash-editor-note-text")?.textContent).toContain(
-      "outside the editor",
+    expect(note.querySelector(".dash-editor-note-text")?.textContent).toBe(
+      "\u201cJobs\u201d was added",
     );
-
     act("undo").click();
     expect(panelOrder()).toEqual(["p0"]);
   });
 
-  it("does not offer Undo for the saved layout arriving at startup", () => {
-    build(undefined, 5000);
-    // Still inside the settle window, and what it replaces is the untouched
-    // default, so this is the file being read, not a change to anything seen.
-    clock += 100;
-    host.setDocument(doc("notebook", "jobs"), { persist: false });
+  it("does not interrupt someone who just clicked a control in a panel header", () => {
+    // A widget saving its own config reaches the document the same way an agent
+    // does. Telling the user their dashboard changed elsewhere would be false.
+    registry.register(
+      stubWidget("selfconfig", {
+        label: "Self",
+        defaultConfig: { follow: true },
+        mount: (_el, ctx) => {
+          const button = document.createElement("button");
+          button.dataset.act = "widget-toggle";
+          button.addEventListener("click", () => ctx.setConfig({ follow: !ctx.config.follow }));
+          ctx.header.append(button);
+        },
+      }),
+    );
+    build(doc("selfconfig"));
+    act("widget-toggle").click();
+
+    expect(host.getDocument().dashboards[0].panels[0].config).toEqual({ follow: false });
+    // Recorded, so it is still recoverable -- but not shouted about.
     expect(root.querySelector(".dash-editor-note")!.hasAttribute("hidden")).toBe(true);
+    startEditing();
+    expect(root.querySelector(".dash-editor-note")!.hasAttribute("hidden")).toBe(false);
+    expect(root.querySelector(".dash-editor-note-text")?.textContent).toBe(
+      "Changed \u201cSelf\u201d settings",
+    );
+    act("undo").click();
+    // Back to an empty config, which is what the panel actually stored before
+    // the toggle -- `follow: true` is the widget's default, not the document's.
+    expect(host.getDocument().dashboards[0].panels[0].config).toEqual({});
+  });
+
+  it("treats the first document to replace the default as the saved layout", () => {
+    build();
+    host.setDocument(doc("notebook", "jobs"), { persist: false });
     startEditing();
     expect(root.querySelector(".dash-editor-note")!.hasAttribute("hidden")).toBe(true);
   });
 
-  it("does offer Undo once the startup window has passed", () => {
-    build(undefined, 5000);
-    clock += 5001;
+  it("still treats it as the saved layout when the read was slow", () => {
+    // Recognised by what it replaces, not by a clock, so there is no window to
+    // miss on a cold file read.
+    build();
+    for (let i = 0; i < 50; i++) host.refresh();
+    host.setDocument(doc("notebook", "jobs"), { persist: false });
+    startEditing();
+    expect(root.querySelector(".dash-editor-note")!.hasAttribute("hidden")).toBe(true);
+  });
+
+  it("records every change after that one", () => {
+    build();
     host.setDocument(doc("notebook"), { persist: false });
+    agentAddsAPanel();
     startEditing();
     expect(root.querySelector(".dash-editor-note")!.hasAttribute("hidden")).toBe(false);
+  });
+
+  it("does not carry Undo across a switch of analysis directory", () => {
+    // What `reloadForCwd` does: put the pristine default back, then load the
+    // new workspace's layout over it. An Undo reaching across that boundary
+    // would write the previous analysis's layout into this analysis's file.
+    const persist = vi.fn();
+    editor = createDashboardEditor();
+    host = new DashboardHost(root, { sources: sources.sources, registry, editor, persist });
+    host.setDocument(doc("notebook", "jobs"), { persist: false });
+    agentAddsAPanel();
+    expect(root.querySelector(".dash-editor-note")!.hasAttribute("hidden")).toBe(false);
+
+    host.setDocument(createDefaultDashboardDocument(), { persist: false });
+    host.setDocument(
+      {
+        version: 1,
+        activeId: "other",
+        dashboards: [
+          {
+            id: "other",
+            title: "Other analysis",
+            panels: [{ id: "q0", widget: "plan", config: {}, layout: { span: 1, rows: 2 } }],
+          },
+        ],
+      },
+      { persist: false },
+    );
+
+    startEditing();
+    expect(root.querySelector(".dash-editor-note")!.hasAttribute("hidden")).toBe(true);
+    expect(maybeAct("undo")?.offsetParent ?? null).toBeNull();
+    expect(persist).not.toHaveBeenCalled();
+    expect(host.getDocument().dashboards.map((d) => d.id)).toEqual(["other"]);
+  });
+
+  it("forgets the history when the host lets it go", () => {
+    build(doc("notebook", "jobs"));
+    startEditing();
+    tool("p0", "remove").click();
+    expect(root.querySelector(".dash-editor-note")!.hasAttribute("hidden")).toBe(false);
+    host.dispose();
+    host = new DashboardHost(root, { sources: sources.sources, registry, editor });
+    host.setDocument(doc("notebook", "jobs"), { persist: false });
+    startEditing();
+    expect(root.querySelector(".dash-editor-note")!.hasAttribute("hidden")).toBe(true);
+  });
+});
+
+describe("a sheet whose target moved on underneath it", () => {
+  beforeEach(() => {
+    registry.register(
+      stubWidget("follower", { label: "Follower", defaultConfig: { follow: true } }),
+    );
+  });
+
+  it("refuses to apply JSON that no longer describes the panel", () => {
+    build(doc("follower"));
+    startEditing();
+    tool("p0", "settings").click();
+    expect((act("config-json") as HTMLTextAreaElement).value).toBe("{}");
+
+    const changed = host.getDocument();
+    changed.dashboards[0].panels[0].config = { follow: true, limit: 99 };
+    host.setDocument(changed, { persist: false });
+
+    act("config-json-apply").click();
+    expect(root.querySelector(".dash-editor-error")?.textContent).toContain(
+      "changed somewhere else",
+    );
+    // The value that was not in the box is still in the document.
+    expect(host.getDocument().dashboards[0].panels[0].config).toEqual({
+      follow: true,
+      limit: 99,
+    });
+    // And the box now shows what is really there, so a second Apply is safe.
+    expect((act("config-json") as HTMLTextAreaElement).value).toContain("99");
+    act("config-json-apply").click();
+    expect(host.getDocument().dashboards[0].panels[0].config).toEqual({
+      follow: true,
+      limit: 99,
+    });
+  });
+
+  it("does not edit a panel on a dashboard that stopped being the active one", () => {
+    build({
+      version: 1,
+      activeId: "one",
+      dashboards: [
+        {
+          id: "one",
+          title: "One",
+          panels: [{ id: "p0", widget: "notebook", config: {}, layout: { span: 1, rows: 2 } }],
+        },
+        {
+          id: "two",
+          title: "Two",
+          panels: [{ id: "q0", widget: "jobs", config: {}, layout: { span: 1, rows: 2 } }],
+        },
+      ],
+    });
+    startEditing();
+    tool("p0", "settings").click();
+
+    const switched = host.getDocument();
+    switched.activeId = "two";
+    host.setDocument(switched, { persist: false });
+
+    act("panel-taller").click();
+    expect(host.getDocument().dashboards[0].panels[0].layout.rows).toBe(2);
+    expect(maybeAct("panel-taller")).toBeNull();
+  });
+
+  it("makes the add-panel picker ask again rather than filling a dashboard you left", async () => {
+    build({
+      version: 1,
+      activeId: "one",
+      dashboards: [
+        {
+          id: "one",
+          title: "One",
+          panels: [{ id: "p0", widget: "notebook", config: {}, layout: { span: 1, rows: 2 } }],
+        },
+        { id: "two", title: "Two", panels: [] },
+      ],
+    });
+    startEditing();
+    act("add-panel").click();
+
+    const switched = host.getDocument();
+    switched.activeId = "two";
+    host.setDocument(switched, { persist: false });
+    await flush();
+
+    act("add-plan").click();
+    expect(live()).toContain("different dashboard");
+    expect(host.getDocument().dashboards[0].panels).toHaveLength(1);
+    expect(host.getDocument().dashboards[1].panels).toHaveLength(0);
+  });
+
+  it("clears an error once something in the same sheet works", () => {
+    registry.register(
+      stubWidget("counted", { label: "Counted", defaultConfig: { follow: true, limit: 10 } }),
+    );
+    build(doc("counted"));
+    startEditing();
+    tool("p0", "settings").click();
+    const limit = act("config-limit") as HTMLInputElement;
+    limit.value = "";
+    limit.dispatchEvent(new Event("change"));
+    expect(root.querySelector(".dash-editor-error")).not.toBeNull();
+
+    act("panel-full").click();
+    expect(root.querySelector(".dash-editor-error")).toBeNull();
   });
 });
 
 describe("what leaves the editor", () => {
-  it("validates before every write, and persists through the host", () => {
-    const persist = vi.fn();
-    editor = createDashboardEditor({ now: () => clock, settleMs: 5000 });
-    host = new DashboardHost(root, { sources: sources.sources, registry, editor, persist });
-    host.setDocument(doc("notebook"), { persist: false });
-    const setDocument = vi.spyOn(host, "setDocument");
-    startEditing();
+  /** The narrowest thing the editor can be attached to. */
+  function fakeHost(document_: DashboardDocument): {
+    api: DashboardHostApi;
+    written: DashboardDocument[];
+  } {
+    const written: DashboardDocument[] = [];
+    let current = document_;
+    const api: DashboardHostApi = {
+      getDocument: () => JSON.parse(JSON.stringify(current)) as DashboardDocument,
+      setDocument: (next) => {
+        written.push(next);
+        current = next;
+        return [];
+      },
+      getActiveDashboard: () => current.dashboards.find((d) => d.id === current.activeId) ?? null,
+      setActiveDashboardId: () => {},
+      listWidgets: () => registry.list(),
+      refresh: () => {},
+    };
+    return { api, written };
+  }
 
-    tool("p0", "toggle-width").click();
-    expect(setDocument).toHaveBeenCalledTimes(1);
-    const written = setDocument.mock.calls[0][0];
-    // The editor hands over an already-normalized document, so the host's own
-    // validation finds nothing to repair.
-    expect(written.version).toBe(1);
-    expect(persist).toHaveBeenCalledTimes(1);
+  it("normalizes what it hands over, even when the host's document was not", () => {
+    // `reason` is capped at 280 characters by the validator and copied verbatim
+    // by every operation, so it only comes back trimmed if `apply` validated.
+    const { api, written } = fakeHost({
+      version: 1,
+      activeId: "d",
+      dashboards: [
+        {
+          id: "d",
+          title: "D",
+          panels: [
+            { id: "p0", widget: "notebook", config: {}, layout: { span: 1, rows: 2 } },
+            {
+              id: "p1",
+              widget: "jobs",
+              config: {},
+              layout: { span: 1, rows: 2 },
+              reason: "x".repeat(400),
+            },
+          ],
+        },
+      ],
+    });
+    const toolbar = document.createElement("div");
+    root.append(toolbar);
+    const lone = createDashboardEditor();
+    lone.attach({ host: api, toolbar });
+
+    const panel = api.getActiveDashboard()!.panels[0];
+    const section = document.createElement("section");
+    section.className = "dash-panel";
+    section.dataset.panelId = panel.id;
+    const tools = document.createElement("div");
+    tools.className = "dash-panel-tools";
+    section.append(tools);
+    root.append(section);
+    lone.decoratePanel(panel, tools, { host: api, toolbar });
+    tools.querySelector<HTMLButtonElement>('[data-act="toggle-width"]')!.click();
+
+    expect(written).toHaveLength(1);
+    expect(written[0].dashboards[0].panels[1].reason).toHaveLength(280);
+    lone.detach();
   });
 
-  it("keeps the toolbar in step when the host is emptied of panels", () => {
+  it("does not write, or spend an Undo, on a change that changes nothing", () => {
+    const persist = vi.fn();
+    editor = createDashboardEditor();
+    host = new DashboardHost(root, { sources: sources.sources, registry, editor, persist });
+    startEditing();
+    act("reset").click();
+    act("confirm-go").click();
+    expect(persist).not.toHaveBeenCalled();
+    expect(root.querySelector(".dash-editor-note")!.hasAttribute("hidden")).toBe(true);
+  });
+
+  it("notices an emptied dashboard through the grid, not through a panel", async () => {
     build(doc("notebook"));
     startEditing();
-    tool("p0", "remove").click();
+    // Emptied from outside, so no panel is decorated and only the grid watcher
+    // can tell the toolbar its buttons are out of date.
+    host.setDocument(
+      { version: 1, activeId: "d", dashboards: [{ id: "d", title: "Main", panels: [] }] },
+      { persist: false },
+    );
+    await flush();
     expect(root.querySelector(".empty-state")).not.toBeNull();
-    expect((act("add-panel") as HTMLButtonElement).disabled).toBe(false);
+    expect(root.querySelector(".dash-editor-note")!.hasAttribute("hidden")).toBe(false);
     act("undo").click();
     expect(panelOrder()).toEqual(["p0"]);
+  });
+
+  it("keeps focus on a control after deleting down to one dashboard", () => {
+    build();
+    startEditing();
+    act("duplicate-dashboard").click();
+    act("delete-dashboard").click();
+    act("confirm-go").click();
+    expect((act("delete-dashboard") as HTMLButtonElement).disabled).toBe(true);
+    expect(document.activeElement).toBe(act("toggle-edit"));
   });
 
   it("fills the dashboard list again when the same editor is attached to a new host", () => {

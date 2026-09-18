@@ -1,13 +1,11 @@
 /**
  * The editor's stylesheet, as text, injected once when the editor attaches.
  *
- * It wants to be `editor/editor.css` next to a `<link>` in `index.html` beside
- * the existing `dashboard/dashboard.css`, and that is what the report asks for.
- * Both of those files belong to the dashboard foundation, and a wave of workers
- * is building on the same base, so shipping the rules with the module that owns
- * them keeps the editor to files nobody else is editing. The page's CSP allows
- * `style-src 'self' 'unsafe-inline'`, and the element is idempotent, so a second
- * attach does not add a second copy.
+ * This belongs in `editor/editor.css` with a `<link>` in `index.html` next to
+ * the existing `dashboard/dashboard.css`. It lives here instead so that adding
+ * the editor needed no edit to `index.html`, which is shared by both shells and
+ * by every other pane. The page's CSP allows `style-src 'self' 'unsafe-inline'`,
+ * and the element is keyed by id, so a second attach does not add a second copy.
  *
  * Every custom property used here is defined in `styles.css` already, except
  * `--dash-text-meta`, which `dashboard.css` defines only inside `.dash-panel`
@@ -142,7 +140,8 @@ export const EDITOR_STYLES = `
   color: var(--text);
 }
 
-/* The last thing that happened, in words, next to the control that reverses it. */
+/* What Undo would reverse, in words, next to the control that does it. Not
+   necessarily the last thing that happened: moving and resizing do not queue. */
 .dash-editor-note {
   display: flex;
   align-items: center;

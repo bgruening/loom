@@ -53,7 +53,8 @@ import {
   resizePanel,
   selectDashboard,
 } from "./operations.js";
-import { UndoStack, type UndoSource } from "./undo-stack.js";
+import { UndoStack } from "./undo-stack.js";
+import { describeDocumentChange } from "./change-summary.js";
 import {
   applyFieldValue,
   describeConfigFields,
@@ -66,13 +67,6 @@ import { EDITOR_STYLES, EDITOR_STYLE_ELEMENT_ID } from "./styles.js";
 export interface DashboardEditorOptions {
   /** How many changes back Undo reaches. */
   undoDepth?: number;
-  /** Clock, injectable so the startup-adoption window is testable. */
-  now?: () => number;
-  /**
-   * How long after the dashboard starts a change is still treated as the saved
-   * layout arriving from disk rather than something to offer Undo for.
-   */
-  settleMs?: number;
 }
 
 type SheetKind = "add-panel" | "new-dashboard" | "rename-dashboard" | "settings" | "confirm";
@@ -89,9 +83,6 @@ interface PendingFocus {
   /** `data-act` of the tool button to return to, or the panel itself. */
   act?: string;
 }
-
-const DEFAULT_UNDO_DEPTH = 20;
-const DEFAULT_SETTLE_MS = 5000;
 
 const GLYPH_UP = "↑";
 const GLYPH_DOWN = "↓";
@@ -145,11 +136,16 @@ export class DashboardEditorController implements DashboardEditor {
   private editing = false;
 
   private undo: UndoStack<DashboardDocument>;
-  private now: () => number;
-  private settleMs: number;
-  private attachedAt = 0;
   /** What the editor last saw, so a change by anybody else can be noticed. */
   private lastKnown: DashboardDocument | null = null;
+  /**
+   * Whether anything has yet replaced the document the host starts with. The
+   * first thing that does is the saved layout arriving from disk, which is not
+   * a change to anything the user has seen.
+   */
+  private sawFirstExternalChange = false;
+  /** The validated default, for comparison. Cached; it never varies. */
+  private pristine: DashboardDocument | null = null;
 
   private panels = new Map<string, HTMLElement>();
   private pendingFocus: PendingFocus | null = null;
@@ -178,9 +174,7 @@ export class DashboardEditorController implements DashboardEditor {
   private sheetError = "";
 
   constructor(opts: DashboardEditorOptions = {}) {
-    this.undo = new UndoStack<DashboardDocument>(opts.undoDepth ?? DEFAULT_UNDO_DEPTH);
-    this.now = opts.now ?? ((): number => Date.now());
-    this.settleMs = opts.settleMs ?? DEFAULT_SETTLE_MS;
+    this.undo = new UndoStack<DashboardDocument>(opts.undoDepth);
   }
 
   // -- Lifecycle --------------------------------------------------------------
@@ -188,7 +182,7 @@ export class DashboardEditorController implements DashboardEditor {
   attach(ctx: DashboardEditorContext): void {
     this.ctx = ctx;
     this.root = ctx.toolbar.parentElement;
-    this.attachedAt = this.now();
+    this.sawFirstExternalChange = false;
     this.lastKnown = ctx.host.getDocument();
     injectStyles();
     this.buildToolbar(ctx.toolbar);
@@ -393,7 +387,7 @@ export class DashboardEditorController implements DashboardEditor {
     this.pendingFocus = focus;
     // Moving is its own opposite, so it does not spend an Undo slot; the same
     // control in the other direction puts it back.
-    this.apply(next, `Moved ${quote(name)}`, { undoable: false });
+    this.apply(next, null);
     this.announce(`${name} moved to position ${position} of ${total}`);
   }
 
@@ -412,7 +406,7 @@ export class DashboardEditorController implements DashboardEditor {
       return;
     }
     this.pendingFocus = focus;
-    this.apply(next, `Resized ${quote(name)}`, { undoable: false });
+    this.apply(next, null);
     this.announce(`${name} is now ${span === 2 ? "full" : "half"} width`);
   }
 
@@ -437,7 +431,7 @@ export class DashboardEditorController implements DashboardEditor {
     const dashboard = next.dashboards.find((d) => d.id === dashboardId);
     const applied = dashboard?.panels.find((p) => p.id === panel.id)?.layout.rows ?? rows;
     this.pendingFocus = focus;
-    this.apply(next, `Resized ${quote(name)}`, { undoable: false });
+    this.apply(next, null);
     this.announce(`${name} is now ${applied} row${applied === 1 ? "" : "s"} tall`);
   }
 
@@ -556,7 +550,10 @@ export class DashboardEditorController implements DashboardEditor {
     const doc = this.document();
     if (!doc) return;
 
-    const signature = doc.dashboards.map((d) => `${d.id} ${d.title}`).join("");
+    // JSON rather than a delimiter: a title can contain anything, and a
+    // separator byte in the source is invisible in an editor and turns the
+    // whole file binary to `grep`.
+    const signature = JSON.stringify(doc.dashboards.map((d) => [d.id, d.title]));
     if (signature !== this.selectSignature) {
       this.selectSignature = signature;
       this.select.textContent = "";
@@ -598,7 +595,7 @@ export class DashboardEditorController implements DashboardEditor {
     const next = selectDashboard(doc, id);
     if (next === doc) return;
     // Switching is navigation, not an edit, so it does not spend an Undo slot.
-    this.apply(next, "Switched dashboard", { undoable: false });
+    this.apply(next, null);
     const title = next.dashboards.find((d) => d.id === id)?.title ?? id;
     this.announce(`Showing ${title}`);
   }
@@ -639,6 +636,7 @@ export class DashboardEditorController implements DashboardEditor {
   private closeSheet(opts: { restoreFocus?: boolean } = {}): void {
     if (!this.sheetKind) return;
     const opener = this.sheetOpener;
+    const panelId = this.sheetPanelId;
     this.sheetKind = null;
     this.sheetPanelId = null;
     this.sheetConfirm = null;
@@ -646,7 +644,16 @@ export class DashboardEditorController implements DashboardEditor {
     this.sheetError = "";
     this.sheetEl.textContent = "";
     this.sheetEl.hidden = true;
-    if (opts.restoreFocus !== false && opener?.isConnected) opener.focus();
+    if (opts.restoreFocus === false) return;
+    // A settings sheet is opened from a button in a panel header, and the host
+    // destroys those on every render -- so after any edit made inside the
+    // sheet, the thing that opened it is gone.
+    if (opener?.isConnected) {
+      opener.focus();
+      return;
+    }
+    const panel = panelId ? this.panels.get(panelId) : null;
+    (panel ?? this.editBtn).focus();
   }
 
   private renderSheet(): void {
@@ -674,6 +681,10 @@ export class DashboardEditorController implements DashboardEditor {
         this.renderConfirmSheet();
         break;
     }
+    // One-shot: a later successful action in the same sheet re-renders without
+    // an error and the message goes, instead of lingering under a control that
+    // has since worked.
+    this.sheetError = "";
     this.restoreSheetFocus();
   }
 
@@ -702,7 +713,10 @@ export class DashboardEditorController implements DashboardEditor {
   private renderAddPanelSheet(): void {
     const doc = this.document();
     const active = doc ? doc.dashboards.find((d) => d.id === doc.activeId) : undefined;
-    if (!active) return;
+    if (!active) {
+      this.closeSheet({ restoreFocus: false });
+      return;
+    }
     this.sheetEl.append(this.sheetHead("Add a panel"));
 
     // The registry is the set of widgets that can be DRAWN; `KNOWN_WIDGET_TYPES`
@@ -730,7 +744,17 @@ export class DashboardEditorController implements DashboardEditor {
       card.append(el("b", undefined, widget.label));
       if (widget.description) card.append(el("small", undefined, widget.description));
       if (used.has(widget.type)) card.append(el("em", undefined, "Already on this dashboard"));
-      card.addEventListener("click", () => this.addPanel(active.id, widget));
+      card.addEventListener("click", () => {
+        const now = this.document();
+        if (!now || now.activeId !== active.id) {
+          // The dashboard moved on while the picker was open; adding to the one
+          // that is no longer on screen would look like nothing happened.
+          this.announce("You are looking at a different dashboard now. Pick again.");
+          this.renderSheet();
+          return;
+        }
+        this.addPanel(active.id, widget);
+      });
       gallery.append(card);
     }
     this.sheetEl.append(gallery);
@@ -739,9 +763,15 @@ export class DashboardEditorController implements DashboardEditor {
   private addPanel(dashboardId: string, widget: WidgetDefinition): void {
     const doc = this.document();
     if (!doc) return;
+    const target = doc.dashboards.find((d) => d.id === dashboardId);
     const next = addPanel(doc, dashboardId, widget.type, { addedBy: "user" });
     if (next === doc) {
-      this.announce(`This dashboard already holds the most panels it can (${MAX_PANELS}).`);
+      this.announce(
+        !target
+          ? "That dashboard is no longer here."
+          : `This dashboard already holds the most panels it can (${MAX_PANELS}).`,
+      );
+      this.renderSheet();
       return;
     }
     const dashboard = next.dashboards.find((d) => d.id === dashboardId);
@@ -789,7 +819,11 @@ export class DashboardEditorController implements DashboardEditor {
     if (!doc) return;
     const next = createDashboard(doc, { title: title.trim() || undefined, presetId });
     if (next === doc) {
-      this.announce(`You already have the most dashboards this file holds (${MAX_DASHBOARDS}).`);
+      this.announce(
+        doc.dashboards.length >= MAX_DASHBOARDS
+          ? `You already have the most dashboards this file holds (${MAX_DASHBOARDS}).`
+          : "That template is not in this build.",
+      );
       return;
     }
     const created = next.dashboards.find((d) => d.id === next.activeId);
@@ -806,7 +840,10 @@ export class DashboardEditorController implements DashboardEditor {
 
   private renderRenameDashboardSheet(): void {
     const active = this.ctx?.host.getActiveDashboard();
-    if (!active) return;
+    if (!active) {
+      this.closeSheet({ restoreFocus: false });
+      return;
+    }
     this.sheetEl.append(this.sheetHead("Rename this dashboard"));
 
     const field = el("label", "dash-editor-field");
@@ -886,7 +923,8 @@ export class DashboardEditorController implements DashboardEditor {
         this.closeSheet({ restoreFocus: false });
         this.apply(next, `Deleted dashboard ${quote(active.title)}`);
         this.announce(`${active.title} deleted`);
-        this.deleteBtn.focus();
+        // Deleting down to one dashboard disables the button that was pressed.
+        (this.deleteBtn.disabled ? this.editBtn : this.deleteBtn).focus();
       },
     };
     this.openSheet("confirm", this.deleteBtn);
@@ -914,7 +952,10 @@ export class DashboardEditorController implements DashboardEditor {
 
   private renderConfirmSheet(): void {
     const spec = this.sheetConfirm;
-    if (!spec) return;
+    if (!spec) {
+      this.closeSheet({ restoreFocus: false });
+      return;
+    }
     this.sheetEl.append(this.sheetHead(spec.title));
     this.sheetEl.append(el("p", "dash-editor-sheet-detail", spec.detail));
     const actions = el("div", "dash-editor-actions");
@@ -955,7 +996,11 @@ export class DashboardEditorController implements DashboardEditor {
    */
   private currentPanel(dashboardId: string, panelId: string): DashboardPanel | null {
     const doc = this.document();
-    const dashboard = doc?.dashboards.find((d) => d.id === dashboardId);
+    // Null when that dashboard is no longer the one on screen, so the caller
+    // re-renders the sheet (which closes it) rather than making an edit the
+    // user cannot see on a dashboard they have left.
+    if (!doc || doc.activeId !== dashboardId) return null;
+    const dashboard = doc.dashboards.find((d) => d.id === dashboardId);
     return dashboard?.panels.find((p) => p.id === panelId) ?? null;
   }
 
@@ -1130,22 +1175,39 @@ export class DashboardEditorController implements DashboardEditor {
     const jsonField = el("label", "dash-editor-field");
     const area = el("textarea");
     area.dataset.act = "config-json";
-    area.value = formatConfigJson(panel.config);
+    // What the box was seeded with, so a click on Apply can tell "the user
+    // rewrote this" from "the document moved on underneath it".
+    const seeded = formatConfigJson(panel.config);
+    area.value = seeded;
     area.setAttribute("aria-label", "Settings as JSON");
     area.spellcheck = false;
     jsonField.append(area);
     details.append(jsonField);
     const apply = button("dash-editor-btn", "Apply JSON", "config-json-apply");
     apply.addEventListener("click", () => {
-      const parsed = parseConfigJson(area.value);
-      if (!parsed.ok) {
-        this.sheetError = parsed.error;
-        this.sheetFocus = "config-json";
+      this.sheetFocus = "config-json";
+      const now = this.currentPanel(dashboardId, panel.id);
+      if (!now) {
         this.renderSheet();
         return;
       }
-      this.sheetFocus = "config-json";
-      this.applyConfig(dashboardId, panel, parsed.config);
+      if (formatConfigJson(now.config) !== seeded) {
+        // Applying the box now would quietly drop whatever was added to the
+        // config since it was drawn, which is the one thing a text box full of
+        // JSON must not do.
+        this.sheetError =
+          "These settings changed somewhere else while this was open. " +
+          "Here they are as they stand now -- check them and apply again.";
+        this.renderSheet();
+        return;
+      }
+      const parsed = parseConfigJson(area.value);
+      if (!parsed.ok) {
+        this.sheetError = parsed.error;
+        this.renderSheet();
+        return;
+      }
+      this.applyConfig(dashboardId, now, parsed.config);
     });
     details.append(apply);
     if (this.sheetError) details.open = true;
@@ -1214,8 +1276,10 @@ export class DashboardEditorController implements DashboardEditor {
   /**
    * Somebody else -- the brain, a widget's own `setConfig`, another window
    * whose save this one adopted -- changed the document. Record it so the user
-   * has a way back, but ignore the saved layout arriving from disk at startup,
-   * which is not a change to anything the user has seen.
+   * has a way back, with a sentence saying what actually happened.
+   *
+   * Two things are deliberately not recorded, and both are about the document
+   * being replaced wholesale rather than edited.
    */
   private syncExternalChange(): void {
     const current = this.document();
@@ -1223,13 +1287,39 @@ export class DashboardEditorController implements DashboardEditor {
     if (!current) return;
     this.lastKnown = current;
     if (!before || sameDocument(before, current)) return;
-    if (this.isStartupAdoption(before)) return;
-    this.undo.push("The dashboard was changed outside the editor", before, "external");
+
+    // The shell puts the pristine default back when the analysis directory
+    // changes, and then loads that workspace's layout over it. An Undo that
+    // reached across that boundary would write the previous analysis's layout
+    // into the new analysis's file, so the history starts again here.
+    if (this.isPristineDefault(current)) {
+      this.undo.clear();
+      this.sawFirstExternalChange = false;
+      return;
+    }
+
+    // The saved layout arriving from disk is not a change to anything the user
+    // has seen -- it is the first thing they see. Recognised by what it
+    // replaces rather than by a clock, so a slow read is still the first read.
+    const firstChangeFromDefault = !this.sawFirstExternalChange && this.isPristineDefault(before);
+    this.sawFirstExternalChange = true;
+    if (firstChangeFromDefault) return;
+
+    const change = describeDocumentChange(before, current, (panel) => this.panelName(panel));
+    this.undo.push(change.label, before, change.kind === "config" ? "external-config" : "external");
   }
 
-  private isStartupAdoption(before: DashboardDocument): boolean {
-    if (this.now() - this.attachedAt >= this.settleMs) return false;
-    return sameDocument(before, createDefaultDashboardDocument());
+  /**
+   * Is this the document a workspace with no saved layout starts with? Compared
+   * against the validated default, not the literal: `sameDocument` is a text
+   * comparison and only the validator guarantees the key order.
+   */
+  private isPristineDefault(doc: DashboardDocument): boolean {
+    if (!this.pristine) {
+      const result = validateDashboardDocument(createDefaultDashboardDocument());
+      this.pristine = result.ok ? result.document : createDefaultDashboardDocument();
+    }
+    return sameDocument(doc, this.pristine);
   }
 
   // -- Plumbing ---------------------------------------------------------------
@@ -1254,15 +1344,11 @@ export class DashboardEditorController implements DashboardEditor {
   }
 
   /**
-   * The one place a document change leaves the editor. It validates first, as
-   * the brief requires, so a bug here becomes a refused edit rather than a
-   * layout file the next build cannot read.
+   * The one place a document change leaves the editor. It validates first, so a
+   * bug here becomes a refused edit rather than a layout file the next build
+   * cannot read, and so the host never has repairs to make.
    */
-  private apply(
-    next: DashboardDocument,
-    label: string,
-    opts: { undoable?: boolean; source?: UndoSource } = {},
-  ): boolean {
+  private apply(next: DashboardDocument, label: string | null): boolean {
     const host = this.ctx?.host;
     const current = this.document();
     if (!host || !current) return false;
@@ -1276,7 +1362,17 @@ export class DashboardEditorController implements DashboardEditor {
     if (result.problems.length > 0) {
       console.warn("[dashboard] an editor change needed repairs:", result.problems);
     }
-    if (opts.undoable !== false) this.undo.push(label, current, opts.source ?? "editor");
+    // Validation can normalize a change into no change at all, and so can an
+    // operation that rebuilt an identical document. Writing it would spend an
+    // Undo slot and a disk write on nothing.
+    if (sameDocument(result.document, current)) {
+      this.pendingFocus = null;
+      return false;
+    }
+    // A null label means the change is its own opposite -- move, resize, switch
+    // -- and does not queue: the same control in the other direction puts it
+    // back, and queueing would push the removal the user does want out of reach.
+    if (label !== null) this.undo.push(label, current, "editor");
 
     // Before the write, not after: `setDocument` renders synchronously and the
     // render calls back into `syncExternalChange`, which would otherwise see

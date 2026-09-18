@@ -24,7 +24,13 @@ export interface UndoEntry<T> {
   source: UndoSource;
 }
 
-export type UndoSource = "editor" | "external";
+/**
+ * Who made the change. `external-config` is a widget saving its own config --
+ * almost always the person's own click on a control in a panel header -- and is
+ * kept apart from `external` so that it does not interrupt them with a notice
+ * about something they just did.
+ */
+export type UndoSource = "editor" | "external" | "external-config";
 
 export const DEFAULT_UNDO_DEPTH = 20;
 

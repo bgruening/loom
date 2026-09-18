@@ -34,8 +34,9 @@ export const MAX_PANEL_ROWS = 6;
 /**
  * The contract truncates past these and reports it as a repair. The editor
  * refuses instead, so the user is told rather than silently losing the panel
- * they just added. Kept in step with MAX_DASHBOARDS / MAX_PANELS there, which
- * are module-private -- see the report's NEEDS FROM HOST.
+ * they just added. These mirror MAX_DASHBOARDS / MAX_PANELS in
+ * `shared/dashboard-contract.js`, which does not export them; if it ever does,
+ * import them from there and delete these.
  */
 export const MAX_DASHBOARDS = 20;
 export const MAX_PANELS = 40;
@@ -276,7 +277,9 @@ export function duplicateDashboard(doc: DashboardDocument, dashboardId: string):
     title: `${original.title} (copy)`.slice(0, 200),
     // Panel ids only have to be unique inside their own dashboard, so the copy
     // keeps them: a config write is addressed by dashboard id and panel id.
-    panels: original.panels,
+    // The array itself is copied, or the two dashboards would share it and an
+    // edit to one would show up in the other.
+    panels: copy(original.panels),
   };
   next.dashboards.splice(index + 1, 0, clone);
   next.activeId = clone.id;

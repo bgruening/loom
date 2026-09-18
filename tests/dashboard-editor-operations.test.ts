@@ -308,6 +308,14 @@ describe("dashboards", () => {
     expect(ids(next, "a-copy")).toEqual(ids(doc(), "a"));
   });
 
+  it("gives the copy its own panels array, so editing one does not change the other", () => {
+    const next = duplicateDashboard(doc(), "a");
+    expect(next.dashboards[1].panels).not.toBe(next.dashboards[0].panels);
+    const edited = removePanel(next, "a-copy", "p1");
+    expect(ids(edited, "a")).toEqual(["p1", "p2", "p-future"]);
+    expect(ids(edited, "a-copy")).toEqual(["p2", "p-future"]);
+  });
+
   it("renames, and ignores a blank or unchanged name", () => {
     const next = renameDashboard(doc(), "a", "  Sequencing  ");
     expect(next.dashboards[0].title).toBe("Sequencing");
