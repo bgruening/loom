@@ -429,6 +429,69 @@ describe("redaction", () => {
     expect(JSON.stringify(out)).not.toContain("user:pass");
   });
 
+  it("covers the abbreviations a payload actually spells", () => {
+    const out = redactForDisplay({
+      auth: "Basic abc",
+      bearer: "b3ar3r",
+      cred: "cr3d",
+      pwd: "pw0rd",
+      passwd: "pa55wd",
+      cookie: "c00kie",
+      sessionId: "s3ss10n",
+      signature: "s1gnature",
+      "x-amz-security-token": "s3curity",
+    });
+    const text = JSON.stringify(out);
+    for (const leaked of [
+      "Basic abc",
+      "b3ar3r",
+      "cr3d",
+      "pw0rd",
+      "pa55wd",
+      "c00kie",
+      "s3ss10n",
+      "s1gnature",
+      "s3curity",
+    ]) {
+      expect(text, leaked).not.toContain(leaked);
+    }
+  });
+
+  it("hides what a credential flag introduces in a command recorded as a token list", () => {
+    // An array element has no key for the fence to read, so a command line
+    // recorded as argv used to carry the key that the same command recorded as
+    // a string would have lost.
+    const out = redactForDisplay({
+      argv: ["galaxy-cli", "--api-key", "sup3rs3cret", "upload", "reads.fq"],
+      curl: ["curl", "-H", "Authorization: Bearer t0kenv4lue", "https://usegalaxy.org"],
+      inline: ["--token=t0keninline"],
+    });
+    const text = JSON.stringify(out);
+    expect(text).not.toContain("sup3rs3cret");
+    expect(text).not.toContain("t0kenv4lue");
+    expect(text).not.toContain("t0keninline");
+    // The shape of the command still reads, which is the point of showing it.
+    expect(text).toContain("--api-key");
+    expect(text).toContain("upload");
+    expect(text).toContain("reads.fq");
+    expect(text).toContain("https://usegalaxy.org");
+  });
+
+  it("does not blank a value because a sentence next to it mentions a key", () => {
+    const out = redactForDisplay({
+      notes: ["the api key rotated last week", "reads.fq", "https://host:8080/galaxy"],
+    });
+    const text = JSON.stringify(out);
+    expect(text).toContain("reads.fq");
+    expect(text).toContain("https://host:8080/galaxy");
+  });
+
+  it("caps a key, because a payload can use a whole value as one", () => {
+    const out = redactForDisplay({ ["z".repeat(500)]: 1 }) as Record<string, unknown>;
+    const [key] = Object.keys(out);
+    expect(key.length).toBeLessThanOrEqual(81);
+  });
+
   it("caps a huge string", () => {
     expect(truncate("x".repeat(2_000_000), 400).length).toBe(401);
   });

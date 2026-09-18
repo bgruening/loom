@@ -14,13 +14,17 @@
  *    A payload carries tool arguments and tool output, which is to say text a
  *    model wrote and text a command printed.
  *  - **A key whose NAME looks like a credential keeps its name and loses its
- *    value.** That is the whole of the fence, and it is worth being precise
- *    about what it does not do: it does not scan values, so a key pasted into
- *    a command string or an `Authorization:` header inside an argument walks
- *    straight through it. The brain redacts before it writes (`redactArgs`,
- *    `redactSecrets`) and has the same shape, so this is a second fence on the
- *    same axis, not a wider one. Second fences are worth having anyway when the
- *    first one lives in a different process.
+ *    value.** That is most of the fence, and the rest of it is a credential
+ *    name inside a token list hiding what it introduces, because a command
+ *    line recorded as argv has no keys to read. It is worth being precise
+ *    about what still walks through: it does not scan values, so a key pasted
+ *    into the middle of a command string leaks, and a payload that uses a
+ *    whole secret as a KEY shows that key by name -- a Galaxy job id has the
+ *    same shape, so hiding it would cost more than it buys. The brain redacts
+ *    before it writes (`redactArgs`, `redactSecrets`) and has the same shape,
+ *    so this is a second fence on the same axis, not a wider one. Second
+ *    fences are worth having anyway when the first one lives in a different
+ *    process.
  */
 
 import type { ActivityEvent, WidgetDefinition, WidgetDispose } from "../widget-api.js";
@@ -50,13 +54,51 @@ const STICK_THRESHOLD_PX = 24;
 const EXPANDED_MAX = 500;
 
 /**
- * Deliberately broader than it needs to be, and one word broader than the
- * brain's own list in `activity-hooks.ts` (`credential`, which none of the
- * other stems catch). Over-redacting a field name costs a reader one click
- * into Galaxy; under-redacting one puts a key in a file people share.
+ * Deliberately broader than it needs to be, and broader than the brain's own
+ * list in `activity-hooks.ts`. Over-redacting a field name costs a reader one
+ * click into Galaxy; under-redacting one puts a key in a file people share.
+ *
+ * `auth` and `cred` rather than `authorization` and `credential`: the two
+ * commonest abbreviations are what a payload actually spells, and the long
+ * forms are stems of them anyway. The cost is that `author` is hidden too,
+ * which is the trade above taken deliberately rather than by accident.
  */
-const CREDENTIAL_KEY = /key|token|secret|password|authorization|credential/i;
+const CREDENTIAL_KEY =
+  /key|token|secret|passw|pwd|auth|bearer|cred|cookie|session|signature|security/i;
 const HIDDEN = "[hidden]";
+
+/** A key is a name. Anything longer than this is a value being used as one. */
+const DETAIL_KEY_MAX = 80;
+
+/**
+ * A `--api-key`-shaped token: an option name, a header name, an environment
+ * variable, and nothing that could be a sentence.
+ */
+const TOKEN_NAME = /^-{0,2}[A-Za-z0-9_.-]{1,64}$/;
+
+/**
+ * Hide what a credential-shaped name introduces inside a token list.
+ *
+ * A command line recorded as `["--api-key", "abc123"]` hands the fence no key
+ * to read, so the same secret that `{api_key: "abc123"}` would have lost walks
+ * straight through -- and a tool-start or exec-guard payload recording argv is
+ * exactly that shape. Either half of the pair is covered: `--api-key abc123`
+ * as two elements, and `--api-key=abc123` or `Authorization: Bearer abc123` as
+ * one. The name has to look like a name, so a sentence that happens to contain
+ * the word "secret" does not blank whatever follows it.
+ */
+function redactToken(token: string): { text: string; hideNext: boolean } {
+  const at = token.search(/[=:]/);
+  if (at > 0) {
+    const name = token.slice(0, at);
+    if (TOKEN_NAME.test(name) && CREDENTIAL_KEY.test(name)) {
+      return { text: `${token.slice(0, at + 1)}${HIDDEN}`, hideNext: false };
+    }
+  } else if (at < 0 && TOKEN_NAME.test(token) && CREDENTIAL_KEY.test(token)) {
+    return { text: truncate(token, DETAIL_STRING_MAX), hideNext: true };
+  }
+  return { text: truncate(token, DETAIL_STRING_MAX), hideNext: false };
+}
 
 const EMPTY_TEXT =
   "Nothing yet. Every step the agent takes -- a command, a Galaxy run finishing, a decision it " +
@@ -442,7 +484,24 @@ export function redactForDisplay(value: unknown, depth = 0, seen = new WeakSet<o
   seen.add(obj);
   try {
     if (Array.isArray(obj)) {
-      return obj.slice(0, DETAIL_KEYS_MAX).map((v) => redactForDisplay(v, depth + 1, seen));
+      const items: unknown[] = [];
+      let hideNext = false;
+      for (const v of obj.slice(0, DETAIL_KEYS_MAX)) {
+        if (typeof v !== "string") {
+          hideNext = false;
+          items.push(redactForDisplay(v, depth + 1, seen));
+          continue;
+        }
+        if (hideNext) {
+          hideNext = false;
+          items.push(HIDDEN);
+          continue;
+        }
+        const token = redactToken(v);
+        hideNext = token.hideNext;
+        items.push(token.text);
+      }
+      return items;
     }
     const out: Record<string, unknown> = {};
     // defineProperty rather than assignment: `JSON.parse` makes `__proto__` an
@@ -462,7 +521,14 @@ export function redactForDisplay(value: unknown, depth = 0, seen = new WeakSet<o
         put("[truncated]", "more keys not shown");
         break;
       }
-      put(key, CREDENTIAL_KEY.test(key) ? HIDDEN : redactForDisplay(v, depth + 1, seen));
+      // The key is capped as well as the value: a payload can use a whole
+      // secret as a key name, and while the fence cannot hide one -- a Galaxy
+      // job id has the same shape, and blanking those would cost the reader
+      // the most useful line in the block -- it can stop one filling the row.
+      put(
+        truncate(key, DETAIL_KEY_MAX),
+        CREDENTIAL_KEY.test(key) ? HIDDEN : redactForDisplay(v, depth + 1, seen),
+      );
     }
     return out;
   } finally {
