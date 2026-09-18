@@ -251,6 +251,15 @@ export function initDashboard(
     if (next === revision) return;
     if (res.raw === null || res.raw.trim() === "") {
       revision = next;
+      // The file is gone: `/dashboard undo` removes it when the change being
+      // undone is the one that created it, and so does deleting it by hand.
+      // Taking the revision alone left the pane drawing a layout that no longer
+      // exists -- and since the revision had moved, nothing would ask again, so
+      // the next edit wrote the deleted layout straight back out. Same answer as
+      // a workspace switch: back to the default, without persisting it.
+      host.setDocument(createDefaultDashboardDocument(), { persist: false });
+      // Whatever the banner was saying about the old file, it is not true now.
+      host.setBanner("");
       return;
     }
     if (adopt(res.raw, next)) host.setBanner("");
