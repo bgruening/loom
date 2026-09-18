@@ -15,6 +15,7 @@ import type {
   DashboardPanel,
   DashboardProblem,
 } from "../../../../shared/dashboard-contract.js";
+import type { GalaxyLivePayload } from "../../../../shared/galaxy-live-contract.js";
 
 export type Unsubscribe = () => void;
 export type WidgetDispose = () => void;
@@ -148,6 +149,16 @@ export interface DashboardDataSources {
   activity: DataSource<ActivitySnapshot>;
   files: DataSource<FilesSnapshot>;
   session: DataSource<SessionSnapshot>;
+  /**
+   * What Galaxy itself reports for the history this analysis is attached to,
+   * projected by the brain and pushed over the widget channel. Distinct from
+   * `invocations`, which is what Loom wrote down about the runs it launched.
+   *
+   * `null` means no payload has landed yet. The brain is the only process that
+   * holds Galaxy credentials in every shell, so nothing here was fetched by the
+   * renderer and no key or server URL is in it.
+   */
+  galaxy: DataSource<GalaxyLivePayload | null>;
 }
 
 export interface WidgetContext<C extends Record<string, unknown> = Record<string, unknown>> {

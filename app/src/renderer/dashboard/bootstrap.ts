@@ -10,6 +10,8 @@ import {
   serializeDashboardDocument,
 } from "../../../../shared/dashboard-contract.js";
 import type { DashboardDocument } from "../../../../shared/dashboard-contract.js";
+import { LoomWidgetKey, decodeJsonWidget } from "../../../../shared/loom-shell-contract.js";
+import type { GalaxyLivePayload } from "../../../../shared/galaxy-live-contract.js";
 import type { FileNode } from "../../preload/preload.js";
 import { DashboardHost } from "./host.js";
 import { DashboardSources } from "./data-sources.js";
@@ -62,6 +64,13 @@ type SaveResult =
 
 type DashboardShell = {
   loadDashboard?: () => Promise<LoadResult>;
+  /**
+   * The brain's widget push. The dashboard subscribes here itself rather than
+   * being fed from `app.ts`: both shells allow more than one listener on this
+   * channel, and app.ts is the file every branch collides in. Its own handler
+   * ignores keys it does not know, so the two do not interfere.
+   */
+  onUiRequest?: (cb: (request: { method: string; [k: string]: unknown }) => void) => () => void;
   saveDashboard?: (raw: string, baseRevision?: string | null) => Promise<SaveResult>;
   readFile?: (
     relPath: string,
@@ -213,6 +222,27 @@ export function initDashboard(container: HTMLElement): DashboardBootstrap {
     if (adopt(res.raw, next)) host.setBanner("");
   };
 
+  /**
+   * The live Galaxy history the brain projects. Decoding here rather than in
+   * the widget keeps the widget off `window.orbit` entirely, and a payload that
+   * will not parse is dropped rather than taking the UI-request handler down --
+   * it is JSON that crossed a process boundary.
+   */
+  const offUiRequest =
+    typeof shell.onUiRequest === "function"
+      ? shell.onUiRequest((request) => {
+          if (request.method !== "setWidget") return;
+          if (request.widgetKey !== LoomWidgetKey.GalaxyLive) return;
+          try {
+            sources.setGalaxyLive(
+              decodeJsonWidget<GalaxyLivePayload>(request.widgetLines as string[] | undefined),
+            );
+          } catch (err) {
+            console.error("[dashboard] galaxy widget payload rejected:", err);
+          }
+        })
+      : null;
+
   void load();
   void sources.refreshActivity();
   void sources.refreshFiles();
@@ -249,6 +279,7 @@ export function initDashboard(container: HTMLElement): DashboardBootstrap {
     stop: () => {
       cancelPendingSave();
       if (poll) clearInterval(poll);
+      offUiRequest?.();
     },
   };
 }
