@@ -229,6 +229,25 @@ describe("listFilesForWeb", () => {
     expect(depth).toBeGreaterThan(1);
   });
 
+  // A directory link that points at one of its own ancestors passes the
+  // inside-the-jail check, so only the depth and entry ceilings stop the walk.
+  it("terminates on a directory symlink that loops back inside the jail", async () => {
+    const loopRoot = fs.mkdtempSync(path.join(os.tmpdir(), "files-surface-loop-"));
+    try {
+      fs.mkdirSync(path.join(loopRoot, "a"));
+      fs.writeFileSync(path.join(loopRoot, "a", "f.txt"), "f\n");
+      fs.symlinkSync(path.join(loopRoot, "a"), path.join(loopRoot, "a", "self"));
+      const res = await listFilesForWeb(loopRoot, { home: HOME });
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      const count = (node: FileNode): number =>
+        (node.children ?? []).reduce((n, c) => n + 1 + count(c), 0);
+      expect(count(res.root)).toBeLessThan(40);
+    } finally {
+      fs.rmSync(loopRoot, { recursive: true, force: true });
+    }
+  });
+
   it("stops at the entry cap", async () => {
     const res = await listFilesForWeb(cwd, { home: HOME, maxEntries: 3 });
     if (!res.ok) throw new Error(res.error);
