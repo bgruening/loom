@@ -19,7 +19,10 @@ import {
   disarmGalaxyLivePanel,
 } from "../extensions/loom/galaxy-live-source.js";
 import { getPollTickHook } from "../extensions/loom/galaxy-poller.js";
-import { normalizeGalaxyLivePayload } from "../shared/galaxy-live-contract.js";
+import {
+  GALAXY_LIVE_MAX_ITEMS,
+  normalizeGalaxyLivePayload,
+} from "../shared/galaxy-live-contract.js";
 import type { GalaxyLivePayload, GalaxyLiveState } from "../shared/galaxy-live-contract.js";
 
 const CFG = { url: "https://usegalaxy.org", apiKey: "secret-key" };
@@ -439,30 +442,49 @@ describe("fetchGalaxyLiveSnapshot", () => {
     expect(res.payload!.history).toBeNull();
   });
 
-  it("refuses a contents response from a server that ignored the limit entirely", async () => {
-    // We ask for 201 rows. A server handing back fifty times that has ignored
-    // the query string, and projecting and sorting the lot happens on the
-    // brain's 15 s timer. This bounds that work -- it does not bound the
-    // transfer, which galaxyGet has already buffered by this point.
-    const rows = Array.from({ length: 10_001 }, (_, i) => ({
+  it("bounds a contents response from a server that ignored the limit", async () => {
+    // We ask for 201 rows. A server handing back the whole history means
+    // projectRow and the sort run over the lot on the 15 s timer, every tick.
+    // Dropping the surplus rather than refusing it matters: refusing pins the
+    // panel on "Galaxy did not answer" for the session, because the next tick
+    // gets the same oversized answer.
+    const rows = Array.from({ length: 5_000 }, (_, i) => ({
       id: `d${i}`,
-      hid: i + 1,
+      hid: 5_000 - i, // hid-descending, as we asked
       state: "ok",
     }));
     const get = vi.fn(async (path: string) =>
       path.includes("/contents") ? rows : { update_time: "t1", name: "mine" },
     ) as unknown as GalaxyLiveDeps["get"];
-    const res = await fetchGalaxyLiveSnapshot(HID, {}, deps(get));
-    expect(res.payload!.unavailable).toBe("unreachable");
 
-    // A response that merely overflows the row cap is the ordinary case and is
-    // still drawn, with the overflow reported rather than refused.
-    const ok = vi.fn(async (path: string) =>
-      path.includes("/contents") ? rows.slice(0, 201) : { update_time: "t1", name: "mine" },
+    const res = await fetchGalaxyLiveSnapshot(HID, {}, deps(get));
+    expect(res.payload!.unavailable).toBeUndefined();
+    const history = res.payload!.history!;
+    // The newest rows, which is what the panel is for.
+    expect(history.items[0].hid).toBe(5_000);
+    expect(history.items).toHaveLength(GALAXY_LIVE_MAX_ITEMS);
+    // And only the bounded set was projected at all. `truncated` counts the
+    // rows that reached the projection and did not survive its own cap, so it
+    // reads 1,800 for the 2,000 rows this looked at and 4,800 if it looked at
+    // every one of the 5,000 -- which is the assertion that the bound happened.
+    expect(history.truncated).toBe(GALAXY_LIVE_MAX_ITEMS * 10 - GALAXY_LIVE_MAX_ITEMS);
+  });
+
+  it("takes the newest rows even from a server that ignored the order too", async () => {
+    // `projectHistory` sorts what it is handed, so cutting the head of an
+    // ascending list would hand it the oldest rows in the history and the panel
+    // would confidently show work the user finished long ago.
+    const rows = Array.from({ length: 5_000 }, (_, i) => ({
+      id: `d${i}`,
+      hid: i + 1, // ascending: order=hid-dsc was ignored
+      state: "ok",
+    }));
+    const get = vi.fn(async (path: string) =>
+      path.includes("/contents") ? rows : { update_time: "t1", name: "mine" },
     ) as unknown as GalaxyLiveDeps["get"];
-    const fine = await fetchGalaxyLiveSnapshot(HID, {}, deps(ok));
-    expect(fine.payload!.unavailable).toBeUndefined();
-    expect(fine.payload!.history!.truncated).toBe(1);
+
+    const history = (await fetchGalaxyLiveSnapshot(HID, {}, deps(get))).payload!.history!;
+    expect(history.items[0].hid).toBe(5_000);
   });
 
   it("bounds a Galaxy that never answers, so ticks cannot stack", async () => {
@@ -963,14 +985,55 @@ describe("GalaxyLiveTicker cadence", () => {
     expect(h.snapshot).not.toHaveBeenCalled();
   });
 
-  it("hands the snapshot something to cancel", async () => {
-    const h = tickerHarness();
-    await h.ticker.tick(bound);
-    const signal = h.snapshot.mock.calls[0][1].signal as AbortSignal | undefined;
-    expect(signal).toBeDefined();
-    expect(signal!.aborted).toBe(false);
+  it("hands the snapshot something to cancel while it is still in flight", async () => {
+    let seen: AbortSignal | undefined;
+    let settle: (() => void) | null = null;
+    const hang = new Promise<void>((r) => {
+      settle = r;
+    });
+    const h = tickerHarness({
+      snapshot: (async (_id: string, opts: { signal?: AbortSignal }) => {
+        seen = opts.signal;
+        await hang;
+        return { payload: historyPayload("t1"), unchanged: false, aborted: true };
+      }) as unknown as GalaxyLiveTickerDeps["snapshot"],
+    });
+
+    const inFlight = h.ticker.tick(bound);
+    await new Promise((r) => setImmediate(r));
+    expect(seen).toBeDefined();
+    expect(seen!.aborted).toBe(false);
+
     h.ticker.stop();
-    expect(signal!.aborted).toBe(true);
+    expect(seen!.aborted).toBe(true);
+    settle!();
+    await inFlight;
+  });
+
+  it("does not pile a signal per tick onto one that lives for the session", async () => {
+    // `AbortSignal.any` registers the composite on every source for as long as
+    // that source lives and Node never takes it off again, so hanging one per
+    // tick off the session's signal grows a list nothing empties -- measured at
+    // one retained entry per call. Each tick owns its signal and releases it.
+    const h = tickerHarness();
+    const sessionSignal = (h.ticker as unknown as { abort: AbortController }).abort.signal;
+    const listenerCount = (): number => {
+      const sizes = Object.getOwnPropertySymbols(sessionSignal)
+        .map((k) => (sessionSignal as unknown as Record<symbol, { size?: number }>)[k]?.size)
+        .filter((n): n is number => typeof n === "number");
+      // Guard against the test going vacuous if Node renames its internals: if
+      // nothing here has a size, this is measuring nothing and should say so.
+      expect(sizes.length).toBeGreaterThan(0);
+      return sizes.reduce((a, b) => a + b, 0);
+    };
+
+    expect(listenerCount()).toBe(0);
+    for (let i = 0; i < 50; i++) {
+      h.advance(120_000);
+      await h.ticker.tick(bound);
+    }
+    expect(h.snapshot.mock.calls.length).toBeGreaterThan(10);
+    expect(listenerCount()).toBe(0);
   });
 
   it("forgets the previous history's update_time when the binding changes", async () => {
