@@ -194,6 +194,10 @@ export interface WidgetContext<C extends Record<string, unknown> = Record<string
    * Open a workspace file in whatever file viewer the shell has. Absent where
    * the shell has none, so a widget must feature-detect rather than assume --
    * that is the whole reason it is optional rather than a no-op.
+   *
+   * Not `window.orbit.openFile`, which has the same name and a different
+   * meaning: that one hands the path to the operating system. This one shows
+   * the file in Orbit's own File tab.
    */
   openFile?(relPath: string): void;
 }
