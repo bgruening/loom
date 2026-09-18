@@ -109,11 +109,13 @@ export interface RunRow {
 
 /**
  * How long a live run may go without a fresh `last_polled_at` before the panel
- * stops believing its own numbers. The poller ticks every 15s, so eight missed
- * ticks means something is wrong: Galaxy unreachable, credentials gone, or no
- * session running to do the asking.
+ * stops believing its own numbers. The poller ticks every 15s, so this is
+ * twenty missed ticks: far outside a slow Galaxy round trip or a tick that
+ * waited on the notebook lock, and squarely in "Galaxy is unreachable, the
+ * credentials are gone, or nothing is running to do the asking". A tighter
+ * threshold cried wolf in the browser inside two minutes of a healthy run.
  */
-export const STALE_AFTER_MS = 120_000;
+export const STALE_AFTER_MS = 300_000;
 
 /**
  * Galaxy's job states, folded to what the panel draws. Mirrors
@@ -475,8 +477,14 @@ export function attentionMessage(rows: RunRow[]): string {
   if (bad.length === 0) return "";
   if (bad.length === 1) {
     const row = bad[0];
-    const where = row.step ? ` (step ${row.step.number}, ${row.step.title})` : "";
     const name = row.label || row.id;
+    // A run is usually labelled after the step it runs, so naming the step's
+    // title as well costs a line of a 400px panel to say the same word twice.
+    const where = row.step
+      ? name.toLowerCase().includes(row.step.title.toLowerCase())
+        ? ` (step ${row.step.number})`
+        : ` (step ${row.step.number}, ${row.step.title})`
+      : "";
     if (row.jobs.total > 1 && row.jobs.failed > 0) {
       return `${row.jobs.failed} of ${row.jobs.total} jobs failed in "${name}"${where}.`;
     }
@@ -534,13 +542,30 @@ const STYLE_ID = "dash-jobs-style";
  * Lift it across when the branches meet; nothing about it is widget-private.
  */
 const STYLE = `
-.dash-jobs { display: flex; flex-direction: column; gap: 8px; }
+/* State colours as their own tokens, because the product's --accent, --warning
+   and --error are each under the 4.5:1 floor for 11px text in one theme or the
+   other: amber on white is 3.7:1 in light, salmon on the tinted failed row is
+   3.4:1 in dark. Same values the dashboard mockups settled on. */
+.dash-jobs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  --jobs-running: var(--accent);
+  --jobs-paused: var(--warning);
+  --jobs-done: var(--success);
+  --jobs-failed: #fca5a5;
+}
+:root[data-theme="light"] .dash-jobs {
+  --jobs-running: var(--accent-hover);
+  --jobs-paused: var(--accent-hover);
+  --jobs-failed: var(--error);
+}
 .dash-jobs-alert {
   display: flex; gap: 7px; align-items: flex-start; margin: 0;
   padding: 7px 9px; border: 1px solid var(--error); border-radius: 4px;
   background: var(--error-bg); color: var(--text); font-size: 12px; line-height: 1.45;
 }
-.dash-jobs-alert-glyph { color: var(--error); font-weight: 700; flex-shrink: 0; }
+.dash-jobs-alert-glyph { color: var(--jobs-failed); font-weight: 700; flex-shrink: 0; }
 .dash-jobs-rows { display: flex; flex-direction: column; }
 .dash-jobs-row { padding: 7px 0; border-bottom: 1px solid var(--border-subtle); }
 .dash-jobs-row:first-child { padding-top: 0; }
@@ -559,16 +584,16 @@ const STYLE = `
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 11.5px; font-weight: 600; white-space: nowrap;
 }
-.dash-jobs-glyph { display: inline-block; width: 12px; text-align: center; flex-shrink: 0; }
-.dash-jobs-state.state-running { color: var(--accent); }
+.dash-jobs-glyph { display: inline-block; width: 14px; text-align: center; flex-shrink: 0; }
+.dash-jobs-state.state-running { color: var(--jobs-running); }
 .dash-jobs-state.state-queued,
 .dash-jobs-state.state-stopping,
 .dash-jobs-state.state-unknown,
 .dash-jobs-state.state-cancelled,
 .dash-jobs-state.state-skipped { color: var(--dash-text-meta); }
-.dash-jobs-state.state-paused { color: var(--warning); }
-.dash-jobs-state.state-finished { color: var(--success); }
-.dash-jobs-state.state-failed { color: var(--error); }
+.dash-jobs-state.state-paused { color: var(--jobs-paused); }
+.dash-jobs-state.state-finished { color: var(--jobs-done); }
+.dash-jobs-state.state-failed { color: var(--jobs-failed); }
 .dash-jobs-state.state-running .dash-jobs-glyph {
   animation: dash-jobs-pulse 1.6s ease-in-out infinite;
 }
@@ -587,6 +612,8 @@ const STYLE = `
 }
 .dash-jobs-say { margin: 3px 0 0; font-size: 12px; line-height: 1.45; color: var(--text); }
 .dash-jobs-row.is-stale .dash-jobs-say { color: var(--dash-text-meta); }
+/* A bar nobody has refreshed should not look as solid as one we just read. */
+.dash-jobs-row.is-stale .dash-jobs-bar { opacity: 0.5; }
 .dash-jobs-why {
   margin: 3px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--dash-text-meta);
 }
@@ -596,7 +623,7 @@ const STYLE = `
 }
 .dash-jobs-link {
   display: inline-block; margin-top: 4px; font-size: 11px;
-  color: var(--accent); text-decoration: none;
+  color: var(--jobs-running); text-decoration: none;
 }
 .dash-jobs-link:hover { text-decoration: underline; }
 .dash-jobs-raw { margin-top: 5px; font-size: 11px; }
@@ -616,6 +643,9 @@ const STYLE = `
   text-align: center; font-size: 12px; line-height: 1.45; color: var(--dash-text-meta);
 }
 .dash-jobs-empty strong { color: var(--text); font-weight: 600; }
+/* The host's panel button is borderless until hover, which is too quiet for
+   the only way back to the runs this filter is hiding. */
+.dash-jobs-empty .dash-panel-btn { border-color: var(--border-strong); }
 .dash-jobs-count {
   background: var(--accent-bg); border: 1px solid var(--accent); color: var(--text-bright);
   padding: 0 5px; border-radius: 8px; font-size: 10px; font-weight: 700; font-family: var(--font);

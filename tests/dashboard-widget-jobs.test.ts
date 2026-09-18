@@ -15,6 +15,7 @@ import {
   metaLine,
   needsAttention,
   normalizeJobsConfig,
+  STALE_AFTER_MS,
   stateGlyph,
   stateWord,
   toRunRows,
@@ -321,6 +322,14 @@ describe("staleness", () => {
     expect(rowFor({ lastPolledAt: undefined, submittedAt: ago(6 * DAY) }).stale).toBe(true);
   });
 
+  it("gives a healthy run far more slack than one slow poll", () => {
+    // Twenty ticks of the 15s poller. Tighter than this cried wolf in the
+    // browser on a run that was perfectly healthy.
+    expect(STALE_AFTER_MS).toBe(300_000);
+    expect(rowFor({ lastPolledAt: ago(STALE_AFTER_MS - 1000) }).stale).toBe(false);
+    expect(rowFor({ lastPolledAt: ago(STALE_AFTER_MS + 1000) }).stale).toBe(true);
+  });
+
   it("leads with the staleness rather than the number it cannot vouch for", () => {
     const row = rowFor({ lastPolledAt: ago(6 * DAY) });
     expect(describeRun(row, NOW)).toBe(
@@ -400,7 +409,7 @@ describe("the failure strip", () => {
     );
   });
 
-  it("names the run and the plan step it is bound to", () => {
+  const failingRunNamed = (label: string): RunRow[] => {
     const plan =
       "## Plan A: chrM\n\n- [ ] 3. **Count features** {#plan-a-step-3} -- twelve samples";
     const sources = new DashboardSources();
@@ -411,7 +420,7 @@ describe("the failure strip", () => {
             invocation_id: "inv-1",
             galaxy_server_url: "https://usegalaxy.org",
             notebook_anchor: "plan-a-step-3",
-            label: "Count features",
+            label,
             submitted_at: ago(2 * HOUR),
             status: "in_progress",
             total_jobs: 12,
@@ -423,13 +432,18 @@ describe("the failure strip", () => {
         plan,
       ),
     );
-    const rows = toRunRows(
-      sources.sources.invocations.get(),
-      sources.sources.plan.get().plans,
-      NOW,
+    return toRunRows(sources.sources.invocations.get(), sources.sources.plan.get().plans, NOW);
+  };
+
+  it("names the run and the plan step it is bound to", () => {
+    expect(attentionMessage(failingRunNamed("featureCounts sweep"))).toBe(
+      '2 of 12 jobs failed in "featureCounts sweep" (step 3, Count features).',
     );
-    expect(attentionMessage(rows)).toBe(
-      '2 of 12 jobs failed in "Count features" (step 3, Count features).',
+  });
+
+  it("does not say the step's name twice when the run is already called that", () => {
+    expect(attentionMessage(failingRunNamed("Count features -- 12 samples"))).toBe(
+      '2 of 12 jobs failed in "Count features -- 12 samples" (step 3).',
     );
   });
 
