@@ -322,6 +322,116 @@ export async function listFilesForWeb(
 }
 
 /**
+ * Open a validated path and prove the descriptor is the file that was
+ * validated.
+ *
+ * `resolveRealWithin` answers a question about a *pathname*, and every
+ * subsequent `stat`/`open`/`readFile` on that pathname asks the kernel to walk
+ * it again. Between the two walks the agent -- which can write in this
+ * directory -- can swap a component for a symlink pointing outside, and the
+ * second walk follows it. That is not theoretical: racing a rename of the
+ * resolved parent directory against this function's previous shape leaked
+ * outside bytes on 46 of 6000 reads.
+ *
+ * So the pathname is walked exactly once more, here, and everything after that
+ * goes through the descriptor:
+ *
+ *  - `O_NOFOLLOW` (where the platform has it) makes the open fail outright if
+ *    the final component became a symlink;
+ *  - the descriptor's own `fstat` is compared with an `lstat` of the validated
+ *    path, so a swapped *parent* is caught whether the swap is still in place
+ *    (the paths disagree) or has been reverted (the inodes disagree);
+ *  - the path is re-resolved and re-checked against the jail, so a swap that is
+ *    still in place cannot pass on inode identity alone.
+ *
+ * The caller must close the handle.
+ */
+async function openVerified(
+  cwd: string,
+  real: string,
+  home: string,
+): Promise<
+  | { ok: true; fd: fsp.FileHandle; size: number; verify: () => Promise<boolean> }
+  | { ok: false; error: string }
+> {
+  // O_NOFOLLOW is POSIX; on Windows the constant is absent and the open is a
+  // plain read, which is the best that platform offers here.
+  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
+  let fd: fsp.FileHandle;
+  try {
+    fd = await fsp.open(real, flags);
+  } catch {
+    // ELOOP here is the attack being refused rather than succeeding.
+    return { ok: false, error: "the file could not be read" };
+  }
+
+  /**
+   * Is the descriptor we are holding still the file the jail approved?
+   *
+   * On Linux the kernel will tell us outright: `/proc/self/fd/N` resolves to the
+   * descriptor's own path and nothing in the directory tree can spoof it, so the
+   * answer is exact. Everywhere else this is the best approximation available --
+   * re-resolve the name and compare inodes -- and it is run before and after the
+   * read, because each call on its own can be raced.
+   */
+  const verify = async (): Promise<boolean> => {
+    try {
+      const st = await fd.stat();
+      const exact = await fdRealPath(fd);
+      if (exact !== null) return withinJail(exact, await fsp.realpath(cwd), home);
+      const again = await resolveRealWithin(cwd, real, home);
+      if (!again.ok || again.real !== real) return false;
+      const onDisk = await fsp.lstat(real);
+      return onDisk.ino === st.ino && onDisk.dev === st.dev;
+    } catch {
+      return false;
+    }
+  };
+
+  try {
+    const st = await fd.stat();
+    if (!st.isFile()) {
+      await fd.close();
+      return { ok: false, error: "Not a regular file" };
+    }
+    if (!(await verify())) {
+      await fd.close();
+      return { ok: false, error: "path leaves the working directory" };
+    }
+    return { ok: true, fd, size: st.size, verify };
+  } catch {
+    await fd.close().catch(() => {});
+    return { ok: false, error: "the file could not be read" };
+  }
+}
+
+/**
+ * The path a descriptor actually refers to, or null where the platform will not
+ * say. Linux exposes it through procfs; macOS needs `fcntl(F_GETPATH)`, which
+ * Node does not surface, so there the caller falls back to comparing inodes.
+ */
+async function fdRealPath(fd: fsp.FileHandle): Promise<string | null> {
+  if (process.platform !== "linux") return null;
+  try {
+    return await fsp.realpath(`/proc/self/fd/${fd.fd}`);
+  } catch {
+    return null;
+  }
+}
+
+function withinJail(real: string, cwdReal: string, home: string): boolean {
+  if (real !== cwdReal && !real.startsWith(cwdReal + path.sep)) return false;
+  return pathRefusal(path.relative(cwdReal, real), real, home) === null;
+}
+
+/** Read at most `cap` bytes through an already-verified descriptor. */
+async function readCapped(fd: fsp.FileHandle, cap: number, offset = 0): Promise<Buffer> {
+  const buf = Buffer.alloc(cap);
+  const { bytesRead } = await fd.read(buf, 0, cap, offset);
+  return buf.subarray(0, bytesRead);
+}
+
+/**
  * `files:read`. Byte budgets and the tail/head preview behaviour are the
  * desktop's; the jail, and a fixed message for anything unexpected, are this
  * surface's. An `err.message` from fs names the absolute path it failed on, so
@@ -341,74 +451,76 @@ export async function readFileForWeb(
   const real = await resolveRealWithin(cwd, jailed.abs, home);
   if (!real.ok) return { ok: false, error: real.error };
 
+  const opened = await openVerified(cwd, real.real, home);
+  if (!opened.ok) return { ok: false, error: opened.error };
+  const { fd, size, verify } = opened;
+
   try {
-    const stat = await fsp.stat(real.real);
-    if (!stat.isFile()) return { ok: false, error: "Not a regular file" };
-
     if (opts?.tail) {
-      const readSize = Math.min(stat.size, PREVIEW_BYTE_BUDGET);
-      const offset = stat.size - readSize;
-      const fd = await fsp.open(real.real, "r");
-      try {
-        const tailBuf = Buffer.alloc(readSize);
-        const { bytesRead } = await fd.read(tailBuf, 0, readSize, offset);
-        const lines = tailBuf.subarray(0, bytesRead).toString("utf-8").split("\n");
-        // A non-zero offset means the first element is half a line (or half a
-        // multibyte character); drop it rather than ship a fragment.
-        if (offset > 0 && lines.length > 1) lines.shift();
+      const readSize = Math.min(size, PREVIEW_BYTE_BUDGET);
+      const offset = size - readSize;
+      const tail = await readCapped(fd, readSize, offset);
+      const lines = tail.toString("utf-8").split("\n");
+      // A non-zero offset means the first element is half a line (or half a
+      // multibyte character); drop it rather than ship a fragment.
+      if (offset > 0 && lines.length > 1) lines.shift();
+      if (!(await verify())) return { ok: false, error: "path leaves the working directory" };
+      return {
+        ok: true,
+        size,
+        bytesBase64: Buffer.from(lines.slice(-TAIL_LINE_COUNT).join("\n"), "utf-8").toString(
+          "base64",
+        ),
+      };
+    }
+
+    if (size <= MAX_READ_BYTES) {
+      // Capped by what comes back, not by the size the stat reported: a file
+      // that grows between the two would otherwise be served whole.
+      const buf = await readCapped(fd, MAX_READ_BYTES + 1);
+      if (buf.length > MAX_READ_BYTES) {
         return {
-          ok: true,
-          size: stat.size,
-          bytesBase64: Buffer.from(lines.slice(-TAIL_LINE_COUNT).join("\n"), "utf-8").toString(
-            "base64",
-          ),
+          ok: false,
+          error: `File too large (limit ${MAX_READ_BYTES})`,
+          size: buf.length,
         };
-      } finally {
-        await fd.close();
       }
+      if (!(await verify())) return { ok: false, error: "path leaves the working directory" };
+      return { ok: true, size: buf.length, bytesBase64: buf.toString("base64") };
     }
 
-    if (stat.size <= MAX_READ_BYTES) {
-      const buf = await fsp.readFile(real.real);
-      return { ok: true, size: stat.size, bytesBase64: buf.toString("base64") };
-    }
-
-    if (stat.size > MAX_PREVIEW_BYTES) {
+    if (size > MAX_PREVIEW_BYTES) {
       return {
         ok: false,
-        error: `File too large (${stat.size} bytes, hard limit ${MAX_PREVIEW_BYTES})`,
-        size: stat.size,
+        error: `File too large (${size} bytes, hard limit ${MAX_PREVIEW_BYTES})`,
+        size,
       };
     }
 
     if (!isTextLikeForPreview(path.basename(real.real))) {
       return {
         ok: false,
-        error: `File too large (${stat.size} bytes, limit ${MAX_READ_BYTES})`,
-        size: stat.size,
+        error: `File too large (${size} bytes, limit ${MAX_READ_BYTES})`,
+        size,
       };
     }
 
-    const fd = await fsp.open(real.real, "r");
-    try {
-      const headBuf = Buffer.alloc(PREVIEW_BYTE_BUDGET);
-      const { bytesRead } = await fd.read(headBuf, 0, PREVIEW_BYTE_BUDGET, 0);
-      const head = headBuf.subarray(0, bytesRead).toString("utf-8");
-      const lines = head.split("\n").slice(0, PREVIEW_LINE_COUNT);
-      return {
-        ok: true,
-        size: stat.size,
-        bytesBase64: Buffer.from(lines.join("\n"), "utf-8").toString("base64"),
-        preview: {
-          kind: "head",
-          lineCount: lines.length,
-          byteBudgetHit: bytesRead === PREVIEW_BYTE_BUDGET && lines.length < PREVIEW_LINE_COUNT,
-        },
-      };
-    } finally {
-      await fd.close();
-    }
+    const head = await readCapped(fd, PREVIEW_BYTE_BUDGET);
+    const lines = head.toString("utf-8").split("\n").slice(0, PREVIEW_LINE_COUNT);
+    if (!(await verify())) return { ok: false, error: "path leaves the working directory" };
+    return {
+      ok: true,
+      size,
+      bytesBase64: Buffer.from(lines.join("\n"), "utf-8").toString("base64"),
+      preview: {
+        kind: "head",
+        lineCount: lines.length,
+        byteBudgetHit: head.length === PREVIEW_BYTE_BUDGET && lines.length < PREVIEW_LINE_COUNT,
+      },
+    };
   } catch {
     return { ok: false, error: "the file could not be read" };
+  } finally {
+    await fd.close().catch(() => {});
   }
 }

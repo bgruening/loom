@@ -447,3 +447,119 @@ describe("readFileForWeb size caps", () => {
     fs.rmSync(huge, { force: true });
   });
 });
+
+/**
+ * The jail answers a question about a pathname, and every syscall after it asks
+ * the kernel to walk that pathname again. Between the two walks anything that
+ * can write in the analysis directory -- the model's write tool, its bash --
+ * can swap a component for a symlink pointing outside, and the second walk
+ * follows it. Both reviewers won this race: 46 of 6000 reads by swapping the
+ * resolved parent directory, 166 of 2400 by `rename(2)`-flipping the name
+ * itself between a real file and a symlink.
+ *
+ * These run the real thing against a real temp directory with a real attacker
+ * loop, because the failure only exists between two syscalls and no mock has
+ * that gap in it.
+ */
+describe("files:read under a symlink race", () => {
+  let root: string;
+  let ws: string;
+
+  beforeAll(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "files-surface-race-"));
+    ws = path.join(root, "ws");
+    fs.mkdirSync(ws, { recursive: true });
+    fs.writeFileSync(path.join(root, "canary"), "TOCTOU-CANARY-LEAKED\n");
+  });
+
+  afterAll(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("never serves outside bytes while the name is flipped to a symlink and back", async () => {
+    const name = path.join(ws, "race.txt");
+    const stage = path.join(ws, ".race-stage");
+    fs.writeFileSync(name, "benign\n");
+
+    let stop = false;
+    const flipper = (async () => {
+      let asLink = false;
+      while (!stop) {
+        try {
+          fs.rmSync(stage, { force: true });
+          if (asLink) fs.writeFileSync(stage, "benign\n");
+          else fs.symlinkSync(path.join(root, "canary"), stage);
+          // rename is atomic, so the name is always one or the other and the
+          // reader never sees it missing.
+          fs.renameSync(stage, name);
+          asLink = !asLink;
+        } catch {
+          /* racing with ourselves is expected */
+        }
+        await new Promise((r) => setImmediate(r));
+      }
+    })();
+
+    let leaked = 0;
+    for (let round = 0; round < 20; round++) {
+      const batch = Array.from({ length: 40 }, () =>
+        readFileForWeb(ws, "race.txt", null, { home: root }),
+      );
+      for (const res of await Promise.all(batch)) {
+        if (!res.ok) continue;
+        const text = Buffer.from(res.bytesBase64 ?? "", "base64").toString("utf-8");
+        if (text.includes("CANARY")) leaked++;
+      }
+    }
+    stop = true;
+    await flipper;
+    fs.rmSync(name, { force: true });
+    expect(leaked).toBe(0);
+  });
+
+  it("never serves outside bytes while the resolved parent is swapped for a symlink", async () => {
+    const dataDir = path.join(ws, "data");
+    const stash = path.join(ws, "data-stash");
+    const evil = path.join(root, "evil");
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.mkdirSync(evil, { recursive: true });
+    fs.writeFileSync(path.join(dataDir, "f.txt"), "inside\n");
+    fs.writeFileSync(path.join(evil, "f.txt"), "TOCTOU-CANARY-LEAKED\n");
+
+    let stop = false;
+    const swapper = (async () => {
+      while (!stop) {
+        try {
+          fs.renameSync(dataDir, stash);
+          fs.symlinkSync(evil, dataDir);
+          await new Promise((r) => setImmediate(r));
+          fs.unlinkSync(dataDir);
+          fs.renameSync(stash, dataDir);
+        } catch {
+          /* racing */
+        }
+        await new Promise((r) => setImmediate(r));
+      }
+    })();
+
+    let leaked = 0;
+    for (let i = 0; i < 800; i++) {
+      const res = await readFileForWeb(ws, "data/f.txt", null, { home: root });
+      if (!res.ok) continue;
+      const text = Buffer.from(res.bytesBase64 ?? "", "base64").toString("utf-8");
+      if (text.includes("CANARY")) leaked++;
+    }
+    stop = true;
+    await swapper;
+    expect(leaked).toBe(0);
+  });
+
+  it("still serves an ordinary file when nobody is attacking it", async () => {
+    fs.writeFileSync(path.join(ws, "calm.txt"), "ordinary\n");
+    const res = await readFileForWeb(ws, "calm.txt", null, { home: root });
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(Buffer.from(res.bytesBase64!, "base64").toString("utf-8")).toBe("ordinary\n");
+    }
+  });
+});
