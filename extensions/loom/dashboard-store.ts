@@ -94,12 +94,25 @@ async function refuseSymlink(filePath: string): Promise<string | null> {
   return null;
 }
 
+/**
+ * The file's text, or null when there is genuinely no file.
+ *
+ * Only ENOENT counts as "no file". Swallowing every error would turn an
+ * unreadable layout -- a permissions problem, a directory left at that name --
+ * into "there is nothing here", and the compare-and-swap below would then
+ * happily rename over something it could not read.
+ */
 async function readRaw(filePath: string): Promise<string | null> {
   try {
     return await fsp.readFile(filePath, "utf-8");
-  } catch {
-    return null;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+    throw err;
   }
+}
+
+function unreadable(err: unknown): string {
+  return `Could not read ${DASHBOARD_FILENAME}: ${err instanceof Error ? err.message : String(err)}`;
 }
 
 /** Read and validate the layout, falling back to the default document. */
@@ -110,7 +123,12 @@ export async function readDashboardDocument(): Promise<DashboardReadResult> {
   const refusal = await refuseSymlink(filePath);
   if (refusal) return { ok: false, error: refusal };
 
-  const raw = await readRaw(filePath);
+  let raw: string | null;
+  try {
+    raw = await readRaw(filePath);
+  } catch (err) {
+    return { ok: false, error: unreadable(err) };
+  }
   if (raw === null) {
     return {
       ok: true,
@@ -287,7 +305,13 @@ export async function undoDashboardChange(): Promise<DashboardUndoResult> {
   // the user rearranged the pane afterwards, or the analysis directory moved,
   // this entry describes a file that no longer exists in that state and
   // restoring it would throw away work nobody asked us to touch.
-  if (entry.path !== filePath || dashboardRevision(await readRaw(filePath)) !== entry.wrote) {
+  let currentRevision: string | null;
+  try {
+    currentRevision = dashboardRevision(await readRaw(filePath));
+  } catch (err) {
+    return { ok: false, error: unreadable(err) };
+  }
+  if (entry.path !== filePath || currentRevision !== entry.wrote) {
     undoStack.pop();
     return {
       ok: false,

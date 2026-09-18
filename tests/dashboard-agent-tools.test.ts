@@ -530,6 +530,26 @@ describe("the persisted path", () => {
     expect(result.error).toContain("symbolic link");
   });
 
+  it("refuses rather than replacing a layout it could not read", async () => {
+    fs.writeFileSync(dashPath, '{"version":1,"activeId":"d","dashboards":[]}', "utf-8");
+    fs.chmodSync(dashPath, 0o000);
+    try {
+      const result = await run("dashboard_update", {
+        reason: "why",
+        actions: [{ action: "add_panel", widget: "jobs" }],
+      });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Could not read");
+      fs.chmodSync(dashPath, 0o600);
+      // The file we could not read is still the file that is there.
+      expect(fs.readFileSync(dashPath, "utf-8")).toBe(
+        '{"version":1,"activeId":"d","dashboards":[]}',
+      );
+    } finally {
+      fs.chmodSync(dashPath, 0o600);
+    }
+  });
+
   it("leaves no scratch files behind", async () => {
     await run("dashboard_update", {
       reason: "why",
