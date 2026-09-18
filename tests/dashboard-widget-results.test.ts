@@ -484,6 +484,29 @@ describe("results widget", () => {
     expect(h.header.textContent).toContain("1 of 3");
   });
 
+  it("updates the count when the files behind the cut change", async () => {
+    const h = harness({ limit: 1 });
+    resultsWidget.mount(h.el, h.ctx);
+    await h.setFiles(tree([file("a.png"), file("b.png"), file("c.png")]));
+    expect(h.header.textContent).toContain("1 of 3");
+    await h.setFiles(tree([file("a.png"), file("b.png"), file("c.png"), file("d.png")]));
+    // The one panel it shows is unchanged; the sentence about the rest is not.
+    expect(h.header.textContent).toContain("1 of 4");
+  });
+
+  it("does not offer a row count when the budget left it no whole row", async () => {
+    // Header, then one row so wide the read stops inside it. Dropping that
+    // half-row leaves nothing to count, and "first 0 rows" is not a sentence.
+    stubFetch(`gene\tpadj\n${"x".repeat(40000)}`);
+    const h = harness();
+    resultsWidget.mount(h.el, h.ctx);
+    await h.setFiles(tree([file("counts.tsv", 40012)]));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.el.querySelector("th")?.textContent).toBe("gene");
+    expect(h.el.querySelectorAll("tbody tr")).toHaveLength(0);
+    expect(h.el.querySelector(".dash-results-note")).toBeNull();
+  });
+
   it("pins the panel to one file when its pin button is pressed", async () => {
     const h = harness();
     resultsWidget.mount(h.el, h.ctx);

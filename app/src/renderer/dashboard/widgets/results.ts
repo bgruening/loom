@@ -520,7 +520,11 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
         wrap.append(table);
         entry.prepend(wrap);
         const notes: string[] = [];
-        if (preview.moreRows) notes.push(`first ${preview.rows.length} rows`);
+        // "first 0 rows" is what a header-only read, or one the byte budget cut
+        // inside its first row, would otherwise say.
+        if (preview.moreRows && preview.rows.length > 0) {
+          notes.push(`first ${preview.rows.length} rows`);
+        }
         if (preview.extraColumns > 0) {
           notes.push(`${preview.extraColumns} more column${preview.extraColumns === 1 ? "" : "s"}`);
         }
@@ -562,6 +566,9 @@ export const resultsWidget: WidgetDefinition<ResultsConfig> = {
         config.path,
         config.glob,
         String(config.limit),
+        // The total as well as the selection: at limit 1 a workspace going from
+        // three files to five changes the header and nothing else.
+        String(selection.total),
         ...selection.shown.map((f) => `${f.relPath}:${f.size}`),
       ].join("|");
       if (next === signature) return;
