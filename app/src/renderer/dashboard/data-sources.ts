@@ -11,6 +11,7 @@
 
 import { parseInvocationBlocks } from "../galaxy-invocations.js";
 import type { FileNode } from "../../preload/preload.js";
+import type { GalaxyLivePayload } from "../../../../shared/galaxy-live-contract.js";
 import type {
   ActivityEvent,
   DashboardJob,
@@ -360,6 +361,13 @@ export class DashboardSources {
     updatedAt: 0,
   });
   private session = new MutableSource<SessionSnapshot>(emptySession());
+  /**
+   * Pushed by the brain, which is the only process with Galaxy credentials in
+   * every shell. `null` until the first payload lands -- distinct from a
+   * payload carrying `unavailable`, which is Galaxy answered and there is
+   * nothing to show.
+   */
+  private galaxy = new MutableSource<GalaxyLivePayload | null>(null);
 
   readonly sources: DashboardDataSources;
   /**
@@ -384,7 +392,13 @@ export class DashboardSources {
       activity: this.activity,
       files: this.files,
       session: this.session,
+      galaxy: this.galaxy,
     };
+  }
+
+  /** A live Galaxy history projection the brain pushed over the widget channel. */
+  setGalaxyLive(payload: GalaxyLivePayload | null): void {
+    this.galaxy.set(payload);
   }
 
   /**
@@ -490,5 +504,9 @@ export class DashboardSources {
     this.activity.set({ events: [], available: false, updatedAt });
     this.files.set({ root: null, available: false, updatedAt });
     this.session.set(emptySession());
+    // The previous analysis's history is not this one's, and the brain will not
+    // re-push until its next poll tick -- an old panel left on screen in the
+    // meantime is the stale-number failure this surface exists to avoid.
+    this.galaxy.set(null);
   }
 }

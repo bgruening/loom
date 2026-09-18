@@ -17,6 +17,7 @@ import { planWidget } from "./plan.js";
 import { activityWidget } from "./activity.js";
 import { resultsWidget } from "./results.js";
 import { htmlSandboxWidget } from "./html-sandbox.js";
+import { galaxyHistoryWidget } from "./galaxy-history.js";
 
 export const BUILT_IN_WIDGETS = [
   notebookWidget,
@@ -25,6 +26,7 @@ export const BUILT_IN_WIDGETS = [
   activityWidget,
   resultsWidget,
   htmlSandboxWidget,
+  galaxyHistoryWidget,
 ];
 
 for (const widget of BUILT_IN_WIDGETS) registerWidget(widget);
