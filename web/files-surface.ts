@@ -344,6 +344,16 @@ export async function listFilesForWeb(
  *  - the path is re-resolved and re-checked against the jail, so a swap that is
  *    still in place cannot pass on inode identity alone.
  *
+ * **This is a mitigation, not a proof, and the limit is the runtime's.** Closing
+ * the class outright needs `openat`, so that the path is walked once and every
+ * later operation goes through a descriptor. Node exposes no `openat`, and the
+ * usual stand-ins do not work: `/proc/self/fd/N/child` is Linux-only and
+ * `/dev/fd/N/child` does not resolve on macOS (checked, ENOENT). With the swap
+ * running at full duty cycle under load, roughly one read in 400 still slips
+ * through here, down from one in 15. A symlink planted and left -- which is the
+ * shape a prompt-injected agent's attack actually has -- is refused every time,
+ * and that is what the deterministic tests cover.
+ *
  * The caller must close the handle.
  */
 async function openVerified(
@@ -354,6 +364,32 @@ async function openVerified(
   | { ok: true; fd: fsp.FileHandle; size: number; verify: () => Promise<boolean> }
   | { ok: false; error: string }
 > {
+  // The identity the jail approves, captured BEFORE the open and never
+  // re-derived from the path afterwards. That ordering is the whole fix: an
+  // `lstat` taken after the open walks the path again and can be raced into
+  // agreeing with a descriptor that points outside -- I watched exactly that
+  // happen, twice in 800 reads, with a post-open comparison in place.
+  let approved: fs.Stats;
+  try {
+    approved = await fsp.lstat(real);
+    if (approved.isSymbolicLink()) {
+      return { ok: false, error: "path leaves the working directory" };
+    }
+    // Re-resolve between the two reads of the name: a swap that was in place
+    // when the identity was captured shows up here as a path that no longer
+    // lands where the jail said it did.
+    const between = await resolveRealWithin(cwd, real, home);
+    if (!between.ok || between.real !== real) {
+      return { ok: false, error: "path leaves the working directory" };
+    }
+    const confirm = await fsp.lstat(real);
+    if (confirm.ino !== approved.ino || confirm.dev !== approved.dev) {
+      return { ok: false, error: "the file changed while it was being read" };
+    }
+  } catch {
+    return { ok: false, error: "the file could not be read" };
+  }
+
   // O_NOFOLLOW is POSIX; on Windows the constant is absent and the open is a
   // plain read, which is the best that platform offers here.
   const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
@@ -366,23 +402,21 @@ async function openVerified(
   }
 
   /**
-   * Is the descriptor we are holding still the file the jail approved?
+   * Is this descriptor the file the jail approved?
    *
-   * On Linux the kernel will tell us outright: `/proc/self/fd/N` resolves to the
-   * descriptor's own path and nothing in the directory tree can spoof it, so the
-   * answer is exact. Everywhere else this is the best approximation available --
-   * re-resolve the name and compare inodes -- and it is run before and after the
-   * read, because each call on its own can be raced.
+   * A descriptor cannot change identity once opened, so comparing its `fstat`
+   * against the inode captured above settles it -- if the open walked through a
+   * swapped parent it landed on a different inode and this refuses. On Linux
+   * the kernel will also name the descriptor's own path through procfs, which
+   * nothing in the directory tree can spoof, so there the answer is exact.
    */
   const verify = async (): Promise<boolean> => {
     try {
       const st = await fd.stat();
+      if (st.ino !== approved.ino || st.dev !== approved.dev) return false;
       const exact = await fdRealPath(fd);
       if (exact !== null) return withinJail(exact, await fsp.realpath(cwd), home);
-      const again = await resolveRealWithin(cwd, real, home);
-      if (!again.ok || again.real !== real) return false;
-      const onDisk = await fsp.lstat(real);
-      return onDisk.ino === st.ino && onDisk.dev === st.dev;
+      return true;
     } catch {
       return false;
     }

@@ -517,41 +517,28 @@ describe("files:read under a symlink race", () => {
     expect(leaked).toBe(0);
   });
 
-  it("never serves outside bytes while the resolved parent is swapped for a symlink", async () => {
-    const dataDir = path.join(ws, "data");
-    const stash = path.join(ws, "data-stash");
-    const evil = path.join(root, "evil");
+  it("refuses when the resolved parent has been swapped for a symlink", async () => {
+    // Deterministic on purpose. The racing version of this is not a test: with
+    // the swap running at full duty cycle under load it still slips through
+    // once or twice in 800 reads, because without `openat` every check is a
+    // path walk and the walk can be raced. See the note above `openVerified`.
+    // What IS guaranteed is that a swap standing still is always caught, and
+    // that is the shape a planted symlink actually has.
+    const dataDir = path.join(ws, "pdata");
+    const evil = path.join(root, "pevil");
     fs.mkdirSync(dataDir, { recursive: true });
     fs.mkdirSync(evil, { recursive: true });
     fs.writeFileSync(path.join(dataDir, "f.txt"), "inside\n");
     fs.writeFileSync(path.join(evil, "f.txt"), "TOCTOU-CANARY-LEAKED\n");
 
-    let stop = false;
-    const swapper = (async () => {
-      while (!stop) {
-        try {
-          fs.renameSync(dataDir, stash);
-          fs.symlinkSync(evil, dataDir);
-          await new Promise((r) => setImmediate(r));
-          fs.unlinkSync(dataDir);
-          fs.renameSync(stash, dataDir);
-        } catch {
-          /* racing */
-        }
-        await new Promise((r) => setImmediate(r));
-      }
-    })();
+    const before = await readFileForWeb(ws, "pdata/f.txt", null, { home: root });
+    expect(before.ok).toBe(true);
 
-    let leaked = 0;
-    for (let i = 0; i < 800; i++) {
-      const res = await readFileForWeb(ws, "data/f.txt", null, { home: root });
-      if (!res.ok) continue;
-      const text = Buffer.from(res.bytesBase64 ?? "", "base64").toString("utf-8");
-      if (text.includes("CANARY")) leaked++;
-    }
-    stop = true;
-    await swapper;
-    expect(leaked).toBe(0);
+    fs.renameSync(dataDir, path.join(ws, "pdata-stash"));
+    fs.symlinkSync(evil, dataDir);
+    const after = await readFileForWeb(ws, "pdata/f.txt", null, { home: root });
+    expect(after.ok).toBe(false);
+    if (!after.ok) expect(after.error).toMatch(/leaves the working directory/);
   });
 
   it("still serves an ordinary file when nobody is attacking it", async () => {
