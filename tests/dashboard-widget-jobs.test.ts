@@ -259,6 +259,45 @@ describe("state folding", () => {
     expect(foldInvocationState("failed", null)).toBe("failed");
   });
 
+  it("stays quiet while a cancel is still settling, not only once it has landed", () => {
+    // Galaxy moves the invocation to `cancelled` and then deletes its jobs one
+    // at a time. rollUpInvocationJobs scores every `deleted` job in the same
+    // failed counter as a real error and activeJobs keeps the block off its
+    // terminal branch, so for the whole of that window the panel sees
+    // in_progress with a failed count -- which is the one shape the cancel
+    // exception used to miss.
+    expect(foldInvocationState("in_progress", "Workflow cancelling: 9 job(s) deleted")).toBe(
+      "stopping",
+    );
+    const row = rowFor({
+      status: "in_progress",
+      summary: "Workflow cancelling: 9 job(s) deleted, 3 still going",
+      completedJobs: 0,
+      failedJobs: 9,
+      totalJobs: 12,
+    });
+    expect(row.state).toBe("stopping");
+    // Still moving, so it stays on screen under `show: active`.
+    expect(row.live).toBe(true);
+    expect(isActiveRun(row)).toBe(true);
+    expect(needsAttention(row)).toBe(false);
+    expect(attentionMessage([row])).toBe("");
+    expect(describeRun(row, NOW)).toBe("Stopping. Galaxy is still shutting this down.");
+  });
+
+  it("still raises the alarm for a run that is failing rather than stopping", () => {
+    const row = rowFor({
+      status: "in_progress",
+      summary: "Workflow in progress: 9 job(s) failed, 3 still running",
+      completedJobs: 0,
+      failedJobs: 9,
+      totalJobs: 12,
+    });
+    expect(row.state).toBe("running");
+    expect(needsAttention(row)).toBe(true);
+    expect(attentionMessage([row])).toBe('9 of 12 jobs failed in "Count features".');
+  });
+
   it("gives every state a word and a glyph, so colour is never the only signal", () => {
     const states: RunState[] = [
       "running",

@@ -188,7 +188,7 @@ export function foldJobState(status: DashboardJob["status"], galaxyState: string
  * fail-soft: if the wording changes the row just goes back to saying Failed.
  * The real fix is a `cancelled` value on `InvocationYaml["status"]`.
  */
-const CANCELLED_SUMMARY = /^\s*workflow cancelled\b/i;
+const CANCELLED_SUMMARY = /^\s*workflow cancell(?:ed|ing)\b/i;
 
 export function foldInvocationState(
   status: Invocation["status"],
@@ -196,7 +196,15 @@ export function foldInvocationState(
 ): RunState {
   if (status === "completed") return "finished";
   if (status === "failed") return CANCELLED_SUMMARY.test(summary ?? "") ? "cancelled" : "failed";
-  if (status === "in_progress") return "running";
+  // A cancel is not instant. Galaxy moves the invocation to `cancelled` and
+  // then deletes its jobs one at a time, and the block stays `in_progress`
+  // until the last of them has gone -- so the only window in which the panel
+  // could shout about a deliberate cancel is exactly the window where the
+  // status has not settled yet. Heading for the exit is `stopping`, which is
+  // live, quiet, and says what is happening.
+  if (status === "in_progress") {
+    return CANCELLED_SUMMARY.test(summary ?? "") ? "stopping" : "running";
+  }
   return "unknown";
 }
 
@@ -327,9 +335,17 @@ function jobRow(job: DashboardJob, plans: PlanSection[], now: number): RunRow {
  * deletes its jobs, and rollUpInvocationJobs scores `deleted` alongside `error`
  * in the same failed_jobs counter -- so without this exception every deliberate
  * cancel arrives here dressed as a failure.
+ *
+ * `stopping` is the same run a few seconds earlier, and it is exempt for the
+ * same reason: the deleted jobs are already in the failed counter while the
+ * cancel is still settling. Nothing Galaxy does on its own puts a run in
+ * `stopping` -- both routes into it, a cancelling invocation and a job in
+ * `deleting` or `stop`, are somebody having asked for it to end.
  */
 export function needsAttention(row: RunRow): boolean {
-  if (row.state === "cancelled" || row.state === "skipped") return false;
+  if (row.state === "cancelled" || row.state === "skipped" || row.state === "stopping") {
+    return false;
+  }
   return row.state === "failed" || row.jobs.failed > 0;
 }
 
@@ -591,6 +607,16 @@ function pct(part: number, total: number): string {
   return `${Math.max(0, Math.min(100, (part / total) * 100)).toFixed(1)}%`;
 }
 
+/**
+ * What the unfinished jobs are called. On a run that is being shut down they
+ * are mostly Galaxy's own deletes, which the brain's counter scores alongside
+ * real errors -- so the only honest thing the panel can say about them is that
+ * they did not finish.
+ */
+function unfinishedWord(row: RunRow): string {
+  return row.state === "stopping" ? "did not finish" : "failed";
+}
+
 function progressBar(row: RunRow): HTMLElement | null {
   const { done, failed, total } = row.jobs;
   // A single job is its own progress bar; two states do not need a chart.
@@ -599,7 +625,7 @@ function progressBar(row: RunRow): HTMLElement | null {
   bar.setAttribute("role", "img");
   bar.setAttribute(
     "aria-label",
-    `${done} of ${total} jobs finished${failed > 0 ? `, ${failed} failed` : ""}`,
+    `${done} of ${total} jobs finished${failed > 0 ? `, ${failed} ${unfinishedWord(row)}` : ""}`,
   );
   if (done > 0) {
     const span = node("span", "dash-jobs-bar-done");
@@ -643,7 +669,7 @@ function detailRows(row: RunRow, now: number): Array<[string, string]> {
     const left = Math.max(0, row.jobs.total - row.jobs.done - row.jobs.failed);
     out.push([
       "Jobs",
-      `${row.jobs.done} finished, ${row.jobs.failed} failed, ${left} to go, ${row.jobs.total} in total`,
+      `${row.jobs.done} finished, ${row.jobs.failed} ${unfinishedWord(row)}, ${left} to go, ${row.jobs.total} in total`,
     ]);
   }
   const checked = formatAgo(row.lastPolledAt, now);
