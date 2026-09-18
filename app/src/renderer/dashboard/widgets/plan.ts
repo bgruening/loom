@@ -47,15 +47,15 @@ const EMPTY = "No plan yet -- ask Loom to draft one.";
  * And nothing used to be removed from it, so "bounded by the 40 panels a
  * document may hold" was true of neither dimension: a session that opens
  * several analyses accumulates a set per panel id it has ever seen, and each
- * set accumulates a key per plan that has ever been expanded. Both are bounded
- * now -- by `PANEL_MEMORY_MAX` and `OPEN_KEYS_MAX` below.
+ * set accumulates a key per plan that has ever been expanded. The map is capped
+ * below; each set is bounded by `pruneOpened`, which drops every key the
+ * notebook no longer offers, so a set can never hold more than the notebook
+ * has plans.
  */
 const openedByPanel = new Map<string, Set<string>>();
 
 /** Panel ids remembered at once, least recently mounted evicted first. */
 export const PANEL_MEMORY_MAX = 40;
-/** Expanded rows remembered for one panel. */
-export const OPEN_KEYS_MAX = 200;
 
 function openedFor(panelId: string): Set<string> {
   const existing = openedByPanel.get(panelId);
@@ -96,13 +96,6 @@ function openKey(index: number, plan: PlanSection): string {
 function pruneOpened(opened: Set<string>, live: ReadonlySet<string>): void {
   for (const key of opened) {
     if (!live.has(key)) opened.delete(key);
-  }
-  // A notebook with more expandable plans than this is not a reading surface,
-  // and the set must not be allowed to grow without one.
-  while (opened.size > OPEN_KEYS_MAX) {
-    const oldest = opened.values().next();
-    if (oldest.done) break;
-    opened.delete(oldest.value);
   }
 }
 

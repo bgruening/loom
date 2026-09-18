@@ -2,7 +2,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   currentPlan,
-  OPEN_KEYS_MAX,
   PANEL_MEMORY_MAX,
   planWidget,
 } from "../app/src/renderer/dashboard/widgets/plan.js";
@@ -761,13 +760,9 @@ describe("plan widget -- lifecycle", () => {
     expect(h.el.querySelector(".dash-plan-older-row")?.getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("bounds what it remembers, per panel and per panel id", () => {
-    // Both caps are load-bearing: the map outlives every mount, so without
-    // them a long session accumulates a set for every panel id it has ever
-    // seen and a key for every plan that was ever expanded.
-    expect(PANEL_MEMORY_MAX).toBe(40);
-    expect(OPEN_KEYS_MAX).toBe(200);
-
+  it("evicts the panel nobody has mounted for longest", () => {
+    // The map outlives every mount, so without a cap a long session
+    // accumulates a set for every panel id it has ever seen.
     const first = harness({ plan: "all" }, "p-evicted");
     const dispose = planWidget.mount(first.el, first.ctx);
     first.notebook(TWO_PLANS);

@@ -334,10 +334,15 @@ describe("state folding", () => {
       expect(stateWord(state), state).toBe(word);
       expect(stateGlyph(state), state).toBe(glyph);
     }
-    // The three that must never be confused for one another are also the three
-    // that share a colour family in the stylesheet.
-    const distinct = new Set([stateGlyph("finished"), stateGlyph("failed"), stateGlyph("running")]);
-    expect(distinct.size).toBe(3);
+    // The behavioural claim underneath the table: no two states read the same.
+    // Two of them share a glyph on purpose -- cancelled and skipped are both
+    // "over, and not a failure" -- so it is the pair that has to be distinct,
+    // which is the same thing as saying the word carries the signal when the
+    // glyph does not.
+    const pairs = Object.values(vocabulary).map(([word, glyph]) => `${glyph} ${word}`);
+    expect(new Set(pairs).size).toBe(pairs.length);
+    const words = Object.values(vocabulary).map(([word]) => word);
+    expect(new Set(words).size).toBe(words.length);
     expect(stateWord("nonsense" as RunState)).toBe("In progress");
     expect(stateGlyph("nonsense" as RunState)).toBe("?");
   });
