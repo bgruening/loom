@@ -52,10 +52,16 @@ interface StepGlyph {
   state: string;
 }
 
+/**
+ * A checkbox says done, failed or neither. It does not say "running" -- a step
+ * Galaxy is working on right now and a step nobody has touched are the same
+ * `- [ ]` -- so the pending word is "To do" rather than anything that implies
+ * we know what the machine is doing. The jobs panel owns that question.
+ */
 const STEP_LOOK: Record<PlanStep["status"], StepGlyph> = {
   done: { glyph: "✓", word: "Done", state: "state-done" },
   failed: { glyph: "✕", word: "Failed", state: "state-failed" },
-  pending: { glyph: "○", word: "Waiting", state: "state-waiting" },
+  pending: { glyph: "○", word: "To do", state: "state-waiting" },
 };
 
 interface PlanCounts {
@@ -103,14 +109,23 @@ function plural(n: number, one: string, many: string): string {
   return n === 1 ? one : many;
 }
 
-/** The one line that answers "is this going well". */
+/**
+ * The one line that answers "is this going well".
+ *
+ * Everything here has to be true of the checkboxes alone. "Stopped" is not --
+ * a plan can carry a failed step and go on past it -- and neither is "not
+ * started", because an unticked box covers both "nobody has begun" and "Galaxy
+ * is running it right now".
+ */
 function summarize(counts: PlanCounts): { text: string; state: string; glyph: string } {
   if (counts.total === 0) {
     return { text: "No steps written down yet", state: "state-unknown", glyph: "?" };
   }
   if (counts.failed > 0) {
     const what = `${counts.failed} ${plural(counts.failed, "step", "steps")} failed`;
-    return { text: `Stopped -- ${what}`, state: "state-failed", glyph: "✕" };
+    const left = counts.total - counts.done - counts.failed;
+    const text = left > 0 ? `${what} -- ${left} still to do` : `Finished, but ${what}`;
+    return { text, state: "state-failed", glyph: "✕" };
   }
   if (counts.done >= counts.total) {
     const what = `all ${counts.total} ${plural(counts.total, "step", "steps")} done`;
@@ -118,7 +133,7 @@ function summarize(counts: PlanCounts): { text: string; state: string; glyph: st
   }
   if (counts.done === 0) {
     const what = `${counts.total} ${plural(counts.total, "step", "steps")} to do`;
-    return { text: `Not started -- ${what}`, state: "state-waiting", glyph: "○" };
+    return { text: `No steps done yet -- ${what}`, state: "state-waiting", glyph: "○" };
   }
   return {
     text: `In progress -- ${counts.done} of ${counts.total} steps done`,
@@ -182,7 +197,7 @@ function stateChip(look: StepGlyph): HTMLElement {
   return chip;
 }
 
-function stepRow(step: PlanStep, showState: boolean): HTMLElement {
+function stepRow(step: PlanStep): HTMLElement {
   const look = STEP_LOOK[step.status];
   const row = el("div", "dash-row-item");
   if (step.status === "failed") row.classList.add("is-failed");
@@ -196,8 +211,7 @@ function stepRow(step: PlanStep, showState: boolean): HTMLElement {
   title.title = stepLabel(step);
   main.append(title);
 
-  const meta: string[] = [];
-  if (showState) meta.push(look.word);
+  const meta: string[] = [look.word];
   const routing = stepRouting(step.routing);
   if (routing) meta.push(routing);
   if (meta.length > 0) main.append(el("div", "dash-meta", meta.join(" · ")));
@@ -247,7 +261,7 @@ function planHeading(plan: PlanSection): DocumentFragment {
 function stepList(steps: PlanStep[], showCompleted: boolean): HTMLElement {
   const list = el("div", "dash-rows");
   const shown = showCompleted ? steps : steps.filter((step) => step.status !== "done");
-  for (const step of shown) list.append(stepRow(step, true));
+  for (const step of shown) list.append(stepRow(step));
 
   const hidden = steps.length - shown.length;
   if (hidden > 0) {

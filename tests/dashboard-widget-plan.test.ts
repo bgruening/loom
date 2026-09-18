@@ -220,7 +220,7 @@ describe("plan widget -- the current plan", () => {
     const h = harness();
     planWidget.mount(h.el, h.ctx);
     h.notebook("## Plan A: Fresh [galaxy]\n\n- [ ] 1. **One** -- a\n- [ ] 2. **Two** -- b\n");
-    expect(has(h, "Not started -- 2 steps to do")).toBe(true);
+    expect(has(h, "No steps done yet -- 2 steps to do")).toBe(true);
     expect(has(h, "Runs on Galaxy")).toBe(true);
   });
 
@@ -230,7 +230,7 @@ describe("plan widget -- the current plan", () => {
     h.notebook(
       "## Plan A: Broken [galaxy]\n\n- [x] 1. **One** -- a\n- [!] 2. **Two** -- ran out of memory\n- [ ] 3. **Three** -- c\n",
     );
-    expect(has(h, "Stopped -- 1 step failed")).toBe(true);
+    expect(has(h, "1 step failed -- 1 still to do")).toBe(true);
     const next = h.el.querySelector(".dash-plan-next") as HTMLElement;
     expect(next.classList.contains("is-failed")).toBe(true);
     const text = (next.textContent ?? "").replace(/\s+/g, " ");
@@ -241,6 +241,16 @@ describe("plan widget -- the current plan", () => {
     const bar = h.el.querySelector(".dash-bar") as HTMLElement;
     expect(bar.getAttribute("aria-label")).toBe("1 of 3 steps done, 1 failed");
     expect((bar.querySelector(".dash-bar-fail") as HTMLElement).style.width).toContain("33.3");
+  });
+
+  it("does not claim a plan stopped when it carried on past the failure", () => {
+    const h = harness();
+    planWidget.mount(h.el, h.ctx);
+    h.notebook(
+      "## Plan A: Carried on [galaxy]\n\n- [x] 1. **One**\n- [!] 2. **Two**\n- [x] 3. **Three**\n",
+    );
+    expect(has(h, "Finished, but 1 step failed")).toBe(true);
+    expect(h.text()).not.toContain("still to do");
   });
 
   it("marks the failed row and gives every row a word, not only a colour", () => {
@@ -259,7 +269,7 @@ describe("plan widget -- the current plan", () => {
     expect(rows.map((r) => r.querySelector(".dash-meta")?.textContent)).toEqual([
       "Done",
       "Failed",
-      "Waiting",
+      "To do",
     ]);
     expect(rows[1].classList.contains("is-failed")).toBe(true);
     // Glyphs are decoration, so they stay out of the accessibility tree.
@@ -373,7 +383,7 @@ describe("plan widget -- more than one plan", () => {
     h.notebook(TWO_PLANS);
     const title = h.el.querySelector(".dash-plan-title")?.textContent;
     expect(title).toBe("Plan B: Tissue comparison");
-    expect(has(h, "Not started -- 2 steps to do")).toBe(true);
+    expect(has(h, "No steps done yet -- 2 steps to do")).toBe(true);
   });
 
   it("leaves the earlier plans out entirely on the default config", () => {
