@@ -92,3 +92,34 @@ export const SANDBOX_READY_TIMEOUT_MS = 2000;
 
 /** Marker on every message in both directions, so unrelated traffic is ignored. */
 export const SANDBOX_MESSAGE_TAG = "loom.sandbox";
+
+/**
+ * Frame sources that cannot carry anything off the machine.
+ *
+ * A document is allowed to navigate *itself*. No CSP directive covers it --
+ * not `default-src`, not `form-action` -- and a meta refresh does it with no
+ * script and no click. The request carries whatever the content puts in the
+ * URL, and if the far end answers `204` the frame does not even change, so
+ * there is no load event to notice and the content can do it again on every
+ * update.
+ *
+ * The only thing that stops it is the **embedding page's** `frame-src`, which
+ * governs navigation of the child browsing context whoever initiated it. That
+ * is in `index.html`, a file this widget does not own, and it is currently
+ * narrow for an unrelated reason (the PDF viewer needs `blob:`). So the widget
+ * checks it at runtime and refuses to run if it would not hold, rather than
+ * depending on a directive nobody knows is load-bearing.
+ *
+ * `orbit-sandbox:` is listed ahead of existing: it is the scheme the specified
+ * main-process change would serve frame documents from, handled in-process and
+ * never over the network. `'self'` is deliberately **not** inert -- in the web
+ * shell that is a real HTTP origin.
+ */
+export const SANDBOX_INERT_FRAME_SOURCES = [
+  "'none'",
+  "blob:",
+  "data:",
+  "filesystem:",
+  "about:",
+  "orbit-sandbox:",
+];

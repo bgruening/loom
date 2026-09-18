@@ -176,9 +176,27 @@ function enable(): void {
   localStorage.setItem(HTML_SANDBOX_FLAG_KEY, "1");
 }
 
+/**
+ * The widget refuses to draw unless the page pins frames somewhere that cannot
+ * reach the network, so the tests have to run under a page policy. This is the
+ * real one from `app/src/renderer/index.html`, trimmed to the directive that
+ * matters.
+ */
+function setPagePolicy(content: string | null): void {
+  document.head.querySelectorAll("meta[http-equiv]").forEach((m) => m.remove());
+  if (content === null) return;
+  const meta = document.createElement("meta");
+  meta.setAttribute("http-equiv", "Content-Security-Policy");
+  meta.setAttribute("content", content);
+  document.head.append(meta);
+}
+
+const ORBIT_POLICY = "default-src 'self'; script-src 'self'; frame-src blob:; form-action 'none';";
+
 beforeEach(() => {
   document.body.innerHTML = "";
   document.head.querySelector("#dash-sandbox-styles")?.remove();
+  setPagePolicy(ORBIT_POLICY);
   localStorage.clear();
   delete (globalThis as Record<string, unknown>)[HTML_SANDBOX_GLOBAL];
 });
@@ -224,6 +242,7 @@ describe("the flag", () => {
     for (const on of [false, true]) {
       document.body.innerHTML = "";
       localStorage.clear();
+      setPagePolicy(ORBIT_POLICY);
       if (on) enable();
       const h = harness({ html: "<p>hi</p>" });
       mount(h);
@@ -362,7 +381,8 @@ describe("data in", () => {
   it("will not hand the data to a second document that announces itself", async () => {
     // The shape of a takeover: our document announces and gets the channel,
     // then something that replaced it in the frame announces too. The second
-    // one must get nothing, and the panel must say what happened.
+    // one gets nothing -- that is the protection, and it does not depend on
+    // anyone noticing.
     const h = harness({ html: "<p>hi</p>", data: ["notebook"] });
     mount(h);
     const frame = frameIn(h)!;
@@ -374,7 +394,22 @@ describe("data in", () => {
     const second = announce(frame);
     await flush();
     expect(second.sent).toHaveLength(0);
-    expect(h.el.textContent).toContain("tried to open a web page");
+    h.dispose();
+  });
+
+  it("does not let content raise the alarm by announcing twice", async () => {
+    // Content shares a realm with the bridge, so it can send an announcement
+    // whenever it likes. If that raised the red alarm, the one genuinely
+    // alarming message in this UI would be one the content controls.
+    const h = harness({ html: "<p>hi</p>", data: ["notebook"] });
+    mount(h);
+    const frame = frameIn(h)!;
+    announce(frame);
+    await flush();
+    announce(frame);
+    await flush();
+    expect(h.el.textContent).not.toContain("tried to open a web page");
+    expect(frameIn(h)).not.toBeNull();
     h.dispose();
   });
 
@@ -526,6 +561,47 @@ describe("data out", () => {
   });
 });
 
+describe("the page policy that has to hold the frame in", () => {
+  beforeEach(enable);
+
+  it("runs when the page pins frames somewhere inert", () => {
+    setPagePolicy(ORBIT_POLICY);
+    const h = harness({ html: "<p>hi</p>" });
+    mount(h);
+    expect(frameIn(h)).not.toBeNull();
+    h.dispose();
+  });
+
+  it("refuses to draw when the page would let a frame reach the network", () => {
+    // A self-navigating frame takes its data out in the URL, and no directive
+    // inside the frame covers that. If the page would allow it, do not run.
+    setPagePolicy("default-src 'self'; frame-src blob: https://cdn.example.com;");
+    const h = harness({ html: "<p>hi</p>" });
+    mount(h);
+    expect(frameIn(h)).toBeNull();
+    expect(h.el.textContent).toContain("was not run");
+    expect(h.el.textContent).toContain("cdn.example.com");
+    h.dispose();
+  });
+
+  it("refuses when the page carries no policy at all", () => {
+    setPagePolicy(null);
+    const h = harness({ html: "<p>hi</p>" });
+    mount(h);
+    expect(frameIn(h)).toBeNull();
+    expect(h.el.textContent).toContain("No content rules were found");
+    h.dispose();
+  });
+
+  it("is happy with a default-src that frames fall back to", () => {
+    setPagePolicy("default-src 'none';");
+    const h = harness({ html: "<p>hi</p>" });
+    mount(h);
+    expect(frameIn(h)).not.toBeNull();
+    h.dispose();
+  });
+});
+
 describe("a hostile or sloppy config", () => {
   beforeEach(enable);
 
@@ -535,6 +611,7 @@ describe("a hostile or sloppy config", () => {
     // must not cost the view.
     for (const title of [42, {}, [], true, null]) {
       document.body.innerHTML = "";
+      setPagePolicy(ORBIT_POLICY);
       const h = harness({ html: "<p>hi</p>", title: title as unknown as string });
       mount(h);
       expect(frameIn(h)).not.toBeNull();
@@ -546,6 +623,7 @@ describe("a hostile or sloppy config", () => {
   it("treats a non-string html as no html at all", () => {
     for (const html of [42, {}, null, ["<p>x</p>"]]) {
       document.body.innerHTML = "";
+      setPagePolicy(ORBIT_POLICY);
       const h = harness({ html: html as unknown as string });
       mount(h);
       expect(frameIn(h)).toBeNull();
@@ -557,6 +635,7 @@ describe("a hostile or sloppy config", () => {
   it("ignores a data field that is not a list of source names", () => {
     for (const data of [42, "notebook", { notebook: true }, null]) {
       document.body.innerHTML = "";
+      setPagePolicy(ORBIT_POLICY);
       const h = harness({ html: "<p>hi</p>", data: data as unknown as string[] });
       mount(h);
       expect(h.subscribed).toEqual([]);

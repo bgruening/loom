@@ -12,7 +12,14 @@
  *    the frame has an opaque origin and cannot reach our DOM, our
  *    `localStorage` or `window.orbit`, and cannot rewrite its own sandbox.
  *  - a `default-src 'none'` CSP as the first element of the document, so no
- *    network of any kind: no fetch, no XHR, no WebSocket, no image beacon.
+ *    fetch, no XHR, no WebSocket, no image beacon, no nested frame.
+ *  - a check, before anything is drawn, that the embedding page's `frame-src`
+ *    pins this frame to sources that cannot reach the network. That is the
+ *    only thing that stops a document navigating *itself*, which is a request
+ *    with the content's own data in the URL -- and if the far end answers 204
+ *    the frame does not even change, so nothing here could notice after the
+ *    fact. It is a directive in a file this widget does not own, so it is
+ *    verified at runtime rather than assumed.
  *  - data in and out only over a `MessageChannel` the frame's own document
  *    hands us once, when it announces itself. A port belongs to the document
  *    that created it, so a document that later replaces ours in the frame
@@ -44,6 +51,7 @@ import {
   resolveAllowedSources,
 } from "../sandbox/data-snapshot.js";
 import { isHtmlSandboxEnabled } from "../sandbox/flag.js";
+import { checkHostFramePolicy } from "../sandbox/host-policy.js";
 import { ensureSandboxStyles } from "../sandbox/styles.js";
 
 type HtmlSandboxConfig = {
@@ -91,7 +99,8 @@ export const htmlSandboxWidget: WidgetDefinition<HtmlSandboxConfig> = {
     badge.className = "dash-sandbox-badge";
     badge.textContent = "custom content";
     badge.title =
-      "This view was written by the agent and runs in a locked-down frame with no network access.";
+      "This view was written by the agent, not by Orbit. It runs in a locked-down frame that " +
+      "cannot reach the rest of Orbit and cannot fetch anything.";
     ctx.header.append(badge);
 
     const wrap = document.createElement("div");
@@ -150,6 +159,26 @@ export const htmlSandboxWidget: WidgetDefinition<HtmlSandboxConfig> = {
           `It is ${Math.round(size / 1024)} KB and the limit is ${Math.round(
             SANDBOX_MAX_HTML_BYTES / 1024,
           )} KB. Nothing was run. Ask the agent for a smaller view.`,
+        ),
+      );
+      return () => {
+        el.textContent = "";
+      };
+    }
+
+    // Checked here, after the size cap and before the frame exists, so a page
+    // whose policy would let a view beacon out never gets one drawn.
+    const hostPolicy = checkHostFramePolicy();
+    if (!hostPolicy.contained) {
+      wrap.append(
+        card(
+          "This view was not run",
+          "Orbit's own content rules would not stop a custom view from reaching the network " +
+            "from inside its frame, so nothing here has been run. This is a problem with the " +
+            "build rather than with your analysis." +
+            (hostPolicy.offending.length > 0
+              ? ` The frame rule in force is "${hostPolicy.effective}".`
+              : " No content rules were found on the page at all."),
         ),
       );
       return () => {
@@ -290,10 +319,12 @@ export const htmlSandboxWidget: WidgetDefinition<HtmlSandboxConfig> = {
       if (overBudget()) return;
       const msg = readFrameMessage(event.data);
       if (!msg || msg.type !== "ready") return;
-      if (port) {
-        suspectTakeover();
-        return;
-      }
+      // Only the first announcement is honoured. A second one is ignored in
+      // silence rather than raising the alarm: content sharing a realm with
+      // the bridge can send one whenever it likes, and an alarm anybody can
+      // fire is an alarm nobody reads. What keeps a replacing document away
+      // from the data is that it does not get a port, not that we shout.
+      if (port) return;
       const offered = event.ports?.[0];
       if (!offered) return;
       port = offered;
