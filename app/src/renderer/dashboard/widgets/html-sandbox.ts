@@ -13,15 +13,20 @@
  *    `localStorage` or `window.orbit`, and cannot rewrite its own sandbox.
  *  - a `default-src 'none'` CSP as the first element of the document, so no
  *    network of any kind: no fetch, no XHR, no WebSocket, no image beacon.
- *  - data in only by `postMessage`, and only the sources the panel's `data`
- *    config named. A source that was not named is never even subscribed to.
- *  - data out only as a height request, which is validated, clamped and rate
+ *  - data in and out only over a `MessageChannel` the frame's own document
+ *    hands us once, when it announces itself. A port belongs to the document
+ *    that created it, so a document that later replaces ours in the frame
+ *    inherits nothing and we never post to it. Only the sources the panel's
+ *    `data` config named are sent, and a source that was not named is never
+ *    even subscribed to.
+ *  - the only thing that comes back is a height, validated, clamped and rate
  *    limited.
  *
  * What does not hold it, and is written down rather than hidden: the content
  * can draw anything it likes inside its own box, including something that
- * looks like Orbit asking for a password. The badge and the inset edge are
- * what a user has to tell the difference with. See the threat-model note.
+ * looks like Orbit asking for a password. Nothing here stops that; the badge
+ * and the inset edge are all a user has to tell the difference with. Nor is
+ * there anything here that stops a view burning the main thread in a loop.
  */
 
 import type { WidgetDefinition, WidgetDispose } from "../widget-api.js";
@@ -34,10 +39,11 @@ import { buildSandboxDocument } from "../sandbox/srcdoc.js";
 import { buildDataMessage, MessageBudget, readFrameMessage } from "../sandbox/protocol.js";
 import {
   allowedDataSources,
+  byteLength,
   collectSandboxData,
   resolveAllowedSources,
 } from "../sandbox/data-snapshot.js";
-import { isHtmlSandboxEnabled, HTML_SANDBOX_FLAG_KEY } from "../sandbox/flag.js";
+import { isHtmlSandboxEnabled } from "../sandbox/flag.js";
 import { ensureSandboxStyles } from "../sandbox/styles.js";
 
 type HtmlSandboxConfig = {
@@ -51,14 +57,6 @@ type HtmlSandboxConfig = {
 
 /** Coalesce a burst of source updates into one message. */
 const DATA_DEBOUNCE_MS = 150;
-
-function byteLength(text: string): number {
-  try {
-    return new TextEncoder().encode(text).length;
-  } catch {
-    return text.length;
-  }
-}
 
 function currentTheme(): "dark" | "light" {
   return document.documentElement.dataset.theme === "light" ? "light" : "dark";
@@ -100,6 +98,11 @@ export const htmlSandboxWidget: WidgetDefinition<HtmlSandboxConfig> = {
     wrap.className = "dash-sandbox";
     el.append(wrap);
 
+    const clearNote = (): void => {
+      if (floodNoted || navigated) return;
+      wrap.querySelector(".dash-sandbox-note")?.remove();
+    };
+
     const note = (text: string, alarm = false): void => {
       let line = wrap.querySelector<HTMLElement>(".dash-sandbox-note");
       if (!line) {
@@ -115,9 +118,9 @@ export const htmlSandboxWidget: WidgetDefinition<HtmlSandboxConfig> = {
       wrap.append(
         card(
           "Custom views are switched off",
-          "The agent can write a small HTML view for this panel, and it runs with no network access " +
-            "and no way to reach the rest of Orbit. It is switched off until that has been reviewed. " +
-            `To turn it on for this browser, set ${HTML_SANDBOX_FLAG_KEY} to "1" in local storage.`,
+          "The agent can write a small view for this panel, and it would run with no network access " +
+            "and no way to reach the rest of Orbit. It stays switched off until that has been " +
+            "reviewed, so nothing here has run.",
         ),
       );
       return () => {
@@ -163,35 +166,46 @@ export const htmlSandboxWidget: WidgetDefinition<HtmlSandboxConfig> = {
     const frame = document.createElement("iframe");
     frame.className = "dash-sandbox-frame";
     frame.setAttribute("sandbox", SANDBOX_TOKENS);
-    // Deny every permissions-policy feature outright. An opaque-origin frame
-    // is not delegated any of them by default; saying so costs nothing and
-    // survives a future default changing.
+    // An empty container policy: it delegates nothing. It is not a blanket
+    // deny -- an unnamed feature still falls back to its own default
+    // allowlist -- so the thing actually keeping the camera and the rest away
+    // is the opaque origin. This is here so that delegating something later
+    // has to be a deliberate edit.
     frame.setAttribute("allow", "");
     frame.setAttribute("referrerpolicy", "no-referrer");
     frame.setAttribute("title", "Agent-authored custom view");
     frame.style.height = "100%";
 
     let disposed = false;
-    let ready = false;
     let loads = 0;
     let navigated = false;
     let floodNoted = false;
+    let port: MessagePort | null = null;
     const budget = new MessageBudget();
 
+    const dropPort = (): void => {
+      try {
+        port?.close();
+      } catch {
+        /* closing a port whose other end is already gone is not interesting */
+      }
+      port = null;
+    };
+    ctx.onDispose(dropPort);
+
     const send = (): void => {
-      if (disposed || !ready || navigated) return;
-      const win = frame.contentWindow;
-      if (!win) return;
+      if (disposed || navigated || !port) return;
       const payload = collectSandboxData(ctx.sources, allowed);
-      // The frame's origin is opaque, so there is no origin string to target
-      // and "*" is the only value that delivers. What makes that safe is that
-      // `win` is a handle on our own frame -- and the watchdog below tears the
-      // frame down the moment it stops being the document we put there.
-      win.postMessage(buildDataMessage(payload), "*");
+      // Over the port, not over the window. The window would deliver to
+      // whatever document is in the frame now; the port only reaches the one
+      // that opened it.
+      port.postMessage(buildDataMessage(payload));
       if (payload.dropped.length > 0) {
         note(
           `Some data was too large to hand to this view, so it was left out: ${payload.dropped.join(", ")}.`,
         );
+      } else {
+        clearNote();
       }
     };
 
@@ -209,48 +223,82 @@ export const htmlSandboxWidget: WidgetDefinition<HtmlSandboxConfig> = {
 
     /**
      * The frame is allowed to navigate itself -- no CSP directive covers a
-     * script assigning `location`, and a plain link inside it is a navigation
-     * too. Whether the app's own `frame-src` stops that is the app's business
-     * and can change; this notices either way, stops talking to whatever is
-     * there now, and tells the user.
+     * script assigning `location`, and a meta refresh does it with no script
+     * at all. Whether the app's own `frame-src` stops that is the app's
+     * business and can change.
+     *
+     * This is a **detector, not a defence**, and the difference matters. A
+     * `load` event arrives only once the replacing document has finished
+     * loading, long after its own head script could have run, so by the time
+     * this fires the navigation has already happened or already been refused.
+     * What keeps data away from the replacing document is the port, which
+     * belongs to the document that opened it. This exists to say out loud that
+     * something abnormal happened.
      */
-    const onLoad = (): void => {
-      loads += 1;
-      if (loads <= 1 || disposed) return;
+    const suspectTakeover = (): void => {
+      if (navigated || disposed) return;
       navigated = true;
+      dropPort();
       frame.remove();
       note(
-        "This view tried to open a web page and was stopped. Nothing was sent. " +
+        "This view tried to open a web page. Orbit has stopped talking to it. " +
           "That is not something a normal view does -- it is worth telling whoever set this up.",
         true,
       );
     };
+
+    const onLoad = (): void => {
+      loads += 1;
+      if (loads <= 1) return;
+      suspectTakeover();
+    };
     frame.addEventListener("load", onLoad);
     ctx.onDispose(() => frame.removeEventListener("load", onLoad));
 
+    const overBudget = (): boolean => {
+      if (budget.allow()) return false;
+      if (!floodNoted) {
+        floodNoted = true;
+        note(
+          "This view is asking for more than its share of attention, so some of what it " +
+            "sends is being ignored. What you can see is still correct.",
+        );
+      }
+      return true;
+    };
+
+    /** Everything after the announcement arrives here, on the frame's own port. */
+    const onPortMessage = (event: MessageEvent): void => {
+      if (disposed || navigated) return;
+      if (overBudget()) return;
+      const msg = readFrameMessage(event.data);
+      if (!msg || msg.type !== "height") return;
+      frame.style.height = `${msg.height}px`;
+    };
+
+    /**
+     * The only thing accepted over the window is the announcement, and only
+     * once. Our bridge sends it while the frame's head is still parsing, so it
+     * always gets there before anything in the body could have navigated --
+     * which means a second announcement is a second document, not a retry.
+     */
     const onMessage = (event: MessageEvent): void => {
       if (disposed || navigated) return;
       // Identity, not origin: an opaque-origin frame posts with origin "null",
       // which every other opaque frame on the page would also match.
       if (!frame.contentWindow || event.source !== frame.contentWindow) return;
-      if (!budget.allow()) {
-        if (!floodNoted) {
-          floodNoted = true;
-          note(
-            "This view is asking for more than its share of attention, so some of what it " +
-              "sends is being ignored. What you can see is still correct.",
-          );
-        }
-        return;
-      }
+      if (overBudget()) return;
       const msg = readFrameMessage(event.data);
-      if (!msg) return;
-      if (msg.type === "ready") {
-        ready = true;
-        send();
+      if (!msg || msg.type !== "ready") return;
+      if (port) {
+        suspectTakeover();
         return;
       }
-      frame.style.height = `${msg.height}px`;
+      const offered = event.ports?.[0];
+      if (!offered) return;
+      port = offered;
+      port.onmessage = onPortMessage;
+      send();
     };
     window.addEventListener("message", onMessage);
     ctx.onDispose(() => window.removeEventListener("message", onMessage));
@@ -271,14 +319,20 @@ export const htmlSandboxWidget: WidgetDefinition<HtmlSandboxConfig> = {
     stage.append(frame);
 
     /**
-     * Orbit's CSP is inherited by a `srcdoc` frame, and `script-src 'self'`
-     * blocks every inline script in it. When that is what happened the content
-     * still renders, just inert, and saying so beats leaving someone to work
-     * out why their chart is not moving. Only worth saying if the view
-     * actually has a script in it.
+     * Orbit's own CSP is inherited by a `srcdoc` frame, and its
+     * `script-src 'self'` blocks every inline script in this one -- the bridge
+     * included, and inline handler attributes too. **As the app is built
+     * today that is not an edge case, it is what always happens**, so a view
+     * with moving parts is always a still picture and the data channel never
+     * opens. Giving the frame a document over a scheme that does not inherit
+     * is the fix, and it is a main-process change.
+     *
+     * Until then, say so: the content still renders, and a silent still
+     * picture is worse than one that explains itself. Only worth saying for a
+     * view that has a script to lose.
      */
     const readyTimer = setTimeout(() => {
-      if (disposed || ready || navigated) return;
+      if (disposed || port || navigated) return;
       if (!/<script[\s>]/i.test(html)) return;
       note(
         "The moving parts of this view are switched off by Orbit's content policy, so it is " +
@@ -296,8 +350,10 @@ export const htmlSandboxWidget: WidgetDefinition<HtmlSandboxConfig> = {
         const next = currentTheme();
         if (next === theme || disposed || navigated) return;
         theme = next;
+        // A rebuild is a new document, so it is a new load and a new port. The
+        // load counter has to be reset or the rebuild would read as a takeover.
         loads = 0;
-        ready = false;
+        dropPort();
         frame.srcdoc = buildSandboxDocument({ html, title: ctx.config.title, theme });
       });
       observer.observe(document.documentElement, {

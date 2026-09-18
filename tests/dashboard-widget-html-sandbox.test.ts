@@ -91,20 +91,85 @@ function frameIn(h: Harness): HTMLIFrameElement | null {
   return h.el.querySelector("iframe");
 }
 
-/** Stand in for the frame's window, which happy-dom will not script for us. */
-function fakeFrameWindow(frame: HTMLIFrameElement): { posts: unknown[] } {
-  const posts: unknown[] = [];
-  Object.defineProperty(frame, "contentWindow", {
-    configurable: true,
-    value: { postMessage: (msg: unknown) => posts.push(msg) },
-  });
-  return { posts };
+/**
+ * Stand in for the frame's bridge: announce over the window and hand the host
+ * one end of a channel, exactly as `SANDBOX_BRIDGE_SOURCE` does. `sent` is
+ * everything the host posts back down it.
+ */
+function announce(
+  frame: HTMLIFrameElement,
+  opts: { withPort?: boolean; source?: unknown } = {},
+): { sent: unknown[]; port: MessagePort } {
+  const channel = new MessageChannel();
+  const sent: unknown[] = [];
+  channel.port1.onmessage = (event: MessageEvent) => sent.push(event.data);
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      data: { tag: SANDBOX_MESSAGE_TAG, type: "ready" },
+      source: (opts.source ?? frame.contentWindow) as Window,
+      ports: opts.withPort === false ? [] : [channel.port2],
+    }),
+  );
+  return { sent, port: channel.port1 };
 }
 
+/** A window-level message, the way anything other than the bridge would send one. */
 function post(frame: HTMLIFrameElement, data: unknown, source?: unknown): void {
   window.dispatchEvent(
     new MessageEvent("message", { data, source: (source ?? frame.contentWindow) as Window }),
   );
+}
+
+/**
+ * Counts `message` listeners added and removed on window, by spying rather
+ * than by reading happy-dom's internals. This is the only way to tell "the
+ * listener was removed" apart from "the listener ran and bailed on a flag" --
+ * a test that only checks the effect passes if either one works.
+ */
+function trackMessageListeners(): { net: () => number; restore: () => void } {
+  let net = 0;
+  const add = window.addEventListener.bind(window);
+  const remove = window.removeEventListener.bind(window);
+  const addSpy = vi
+    .spyOn(window, "addEventListener")
+    .mockImplementation((type: string, ...rest: unknown[]) => {
+      if (type === "message") net += 1;
+      return (add as (...a: unknown[]) => void)(type, ...rest);
+    });
+  const removeSpy = vi
+    .spyOn(window, "removeEventListener")
+    .mockImplementation((type: string, ...rest: unknown[]) => {
+      if (type === "message") net -= 1;
+      return (remove as (...a: unknown[]) => void)(type, ...rest);
+    });
+  return {
+    net: () => net,
+    restore: () => {
+      addSpy.mockRestore();
+      removeSpy.mockRestore();
+    },
+  };
+}
+
+/**
+ * Port delivery is a task, not a microtask, and it is not reliably the very
+ * next one -- a single tick made these tests flake about one run in three.
+ */
+async function flush(ticks = 6): Promise<void> {
+  for (let i = 0; i < ticks; i++) await new Promise((resolve) => setTimeout(resolve, 1));
+}
+
+/**
+ * Wait for something to become true, for assertions about what did arrive.
+ * Generous on purpose: the whole suite runs these files in parallel and a
+ * tight budget here flakes under that load rather than under any real fault.
+ */
+async function waitFor(condition: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
 }
 
 function enable(): void {
@@ -175,6 +240,8 @@ describe("what gets into the frame", () => {
     const h = harness({ html: "<p>hi</p>" });
     mount(h);
     const frame = frameIn(h)!;
+    // Against the rendered attribute, not against the constant: this is the
+    // value a browser will actually read.
     expect(frame.getAttribute("sandbox")).toBe("allow-scripts");
     for (const token of SANDBOX_FORBIDDEN_TOKENS) {
       expect(frame.getAttribute("sandbox")).not.toContain(token);
@@ -235,32 +302,125 @@ describe("data in", () => {
     h.dispose();
   });
 
-  it("sends nothing until the frame says it is ready", () => {
+  it("sends nothing over the window before the frame has announced itself", () => {
+    vi.useFakeTimers();
     const h = harness({ html: "<p>hi</p>", data: ["notebook"] });
     mount(h);
     const frame = frameIn(h)!;
-    const win = fakeFrameWindow(frame);
+    // Watch the window channel directly. Asserting on an empty port would be
+    // vacuous -- there is no port yet, so of course nothing arrived on one.
+    const windowPost = vi.fn();
+    Object.defineProperty(frame, "contentWindow", {
+      configurable: true,
+      value: { postMessage: windowPost },
+    });
     h.sources.setNotebook("# something");
-    expect(win.posts).toHaveLength(0);
+    vi.advanceTimersByTime(1000); // well past the 150ms debounce
+    expect(windowPost).not.toHaveBeenCalled();
     h.dispose();
   });
 
-  it("sends the allowed sources, and only those, once the frame is ready", () => {
+  it("sends the allowed sources, and only those, once the frame announces", async () => {
     const h = harness({ html: "<p>hi</p>", data: ["notebook"] });
     mount(h);
     const frame = frameIn(h)!;
-    const win = fakeFrameWindow(frame);
     h.sources.setNotebook("# a heading");
     h.sources.setSession({ model: "secret-model" });
 
-    post(frame, { tag: SANDBOX_MESSAGE_TAG, type: "ready" });
+    const { sent } = announce(frame);
+    await waitFor(() => sent.length > 0);
 
-    expect(win.posts).toHaveLength(1);
-    const msg = win.posts[0] as { tag: string; sources: Record<string, unknown> };
+    expect(sent).toHaveLength(1);
+    const msg = sent[0] as { tag: string; sources: Record<string, unknown> };
     expect(msg.tag).toBe(SANDBOX_MESSAGE_TAG);
     expect(Object.keys(msg.sources)).toEqual(["notebook"]);
     expect(JSON.stringify(msg)).toContain("a heading");
     expect(JSON.stringify(msg)).not.toContain("secret-model");
+    h.dispose();
+  });
+
+  it("ignores an announcement that brings no port", async () => {
+    const h = harness({ html: "<p>hi</p>", data: ["notebook"] });
+    mount(h);
+    const frame = frameIn(h)!;
+    const { sent } = announce(frame, { withPort: false });
+    await flush();
+    expect(sent).toHaveLength(0);
+    h.dispose();
+  });
+
+  it("ignores an announcement from a window that is not this frame", async () => {
+    const h = harness({ html: "<p>hi</p>", data: ["notebook"] });
+    mount(h);
+    const frame = frameIn(h)!;
+    const { sent } = announce(frame, { source: { impostor: true } });
+    await flush();
+    expect(sent).toHaveLength(0);
+    h.dispose();
+  });
+
+  it("will not hand the data to a second document that announces itself", async () => {
+    // The shape of a takeover: our document announces and gets the channel,
+    // then something that replaced it in the frame announces too. The second
+    // one must get nothing, and the panel must say what happened.
+    const h = harness({ html: "<p>hi</p>", data: ["notebook"] });
+    mount(h);
+    const frame = frameIn(h)!;
+    h.sources.setNotebook("# private");
+    const first = announce(frame);
+    await waitFor(() => first.sent.length > 0);
+    expect(first.sent).toHaveLength(1);
+
+    const second = announce(frame);
+    await flush();
+    expect(second.sent).toHaveLength(0);
+    expect(h.el.textContent).toContain("tried to open a web page");
+    h.dispose();
+  });
+
+  it("does not produce a second payload for a repeated announcement", async () => {
+    // A repeated `ready` used to run a full collect-and-clone each time, which
+    // is the most expensive thing the message budget lets through.
+    const h = harness({ html: "<p>hi</p>", data: ["notebook"] });
+    mount(h);
+    const frame = frameIn(h)!;
+    const { sent } = announce(frame);
+    await waitFor(() => sent.length > 0);
+    for (let i = 0; i < 20; i++) post(frame, { tag: SANDBOX_MESSAGE_TAG, type: "ready" });
+    await flush();
+    expect(sent).toHaveLength(1);
+    h.dispose();
+  });
+
+  it("says which sources were too large, and stops saying it once they fit", async () => {
+    const h = harness({ html: "<p>hi</p>", data: ["notebook", "session"] });
+    mount(h);
+    const frame = frameIn(h)!;
+    // Big enough that the notebook has to be dropped whole.
+    h.sources.setNotebook("N".repeat(40_000));
+    const { sent } = announce(frame);
+    await waitFor(() => sent.length > 0);
+    const first = sent[0] as { dropped: string[] };
+    if (first.dropped.length > 0) {
+      expect(h.el.textContent).toContain("too large");
+      h.sources.setNotebook("# small again");
+      await new Promise((r) => setTimeout(r, 200));
+      await flush();
+      expect(h.el.textContent).not.toContain("too large");
+    }
+    h.dispose();
+  });
+
+  it("sends the notebook's name and not the path it sits at", async () => {
+    const h = harness({ html: "<p>hi</p>", data: ["notebook"] });
+    mount(h);
+    const frame = frameIn(h)!;
+    h.sources.setNotebook("# x", "/Users/someone/secret-project/notebook.md");
+    const { sent } = announce(frame);
+    await waitFor(() => sent.length > 0);
+    const json = JSON.stringify(sent[0]);
+    expect(json).not.toContain("/Users/someone");
+    expect(json).toContain("notebook.md");
     h.dispose();
   });
 });
@@ -268,113 +428,239 @@ describe("data in", () => {
 describe("data out", () => {
   beforeEach(enable);
 
-  it("applies a height the frame asks for", () => {
+  it("applies a height the frame asks for", async () => {
     const h = harness({ html: "<p>hi</p>" });
     mount(h);
     const frame = frameIn(h)!;
-    fakeFrameWindow(frame);
-    post(frame, { tag: SANDBOX_MESSAGE_TAG, type: "height", height: 260 });
+    const { port } = announce(frame);
+    await flush();
+    port.postMessage({ tag: SANDBOX_MESSAGE_TAG, type: "height", height: 260 });
+    await waitFor(() => frame.style.height === "260px");
     expect(frame.style.height).toBe("260px");
     h.dispose();
   });
 
-  it("clamps an absurd height instead of growing the page", () => {
+  it("clamps an absurd height instead of growing the page", async () => {
     const h = harness({ html: "<p>hi</p>" });
     mount(h);
     const frame = frameIn(h)!;
-    fakeFrameWindow(frame);
-    post(frame, { tag: SANDBOX_MESSAGE_TAG, type: "height", height: 5_000_000 });
+    const { port } = announce(frame);
+    await flush();
+    port.postMessage({ tag: SANDBOX_MESSAGE_TAG, type: "height", height: 5_000_000 });
+    await waitFor(() => frame.style.height === `${SANDBOX_MAX_HEIGHT}px`);
     expect(frame.style.height).toBe(`${SANDBOX_MAX_HEIGHT}px`);
     h.dispose();
   });
 
-  it("ignores a message from anything that is not this frame", () => {
+  it("takes no height over the window, only over the frame's own port", async () => {
     const h = harness({ html: "<p>hi</p>" });
     mount(h);
     const frame = frameIn(h)!;
-    fakeFrameWindow(frame);
-    post(frame, { tag: SANDBOX_MESSAGE_TAG, type: "height", height: 300 }, { impostor: true });
+    announce(frame);
+    await flush();
+    post(frame, { tag: SANDBOX_MESSAGE_TAG, type: "height", height: 300 });
+    await flush();
     expect(frame.style.height).toBe("100%");
     h.dispose();
   });
 
-  it("ignores anything that is not one of the two known messages", () => {
+  it("ignores anything on the port that is not a height", async () => {
     const h = harness({ html: "<p>hi</p>" });
     mount(h);
     const frame = frameIn(h)!;
-    fakeFrameWindow(frame);
+    const { port } = announce(frame);
+    await flush();
     for (const junk of [
       "height",
       { type: "height", height: 300 },
       { tag: SANDBOX_MESSAGE_TAG, type: "setConfig", html: "<p>replaced</p>" },
       { tag: SANDBOX_MESSAGE_TAG, type: "height", height: "300" },
     ]) {
-      post(frame, junk);
+      port.postMessage(junk);
     }
+    await flush();
     expect(frame.style.height).toBe("100%");
     expect(h.ctx.setConfig).not.toHaveBeenCalled();
     h.dispose();
   });
 
-  it("stops listening to a flood and says what it did", () => {
+  it("stops listening to a flood and says what it did", async () => {
     const h = harness({ html: "<p>hi</p>" });
     mount(h);
     const frame = frameIn(h)!;
-    fakeFrameWindow(frame);
+    const { port } = announce(frame);
+    await flush();
     for (let i = 0; i < 200; i++) {
-      post(frame, { tag: SANDBOX_MESSAGE_TAG, type: "height", height: 100 + i });
+      port.postMessage({ tag: SANDBOX_MESSAGE_TAG, type: "height", height: 100 + i });
     }
+    await waitFor(() => h.el.textContent.includes("more than its share"));
     // The last accepted height, not the last sent one.
     expect(parseInt(frame.style.height, 10)).toBeLessThan(200);
     expect(h.el.textContent).toContain("more than its share");
     h.dispose();
   });
 
-  it("hears nothing after the panel is gone", () => {
+  it("hears nothing on the port after the panel is gone", async () => {
     const h = harness({ html: "<p>hi</p>" });
     mount(h);
     const frame = frameIn(h)!;
-    fakeFrameWindow(frame);
+    const { port } = announce(frame);
+    await flush();
     h.dispose();
-    post(frame, { tag: SANDBOX_MESSAGE_TAG, type: "height", height: 700 });
+    port.postMessage({ tag: SANDBOX_MESSAGE_TAG, type: "height", height: 700 });
+    await flush();
     expect(frame.style.height).not.toBe("700px");
     expect(h.el.textContent).toBe("");
+  });
+
+  it("takes its window listener with it, not only its disposed flag", () => {
+    // Covers the arm the flag would otherwise hide: after dispose there must
+    // be no listener left on window at all.
+    const tracker = trackMessageListeners();
+    const h = harness({ html: "<p>hi</p>" });
+    mount(h);
+    expect(tracker.net()).toBe(1);
+    h.dispose();
+    expect(tracker.net()).toBe(0);
+    tracker.restore();
+  });
+});
+
+describe("a hostile or sloppy config", () => {
+  beforeEach(enable);
+
+  it("does not become an error card over a title that is not a string", () => {
+    // The config is whatever was in the layout file, so any field can be any
+    // JSON type. A typo in a field used only for the frame's document title
+    // must not cost the view.
+    for (const title of [42, {}, [], true, null]) {
+      document.body.innerHTML = "";
+      const h = harness({ html: "<p>hi</p>", title: title as unknown as string });
+      mount(h);
+      expect(frameIn(h)).not.toBeNull();
+      expect(h.ctx.fail).not.toHaveBeenCalled();
+      h.dispose();
+    }
+  });
+
+  it("treats a non-string html as no html at all", () => {
+    for (const html of [42, {}, null, ["<p>x</p>"]]) {
+      document.body.innerHTML = "";
+      const h = harness({ html: html as unknown as string });
+      mount(h);
+      expect(frameIn(h)).toBeNull();
+      expect(h.el.textContent).toContain("Nothing to show yet");
+      h.dispose();
+    }
+  });
+
+  it("ignores a data field that is not a list of source names", () => {
+    for (const data of [42, "notebook", { notebook: true }, null]) {
+      document.body.innerHTML = "";
+      const h = harness({ html: "<p>hi</p>", data: data as unknown as string[] });
+      mount(h);
+      expect(h.subscribed).toEqual([]);
+      h.dispose();
+    }
+  });
+});
+
+describe("the theme", () => {
+  beforeEach(enable);
+
+  it("rebuilds the frame when Orbit's theme changes", async () => {
+    const h = harness({ html: "<p>hi</p>" });
+    mount(h);
+    const frame = frameIn(h)!;
+    expect(frame.getAttribute("srcdoc")).toContain("color-scheme: dark");
+
+    document.documentElement.dataset.theme = "light";
+    await flush();
+    expect(frame.getAttribute("srcdoc")).toContain("color-scheme: light");
+    h.dispose();
+    delete document.documentElement.dataset.theme;
+  });
+
+  it("does not read its own rebuild as a frame that navigated", async () => {
+    // Assigning srcdoc loads a document, so a rebuild fires a real `load` of
+    // its own -- in this environment and in a browser. The watchdog has to
+    // expect that one and not count it as a second document.
+    const h = harness({ html: "<p>hi</p>" });
+    mount(h);
+    await flush(); // the mount's own load
+    document.documentElement.dataset.theme = "light";
+    await flush(); // the observer, and the srcdoc it reassigns
+    await flush(); // the rebuild's own load
+
+    expect(frameIn(h)).not.toBeNull();
+    expect(h.el.textContent).not.toContain("tried to open a web page");
+    h.dispose();
+    delete document.documentElement.dataset.theme;
+  });
+
+  it("stops watching the theme once the panel is gone", async () => {
+    const h = harness({ html: "<p>hi</p>" });
+    mount(h);
+    const frame = frameIn(h)!;
+    const before = frame.getAttribute("srcdoc");
+    h.dispose();
+    document.documentElement.dataset.theme = "light";
+    await flush();
+    expect(frame.getAttribute("srcdoc")).toBe(before);
+    delete document.documentElement.dataset.theme;
   });
 });
 
 describe("the navigation watchdog", () => {
   beforeEach(enable);
 
-  it("leaves the first load alone", () => {
+  it("leaves the document it put there alone", async () => {
     const h = harness({ html: "<p>hi</p>" });
     mount(h);
-    const frame = frameIn(h)!;
-    frame.dispatchEvent(new Event("load"));
+    await flush(); // the real load of the srcdoc document
     expect(frameIn(h)).not.toBeNull();
+    expect(h.el.textContent).not.toContain("tried to open a web page");
     h.dispose();
   });
 
-  it("tears the frame down if it loads a second document", () => {
+  it("tears the frame down if a second document loads in it", async () => {
     const h = harness({ html: "<p>hi</p>" });
     mount(h);
-    const frame = frameIn(h)!;
-    frame.dispatchEvent(new Event("load"));
-    frame.dispatchEvent(new Event("load"));
+    await flush(); // ours
+    frameIn(h)!.dispatchEvent(new Event("load")); // something else
     expect(frameIn(h)).toBeNull();
     expect(h.el.textContent).toContain("tried to open a web page");
     expect(h.el.querySelector(".dash-sandbox-alarm")).not.toBeNull();
     h.dispose();
   });
 
-  it("says nothing more to a frame that has navigated", () => {
+  it("says nothing to a document that announces itself after a takeover", async () => {
     const h = harness({ html: "<p>hi</p>", data: ["notebook"] });
     mount(h);
     const frame = frameIn(h)!;
-    const win = fakeFrameWindow(frame);
-    frame.dispatchEvent(new Event("load"));
-    frame.dispatchEvent(new Event("load"));
-    post(frame, { tag: SANDBOX_MESSAGE_TAG, type: "ready" });
-    expect(win.posts).toHaveLength(0);
+    await flush();
+    frame.dispatchEvent(new Event("load")); // a second document
+    const { sent } = announce(frame);
+    await flush();
+    expect(sent).toHaveLength(0);
+    h.dispose();
+  });
+
+  it("drops the port it already had when the frame is taken over", async () => {
+    const h = harness({ html: "<p>hi</p>", data: ["notebook"] });
+    mount(h);
+    const frame = frameIn(h)!;
+    await flush();
+    const { sent } = announce(frame);
+    await waitFor(() => sent.length > 0);
+    expect(sent).toHaveLength(1);
+
+    frame.dispatchEvent(new Event("load")); // a second document
+    h.sources.setNotebook("# written after the takeover");
+    await new Promise((r) => setTimeout(r, 200));
+    await flush();
+    // Nothing further reaches the document that was there before, either.
+    expect(sent).toHaveLength(1);
     h.dispose();
   });
 });
@@ -405,8 +691,7 @@ describe("when Orbit's own policy blocks the frame's scripts", () => {
     const h = harness({ html: "<script>draw()</script>" });
     mount(h);
     const frame = frameIn(h)!;
-    fakeFrameWindow(frame);
-    post(frame, { tag: SANDBOX_MESSAGE_TAG, type: "ready" });
+    announce(frame);
     vi.advanceTimersByTime(5000);
     expect(h.el.textContent).not.toContain("still picture");
     h.dispose();

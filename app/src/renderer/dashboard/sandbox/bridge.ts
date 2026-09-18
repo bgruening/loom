@@ -9,6 +9,13 @@
  * Written as a string rather than a module because it has to be inlined into
  * the frame's document -- there is no origin it could be fetched from, and
  * fetching anything is exactly what the frame is not allowed to do.
+ *
+ * It announces itself once, over `window.postMessage`, and hands the host one
+ * end of a `MessageChannel` with that announcement. Everything after that goes
+ * over the port. A port belongs to the document that created it and dies with
+ * it, so a document that replaces this one in the frame inherits nothing: the
+ * host keeps posting into a port whose other end is gone rather than into
+ * whatever is in the frame now.
  */
 
 import { SANDBOX_MESSAGE_TAG, SANDBOX_MIN_HEIGHT, SANDBOX_MAX_HEIGHT } from "./policy.js";
@@ -27,12 +34,11 @@ export const SANDBOX_BRIDGE_SOURCE = `
   var listeners = [];
   var state = { data: null, dropped: [], updatedAt: 0 };
 
+  var port = null;
+
   function post(message) {
     try {
-      // The frame has an opaque origin, so there is no origin string the
-      // parent would match; "*" is the only workable target here and the
-      // parent identifies us by window identity instead.
-      parent.postMessage(message, "*");
+      if (port) port.postMessage(message);
     } catch (err) {
       /* the parent may already be gone */
     }
@@ -77,8 +83,7 @@ export const SANDBOX_BRIDGE_SOURCE = `
     reportHeight();
   }
 
-  window.addEventListener("message", function (event) {
-    if (event.source !== parent) return;
+  function receive(event) {
     var msg = event.data;
     if (!msg || typeof msg !== "object" || msg.tag !== TAG) return;
     if (msg.type !== "data") return;
@@ -93,7 +98,7 @@ export const SANDBOX_BRIDGE_SOURCE = `
     } catch (err) {
       /* CustomEvent is present everywhere we run, but never take the frame down for it */
     }
-  });
+  }
 
   window.loom = {
     get data() {
@@ -128,6 +133,19 @@ export const SANDBOX_BRIDGE_SOURCE = `
   window.addEventListener("load", reportHeight);
   document.addEventListener("DOMContentLoaded", reportHeight);
 
-  post({ tag: TAG, type: "ready" });
+  // The announcement is the one thing that has to go over the window, because
+  // there is no port yet. It carries the port, and it happens while the head
+  // is still parsing -- before any content, any content script, or any
+  // meta refresh in the body has had a chance to run. So this
+  // document always claims the channel first, and the host can treat a second
+  // announcement as a document that is not this one.
+  try {
+    var channel = new MessageChannel();
+    port = channel.port1;
+    port.onmessage = receive;
+    parent.postMessage({ tag: TAG, type: "ready" }, "*", [channel.port2]);
+  } catch (err) {
+    /* no channel, no data -- the view still draws whatever it can draw */
+  }
 })();
 `;
