@@ -286,6 +286,13 @@ describe("state folding", () => {
   });
 
   it("still raises the alarm for a run that is failing rather than stopping", () => {
+    // Be careful with this fixture. The summary below is *also* what the brain
+    // writes while a cancel is settling, because rollUpInvocationJobs scores a
+    // `deleted` job in the same counter as an errored one and the block has no
+    // word for a cancel in flight -- so this test pins "a run reporting failed
+    // jobs alarms", not "a cancel alarms". Until checkInvocations says which it
+    // is, the widget cannot tell them apart and the exemption above only fires
+    // once the brain names it.
     const row = rowFor({
       status: "in_progress",
       summary: "Workflow in progress: 9 job(s) failed, 3 still running",
@@ -464,17 +471,32 @@ describe("staleness", () => {
     expect(describeRun(row, NOW)).toContain("Running");
   });
 
-  it("does not print a running job's frozen stamp as if it were a check", () => {
+  it("calls a job's stamp what it is -- the last change, not the last check", () => {
+    // tickJobs asks every fifteen seconds and writes only on a change, so
+    // "checked 3 h ago" is a lie about a run we are checking four times a
+    // minute -- and "no change yet" would be a different lie about a job whose
+    // state Galaxy did report. The details block already says "Last change".
     const row = jobRowFor({ galaxyState: "running", lastPolledAt: ago(3 * HOUR) });
     const meta = metaLine(row, NOW);
     expect(meta).not.toContain("checked 3 h");
-    expect(meta).toContain("no change yet");
+    expect(meta).not.toContain("no change yet");
+    expect(meta).toContain("last change 3 h 00 m ago");
   });
 
-  it("does print the stamp once the job has settled, because then it is the answer", () => {
-    const row = jobRowFor({ status: "completed", lastPolledAt: ago(3 * HOUR) });
-    expect(row.live).toBe(false);
-    expect(metaLine(row, NOW)).toContain("checked 3 h 00 m ago");
+  it("says nothing has changed only when nothing has been written down", () => {
+    // The normal shape of a live tool run: galaxy_job_record writes no state
+    // and no stamp, and the non-terminal poll does not add them.
+    const row = jobRowFor({});
+    expect(row.lastPolledAt).toBeNull();
+    expect(metaLine(row, NOW)).toContain("no change yet");
+  });
+
+  it("keeps calling an invocation's stamp a check, because that is what it is", () => {
+    // checkInvocations rewrites the block on every poll whether or not anything
+    // moved, so for an invocation the stamp really is a heartbeat.
+    const row = rowFor({ lastPolledAt: ago(3 * MINUTE) });
+    expect(metaLine(row, NOW)).toContain("checked 3 m ago");
+    expect(metaLine(row, NOW)).not.toContain("last change");
   });
 
   it("does not offer a submit time as the moment Galaxy was last checked", () => {

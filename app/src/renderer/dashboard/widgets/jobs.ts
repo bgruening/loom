@@ -671,16 +671,16 @@ export function metaLine(row: RunRow, now: number): string {
   if (row.steps) bits.push(`${row.steps.done} of ${row.steps.total} steps`);
   const started = formatAgo(row.submittedAt, now);
   if (started) bits.push(row.live ? `started ${started}` : `submitted ${started}`);
-  // A live job's stamp is not a heartbeat -- `isStaleTracked` exists to say so.
+  // A job's stamp is not a heartbeat -- `isStaleTracked` exists to say so.
   // tickJobs asks every fifteen seconds and only writes on a change, so
-  // printing the stamp as a check puts "checked 3 h ago" on a run we are
-  // checking four times a minute. Once the job has settled the stamp is the
-  // moment Galaxy last told us something, which is worth showing.
-  const checked = row.live && row.kind === "job" ? "" : formatAgo(row.lastPolledAt, now);
-  if (checked) bits.push(`checked ${checked}`);
+  // "checked 3 h ago" on a job is a run we are asking about four times a
+  // minute. What the stamp actually marks is the last change, and saying that
+  // keeps this line agreeing with the "Last change" row in the details.
+  const stamp = formatAgo(row.lastPolledAt, now);
+  if (stamp) bits.push(row.kind === "job" ? `last change ${stamp}` : `checked ${stamp}`);
   // An invocation is stamped on every poll, so a missing stamp really does mean
-  // nobody has asked. A job is only stamped when something changed, so the same
-  // gap means the opposite -- we have been asking and the answer is the same.
+  // nobody has asked. A job with no stamp has had nothing written about it
+  // since it was recorded, which is the normal shape of a live tool run.
   else if (row.live) bits.push(row.kind === "job" ? "no change yet" : "not checked yet");
   if (row.serverHost) bits.push(safeName(row.serverHost));
   if (row.unconfirmed) bits.push("unconfirmed by Galaxy");
