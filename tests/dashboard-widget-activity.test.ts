@@ -428,9 +428,13 @@ describe("redaction", () => {
       for (let i = 0; i < 20; i++) wide[`k${i}`] = level;
       level = wide;
     }
+    // Generous on purpose. The unbounded version takes thirteen seconds here
+    // and the bounded one takes under a millisecond, so the gap is four orders
+    // of magnitude and the budget only has to sit inside it -- a tight one
+    // would turn this into a test of how busy the machine is.
     const started = Date.now();
     const out = redactForDisplay(level);
-    expect(Date.now() - started).toBeLessThan(2000);
+    expect(Date.now() - started).toBeLessThan(5000);
     expect(() => JSON.stringify(out)).not.toThrow();
   });
 
