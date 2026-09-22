@@ -76,6 +76,7 @@ Implemented and locally tested.
 - **Chat**: streaming responses with thinking indicator; markdown-rendered with proper tables; `team_dispatch` rich card; queue-while-streaming; numbered prompt turns (`/summarize 3 5` works against those numbers).
 - **Slash-command popup** appears as you type `/`. Tab to autocomplete; Enter still submits past it; Esc dismisses.
 - **Prompt history**: ↑ / ↓ in the input recalls previously-submitted prompts (per-cwd, persistent).
+- **Batched SRA imports**: Loom catches compatible per-accession `fastq_dump`/`fasterq_dump` calls before submission and directs the agent to one collection-producing run. Always-loaded guidance covers accession deduplication, history reuse, and output verification.
 - **Galaxy connection indicator** in the footer (RED dot if no API key, GREEN dot if connected). Click to open Preferences.
 - **Cost / token header**: live in-flight cost (computed from Pi-reported `usage.cost`) and token totals.
 - **Preferences dialog** (`Cmd/Ctrl+,`): provider / model / API key, Galaxy credentials, default working directory, package manager, and a configurable list of **skill repositories** (galaxy-skills shipped as default).

@@ -28,6 +28,7 @@ import { registerSessionIndexTools } from "./session-index/tools";
 import { isSessionIndexEnabled } from "./session-index/is-enabled";
 import { registerConfusablesHint } from "./confusables-hint";
 import { registerInvocationFailureHint } from "./invocation-failure-hint";
+import { registerSraImportGate } from "./sra-import-gate";
 import { registerEvidenceGate } from "./evidence-gate";
 import { registerEvidenceOverrideCommand } from "./evidence-override-command";
 import { registerExecGuard } from "./exec-guard";
@@ -100,6 +101,7 @@ export default function galaxyAnalystExtension(pi: ExtensionAPI): void {
   registerConfusablesHint(pi);
   registerInvocationFailureHint(pi);
   registerEvidenceGate(pi);
+  registerSraImportGate(pi);
   registerEvidenceOverrideCommand(pi);
   if (isTeamDispatchEnabled()) {
     registerTeamTools(pi);
