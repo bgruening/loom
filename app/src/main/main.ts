@@ -515,9 +515,13 @@ app.whenReady().then(() => {
   createWindow(cwd);
   initAutoUpdate();
 
-  powerMonitor.on("suspend", () => log("[diag] powerMonitor suspend"));
+  powerMonitor.on("suspend", () => {
+    log("[diag] powerMonitor suspend");
+    agentManager?.suspendWatchdog();
+  });
   powerMonitor.on("resume", () => {
     log("[diag] powerMonitor resume");
+    agentManager?.resumeWatchdog();
     if (!mainWindow || mainWindow.isDestroyed()) return;
     // Force GPU compositor repaint — macOS resets the GPU process on wake.
     mainWindow.webContents.invalidate();
