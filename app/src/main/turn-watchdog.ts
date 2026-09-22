@@ -37,6 +37,9 @@ export class TurnWatchdog {
 
   /** A user prompt was dispatched to the brain; begin watching for a stall. */
   promptSent(): void {
+    // A fresh user prompt means the machine is awake. Clearing here keeps a
+    // dropped powerMonitor `resume` from disabling the watchdog for good.
+    this.suspended = false;
     this.active = true;
     this.paused = false;
     this.arm();

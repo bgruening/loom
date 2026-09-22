@@ -147,10 +147,10 @@ describe("TurnWatchdog", () => {
     expect(onTimeout).toHaveBeenCalledTimes(1);
   });
 
-  it("does not rearm for late brain events or prompts while the system is suspended", () => {
+  it("does not rearm for late brain events while the system is suspended", () => {
     const { watchdog, onTimeout } = make();
-    watchdog.suspend();
     watchdog.promptSent();
+    watchdog.suspend();
     watchdog.observe("message_update");
     watchdog.observe("tool_execution_end");
     vi.advanceTimersByTime(TIMEOUT * 10);
@@ -192,6 +192,17 @@ describe("TurnWatchdog", () => {
       expect(onTimeout).not.toHaveBeenCalled();
     },
   );
+
+  it("recovers on the next prompt if the OS never delivers resume", () => {
+    const { watchdog, onTimeout } = make();
+    watchdog.promptSent();
+    watchdog.suspend();
+    watchdog.observe("agent_end");
+    // No resume() -- the user just types again once the machine is back.
+    watchdog.promptSent();
+    vi.advanceTimersByTime(TIMEOUT);
+    expect(onTimeout).toHaveBeenCalledTimes(1);
+  });
 
   it("does not arm when an idle system wakes", () => {
     const { watchdog, onTimeout } = make();
