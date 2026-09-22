@@ -160,9 +160,19 @@ export function registerSraImportGate(pi: ExtensionAPI): void {
   // batch across tool-error recovery so serializing the same calls won't pass.
   const batches = new Map<string, Set<string>>();
   const blockedCalls = new Set<string>();
+  // A history preflight can leave exactly one missing accession, and a literal
+  // singleton is the right call for it. Let one singleton out of a rejected
+  // batch per key; a second one is serialization.
+  const releasedSingleton = new Set<string>();
+  // Accessions already sent to Galaxy in one combined call this turn. Splitting
+  // them afterwards is failure recovery (bad accession, resource limit), not
+  // fan-out.
+  const submitted = new Map<string, Set<string>>();
   const clear = () => {
     batches.clear();
     blockedCalls.clear();
+    releasedSingleton.clear();
+    submitted.clear();
   };
   pi.on("session_start", clear);
   pi.on("agent_end", clear);
@@ -174,6 +184,7 @@ export function registerSraImportGate(pi: ExtensionAPI): void {
       if (part.type !== "toolCall") continue;
       const call = sraCall(part.name, part.arguments);
       if (!call || call.runs?.length !== 1 || call.mapped) continue;
+      if (submitted.get(call.key)?.has(call.runs[0])) continue;
       const calls = groups.get(call.key) ?? [];
       calls.push({ id: part.id, run: call.runs[0] });
       groups.set(call.key, calls);
@@ -193,14 +204,24 @@ export function registerSraImportGate(pi: ExtensionAPI): void {
     if (!call) return;
     const batch = batches.get(call.key);
     const duplicate = call.runs && new Set(call.runs).size < call.runs.length;
-    const serializedRetry =
-      batch && batch.size > 1 && call.runs?.length === 1 && batch.has(call.runs[0]);
-    if (!blockedCalls.has(event.toolCallId) && !call.mapped && !duplicate && !serializedRetry) {
+    const single = call.runs?.length === 1 ? call.runs[0] : null;
+    let serializedRetry = !!(batch && single && batch.size > 1 && batch.has(single));
+    const otherwiseBlocked = blockedCalls.has(event.toolCallId) || call.mapped || duplicate;
+    if (serializedRetry && !otherwiseBlocked && !releasedSingleton.has(call.key)) {
+      releasedSingleton.add(call.key);
+      serializedRetry = false;
+    }
+    if (!otherwiseBlocked && !serializedRetry) {
       // A history preflight may reduce the candidate set. Do not force the
       // original candidates back into a corrected batch and re-download them.
-      // A list file also supports the case with only one missing accession.
+      if (batch && single) batch.delete(single);
       if (batch && (call.fileList || (call.runs && call.runs.length > 1))) {
         batches.delete(call.key);
+      }
+      if (call.runs && call.runs.length > 1) {
+        const sent = submitted.get(call.key) ?? new Set<string>();
+        for (const run of call.runs) sent.add(run);
+        submitted.set(call.key, sent);
       }
       return;
     }

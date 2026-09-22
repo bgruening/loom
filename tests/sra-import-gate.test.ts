@@ -86,12 +86,34 @@ describe("SRA import gate", () => {
     expect(h.check(unrelated)).toBeUndefined();
   });
 
-  it("does not let the model serialize a rejected batch on its next attempt", () => {
-    h.assistant([call("a", "SRR1"), call("b", "SRR2")]);
+  it("does not let the model serialize a rejected batch across messages", () => {
+    h.assistant([call("a", "SRR1"), call("b", "SRR2"), call("c", "SRR3")]);
     expect(h.check(call("a", "SRR1"))?.block).toBe(true);
-    const retry = call("retry", "SRR1");
-    h.assistant([retry]);
-    expect(h.check(retry)?.block).toBe(true);
+    // Indistinguishable from "preflight found the others already imported".
+    const first = call("first", "SRR1");
+    h.assistant([first]);
+    expect(h.check(first)).toBeUndefined();
+    const second = call("second", "SRR2");
+    h.assistant([second]);
+    const decision = h.check(second);
+    expect(decision?.block).toBe(true);
+    expect(decision.reason).toContain('"SRR2,SRR3"');
+  });
+
+  it("allows the one accession a history preflight left missing", () => {
+    h.assistant([call("a", "SRR1"), call("b", "SRR2")]);
+    const missing = call("missing", "SRR2");
+    h.assistant([missing]);
+    expect(h.check(missing)).toBeUndefined();
+  });
+
+  it("allows splitting an already-submitted batch to recover from its failure", () => {
+    const batch = call("batch", "SRR1,SRR2");
+    h.assistant([batch]);
+    expect(h.check(batch)).toBeUndefined();
+    const split = [call("a", "SRR1"), call("b", "SRR2")];
+    h.assistant(split);
+    for (const c of split) expect(h.check(c)).toBeUndefined();
   });
 
   it("allows a genuine single accession and a targeted retry in a later turn", () => {
