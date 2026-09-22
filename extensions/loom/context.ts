@@ -23,6 +23,7 @@ import {
 } from "./skills-discovery";
 import { findGalaxyPageBlocks } from "./galaxy-page-binding";
 import { isLocalShellDisabled } from "./local-exec.js";
+import { SRA_IMPORT_GUIDANCE } from "./sra-import-gate";
 import { GALAXY_PAGE_MARKDOWN_GUIDANCE } from "./galaxy-page-markdown-guidance";
 import {
   buildUserInstructionsBlock,
@@ -388,6 +389,7 @@ connection, where a server-side fetch runs at datacenter bandwidth.
   genuinely local: a file the user created, or one that exists only on
   this machine with no URL Galaxy can reach itself.
 
+${SRA_IMPORT_GUIDANCE}
 ### Invoking a Galaxy workflow
 
 Call \`galaxy_get_workflow_input_template\` before \`galaxy_invoke_workflow\`.
