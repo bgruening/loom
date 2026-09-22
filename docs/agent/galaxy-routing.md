@@ -145,3 +145,19 @@ Useful verification examples:
   expected identifiers in a small preview.
 - CSV/TSV/JSON/YAML/config: parse with a real parser, check required
   columns/keys, and compare row/object counts to the request.
+
+## Automatic follow-up
+
+Loom queues a follow-up by default when a tracked job or workflow completes or
+fails, including the first job failure in a workflow that is still running.
+Check the latest notebook and user instructions before acting on a queued event.
+Verify completed outputs and investigate failures without asking the researcher
+to request those checks again. Record evidence in the notebook. Continue work
+already authorized by the researcher only after its prerequisites are verified;
+respect explicit pause/stop requests and do not create a new plan. Diagnose a
+failure before repairing it, avoid blind or repeated retries, and ask only when
+a necessary decision, information, or authorization is missing. Cancelled and
+conditionally skipped runs do not trigger a follow-up.
+
+Automatic follow-up can be disabled with `LOOM_AUTO_RESUME=0` or
+`experiments.autoResume: false` in `~/.loom/config.json`.

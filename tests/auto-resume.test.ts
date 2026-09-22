@@ -1,84 +1,89 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildResumePrompt,
   isAutoResumeEnabled,
   isResumableOutcome,
 } from "../extensions/loom/auto-resume.js";
+import { loadConfig } from "../extensions/loom/config";
 
-const ORIGINAL = process.env.LOOM_AUTO_RESUME;
-afterEach(() => {
-  if (ORIGINAL === undefined) delete process.env.LOOM_AUTO_RESUME;
-  else process.env.LOOM_AUTO_RESUME = ORIGINAL;
+vi.mock("../extensions/loom/config", () => ({ loadConfig: vi.fn(() => ({})) }));
+
+beforeEach(() => {
+  vi.stubEnv("LOOM_AUTO_RESUME", undefined);
+  vi.mocked(loadConfig).mockReturnValue({});
 });
+afterEach(() => vi.unstubAllEnvs());
 
 describe("isAutoResumeEnabled", () => {
-  it("is off unless asked for -- unattended turns cost real money", () => {
-    delete process.env.LOOM_AUTO_RESUME;
-    // No config file in the test env, so this exercises the default path.
-    expect(isAutoResumeEnabled()).toBe(false);
-  });
-
-  it("turns on with the env override", () => {
-    process.env.LOOM_AUTO_RESUME = "1";
+  it("follows up automatically without an experimental opt-in", () => {
     expect(isAutoResumeEnabled()).toBe(true);
   });
 
-  it("lets the env override force it off over an on-config", () => {
-    process.env.LOOM_AUTO_RESUME = "0";
+  it("honors an explicit config opt-out", () => {
+    vi.mocked(loadConfig).mockReturnValue({ experiments: { autoResume: false } });
     expect(isAutoResumeEnabled()).toBe(false);
   });
 
-  it("ignores values that are neither 1 nor 0", () => {
-    process.env.LOOM_AUTO_RESUME = "yes";
+  it("allows the env to enable follow-up over a config opt-out", () => {
+    vi.mocked(loadConfig).mockReturnValue({ experiments: { autoResume: false } });
+    vi.stubEnv("LOOM_AUTO_RESUME", "1");
+    expect(isAutoResumeEnabled()).toBe(true);
+  });
+
+  it("allows the env to disable follow-up over a config opt-in", () => {
+    vi.mocked(loadConfig).mockReturnValue({ experiments: { autoResume: true } });
+    vi.stubEnv("LOOM_AUTO_RESUME", "0");
+    expect(isAutoResumeEnabled()).toBe(false);
+  });
+
+  it("ignores invalid env values and keeps the configured preference", () => {
+    vi.stubEnv("LOOM_AUTO_RESUME", "yes");
+    expect(isAutoResumeEnabled()).toBe(true);
+    vi.mocked(loadConfig).mockReturnValue({ experiments: { autoResume: false } });
     expect(isAutoResumeEnabled()).toBe(false);
   });
 });
 
 describe("buildResumePrompt", () => {
-  it("names the run and asks for verification on success", () => {
-    const p = buildResumePrompt("BWA alignment", "completed");
-    expect(p).toContain("BWA alignment");
-    expect(p).toMatch(/finished successfully/i);
-    expect(p).toMatch(/verify/i);
+  it("identifies every run and directs verification and diagnosis without a user relay", () => {
+    const p = buildResumePrompt([
+      { kind: "job", id: "job-1", label: 'same "label"\ntext', outcome: "completed" },
+      {
+        kind: "invocation",
+        id: "inv-1",
+        label: 'same "label"\ntext',
+        outcome: "failing",
+        detail: "1 failed, 2 running",
+      },
+    ]);
+    expect(p).toContain('"id": "job-1"');
+    expect(p).toContain('"id": "inv-1"');
+    expect(p).toContain(JSON.stringify('same "label"\ntext'));
+    expect(p).toContain("1 failed, 2 running");
+    expect(p).toContain("verify the output datasets now");
+    expect(p).toContain("investigate now");
+    expect(p).toContain("stderr");
+    expect(p).toContain("invocation messages");
+    expect(p).toContain("never ask them to ask you");
   });
 
-  it("asks for investigation on failure and carries the detail", () => {
-    const p = buildResumePrompt("fastp", "failed", "2 job error(s)");
-    expect(p).toContain("fastp");
-    expect(p).toContain("2 job error(s)");
-    expect(p).toMatch(/investigate/i);
-  });
-
-  it("tells the agent to stop, so an unattended turn cannot run away", () => {
-    // The point: a resumed turn verifies and reports. It must not read as
-    // licence to start the next step while nobody is watching.
-    for (const outcome of ["completed", "failed"] as const) {
-      const p = buildResumePrompt("x", outcome);
-      expect(p).toMatch(/STOP/);
-      expect(p).toMatch(/do not start the next step/i);
-    }
-  });
-
-  it("says the message was automatic, so the agent knows nobody may be there", () => {
-    expect(buildResumePrompt("x", "completed")).toMatch(/automatically/i);
+  it("continues authorized work while preserving evidence, scope and stop boundaries", () => {
+    const p = buildResumePrompt([{ kind: "job", id: "j", label: "x", outcome: "completed" }]);
+    expect(p).toContain("Record the evidence in the notebook before marking");
+    expect(p).toContain("Continue already-authorized work when its prerequisites are verified");
+    expect(p).toContain("Respect any request to pause or stop");
+    expect(p).toContain("do not blindly retry");
+    expect(p).toContain("does not authorize a new analysis");
+    expect(p).not.toContain("Report what you found and STOP");
   });
 });
 
 describe("isResumableOutcome", () => {
-  it("wakes the agent for a run that finished or failed", () => {
+  it("wakes for success and failure, but not cancellation, skips or active jobs", () => {
     expect(isResumableOutcome("completed")).toBe(true);
     expect(isResumableOutcome("failed")).toBe(true);
-  });
-
-  // The expensive mistake this prevents: the user cancels a job, or a workflow
-  // conditional skips a step, and an unattended agent burns a turn
-  // "investigating" a decision that was deliberate.
-  it("leaves a cancelled or skipped run alone", () => {
-    expect(isResumableOutcome("cancelled")).toBe(false);
-    expect(isResumableOutcome("skipped")).toBe(false);
-  });
-
-  it("never wakes the agent for a run that is still going", () => {
-    expect(isResumableOutcome("in_progress")).toBe(false);
+    for (const status of ["cancelled", "skipped", "in_progress"]) {
+      expect(isResumableOutcome(status)).toBe(false);
+    }
   });
 });

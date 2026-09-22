@@ -79,16 +79,16 @@ export interface LoomConfig {
     repos: Array<SkillRepo>;
   };
   /**
-   * Opt-in flags for experimental subsystems. Off by default; set the
-   * matching env var (e.g. LOOM_TEAM_DISPATCH=1) to override per-session.
+   * Subsystem flags (including legacy settings). Defaults are documented per
+   * field; matching env vars override per-session.
    */
   experiments?: {
     /** Register the experimental team_dispatch tool and its prompt guidance. */
     teamDispatch?: boolean;
     /**
      * Hand a finished Galaxy run back to the agent automatically instead of
-     * only toasting the user. Off by default: it makes the agent take turns
-     * and spend tokens with nobody watching.
+     * only toasting the user. On by default; false (or LOOM_AUTO_RESUME=0)
+     * disables automatic verification and investigation turns.
      */
     autoResume?: boolean;
     /**

@@ -62,7 +62,7 @@ describe("galaxy-poller completion notifications", () => {
 
     await vi.waitFor(() => expect(notify).toHaveBeenCalledTimes(1));
     expect(notify).toHaveBeenCalledWith(
-      '✅ Galaxy: "RNA-seq run" finished (3 jobs ok) — ask me to verify the outputs.',
+      '✅ Galaxy: "RNA-seq run" finished (3 jobs ok) — automatic follow-up disabled.',
       "info",
     );
   });
@@ -84,7 +84,7 @@ describe("galaxy-poller completion notifications", () => {
 
     await vi.waitFor(() => expect(notify).toHaveBeenCalledTimes(1));
     expect(notify).toHaveBeenCalledWith(
-      '❌ Galaxy: "Variant call" failed (2 job error(s)) — ask me to investigate.',
+      '❌ Galaxy: "Variant call" failed (2 job error(s)) — automatic follow-up disabled.',
       "warning",
     );
   });
@@ -166,7 +166,7 @@ describe("galaxy-poller completion notifications", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(notify).toHaveBeenCalledTimes(1);
       expect(notify).toHaveBeenCalledWith(
-        '⚠️ Galaxy: "Variant call" — 1 job(s) failed, 2 still running — ask me to investigate.',
+        '⚠️ Galaxy: "Variant call" — 1 job(s) failed, 2 still running — automatic follow-up disabled.',
         "warning",
       );
 
