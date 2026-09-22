@@ -18,7 +18,9 @@ const HOME = path.join(os.tmpdir(), "files-surface-home");
 // ── The jail, as a pure function ─────────────────────────────────────────────
 
 describe("resolveInJail", () => {
-  const CWD = path.join(path.sep, "tmp", "analysis");
+  // Resolved, not joined: on Windows the resolver adds a drive letter, and a
+  // fixture without one never equals what comes back.
+  const CWD = path.resolve(path.sep, "tmp", "analysis");
   const jail = (p: unknown) => resolveInJail(CWD, p, { home: HOME });
 
   it("accepts a plain file in the analysis directory", () => {
@@ -673,9 +675,23 @@ describe("a listing that would be enormous", () => {
 
   it("a cwd at the filesystem root still contains correctly", async () => {
     // `startsWith(cwdReal + sep)` became startsWith("//") there, which matches
-    // nothing, so a listing came back holding a single entry.
-    const res = await listFilesForWeb("/", { home: "/nonexistent", maxEntries: 40 });
-    expect(res.ok).toBe(true);
-    if (res.ok) expect((res.root.children ?? []).length).toBeGreaterThan(1);
+    // nothing, so every real path was "outside" a cwd of `/` and a read through
+    // a symlink was refused. Exercised through the read path rather than a
+    // listing of `/`: the listing's entry budget is spent depth-first, so what
+    // a capped listing of the real root holds depends on which directory the
+    // OS happens to iterate first, and that varied by platform.
+    const root = path.parse(os.tmpdir()).root;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "files-surface-rootcwd-"));
+    try {
+      fs.writeFileSync(path.join(dir, "data.txt"), "at the root\n");
+      fs.symlinkSync(path.join(dir, "data.txt"), path.join(dir, "link.txt"));
+      const rel = path.relative(root, path.join(dir, "link.txt"));
+      const res = await readFileForWeb(root, rel, undefined, { home: "/nonexistent" });
+      expect(res).toMatchObject({ ok: true });
+      if (!res.ok) return;
+      expect(Buffer.from(res.bytesBase64, "base64").toString("utf-8")).toBe("at the root\n");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
