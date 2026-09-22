@@ -83,8 +83,6 @@ let notify: PollerNotify | null = null;
  */
 type PollerResume = (text: string) => void;
 let resume: PollerResume | null = null;
-// A poll already awaiting Galaxy must not wake a stopped or replacement session.
-let pollerGeneration = 0;
 
 function notifySafely(text: string, level: "info" | "warning" | "error"): void {
   try {
@@ -480,8 +478,7 @@ export function pollGalaxyNow(): Promise<void> {
 }
 
 async function runTick(): Promise<void> {
-  const generation = pollerGeneration;
-  const resumeThisTick = resume;
+  const tickNotebook = getNotebookPath();
   const followUps: GalaxyFollowUp[] = [];
   try {
     // One read per tick, shared by everything below: what the notebook says is
@@ -592,9 +589,14 @@ async function runTick(): Promise<void> {
   } finally {
     // Batch jobs and workflows into one turn, even if a later poll request
     // failed. Queuing each finished import separately floods the agent.
-    if (generation === pollerGeneration && resumeThisTick && followUps.length > 0) {
+    // Deliver through whoever owns the poller now, not whoever started this
+    // tick: the transitions are already persisted, so a replacement session
+    // on the same notebook would never see them in_progress again. A stopped
+    // poller has no resume, and a different notebook's session isn't ours.
+    const deliver = resume;
+    if (deliver && followUps.length > 0 && getNotebookPath() === tickNotebook) {
       try {
-        resumeThisTick(buildResumePrompt(followUps));
+        deliver(buildResumePrompt(followUps));
       } catch (err) {
         console.error("[galaxy-poller] auto-resume send failed:", err);
       }
@@ -631,7 +633,6 @@ export function startGalaxyPoller(notifyFn?: PollerNotify, resumeFn?: PollerResu
 }
 
 export function stopGalaxyPoller(): void {
-  pollerGeneration++;
   resume = null;
   if (timer) {
     clearInterval(timer);

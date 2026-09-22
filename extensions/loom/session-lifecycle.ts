@@ -6,7 +6,7 @@ import {
   stopWatchingNotebook,
 } from "./state.js";
 import { startGalaxyPoller, stopGalaxyPoller } from "./galaxy-poller.js";
-import { isAutoResumeEnabled } from "./auto-resume.js";
+import { createFollowUpDelivery, isAutoResumeEnabled } from "./auto-resume.js";
 import { initGalaxyPageSync, flushNotebookToGalaxy } from "./galaxy-page-sync.js";
 import {
   upsertSessionSummaryBlock,
@@ -27,6 +27,17 @@ import * as path from "path";
 let sessionStart: { id: string; startedAt: string } | null = null;
 
 export function registerSessionLifecycle(pi: ExtensionAPI): void {
+  const followUps = createFollowUpDelivery((text) => {
+    // Fired from a timer, so a rejected/throwing send must not escape.
+    try {
+      void pi.sendUserMessage(text, { deliverAs: "followUp" });
+    } catch (err) {
+      console.error("[galaxy-poller] auto-resume send failed:", err);
+    }
+  });
+  pi.on("agent_start", async () => followUps.agentStarted());
+  pi.on("agent_settled", async () => followUps.agentSettled());
+
   pi.on("session_start", async (_event, ctx) => {
     ctx.ui.setToolsExpanded(false);
 
@@ -53,17 +64,7 @@ export function registerSessionLifecycle(pi: ExtensionAPI): void {
     // asking the user to relay. `followUp` is required, not
     // cosmetic: a plain send to a brain that is mid-turn is rejected with
     // "Agent is already processing".
-    const resumeFn = isAutoResumeEnabled()
-      ? (text: string) => {
-          // Fired from a 15s timer, so a rejected/throwing send must not take
-          // the tick down with it.
-          try {
-            void pi.sendUserMessage(text, { deliverAs: "followUp" });
-          } catch (err) {
-            console.error("[galaxy-poller] auto-resume send failed:", err);
-          }
-        }
-      : undefined;
+    const resumeFn = isAutoResumeEnabled() ? (text: string) => followUps.deliver(text) : undefined;
 
     startGalaxyPoller((text, level) => {
       try {
@@ -105,6 +106,7 @@ export function registerSessionLifecycle(pi: ExtensionAPI): void {
 
   pi.on("session_shutdown", async () => {
     stopGalaxyPoller();
+    followUps.clear();
     // Close the notebook FSWatcher before the summary write below. The watcher
     // otherwise keeps the event loop alive (so --print never exits) and, since
     // writeSessionSummary() writes to notebook.md, would fire its callback

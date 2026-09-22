@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildResumePrompt,
+  createFollowUpDelivery,
   isAutoResumeEnabled,
   isResumableOutcome,
 } from "../extensions/loom/auto-resume.js";
@@ -85,5 +86,45 @@ describe("isResumableOutcome", () => {
     for (const status of ["cancelled", "skipped", "in_progress"]) {
       expect(isResumableOutcome(status)).toBe(false);
     }
+  });
+});
+
+describe("createFollowUpDelivery", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("sends straight away when the agent is idle", () => {
+    const send = vi.fn();
+    createFollowUpDelivery(send, 100).deliver("a");
+    expect(send).toHaveBeenCalledWith("a");
+  });
+
+  it("holds a follow-up until after a message the user queued mid-turn has started", () => {
+    // Orbit sends the user's queued message only once the turn ends; the
+    // automatic follow-up must not jump ahead of it.
+    vi.useFakeTimers();
+    const send = vi.fn();
+    const d = createFollowUpDelivery(send, 100);
+    d.agentStarted();
+    d.deliver("auto");
+    d.agentSettled();
+    expect(send).not.toHaveBeenCalled();
+    d.agentStarted(); // the user's queued message
+    vi.advanceTimersByTime(500);
+    expect(send).not.toHaveBeenCalled();
+    d.agentSettled();
+    vi.advanceTimersByTime(100);
+    expect(send).toHaveBeenCalledExactlyOnceWith("auto");
+  });
+
+  it("drops held follow-ups when the session shuts down", () => {
+    vi.useFakeTimers();
+    const send = vi.fn();
+    const d = createFollowUpDelivery(send, 100);
+    d.agentStarted();
+    d.deliver("auto");
+    d.agentSettled();
+    d.clear();
+    vi.advanceTimersByTime(500);
+    expect(send).not.toHaveBeenCalled();
   });
 });

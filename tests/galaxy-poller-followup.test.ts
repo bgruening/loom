@@ -173,25 +173,50 @@ describe("automatic Galaxy follow-up", () => {
     expect(resume).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])(
-    "does not wake a stopped session or its replacement (replace=%s)",
-    async (replace) => {
-      writeFileSync(notebook, jobBlock("job-1"));
-      let resolve!: (value: ReturnType<typeof jobDetails>) => void;
-      mockJob.mockReturnValue(
-        new Promise((r) => {
-          resolve = r;
-        }),
-      );
-      startGalaxyPoller(notify, resume);
-      await vi.waitFor(() => expect(mockJob).toHaveBeenCalledOnce());
-      stopGalaxyPoller();
-      const replacement = vi.fn();
-      if (replace) startGalaxyPoller(notify, replacement);
-      resolve(jobDetails("job-1", "ok"));
-      await pollGalaxyNow();
-      expect(resume).not.toHaveBeenCalled();
-      expect(replacement).not.toHaveBeenCalled();
-    },
-  );
+  // Holds a job poll open so the session can be stopped or replaced mid-tick.
+  async function stallFirstJobPoll() {
+    writeFileSync(notebook, jobBlock("job-1"));
+    let resolve!: (value: ReturnType<typeof jobDetails>) => void;
+    mockJob.mockReturnValue(
+      new Promise((r) => {
+        resolve = r;
+      }),
+    );
+    startGalaxyPoller(notify, resume);
+    await vi.waitFor(() => expect(mockJob).toHaveBeenCalledOnce());
+    return () => resolve(jobDetails("job-1", "ok"));
+  }
+
+  it("does not wake a stopped session", async () => {
+    const finish = await stallFirstJobPoll();
+    stopGalaxyPoller();
+    finish();
+    await pollGalaxyNow();
+    expect(resume).not.toHaveBeenCalled();
+  });
+
+  it("hands a mid-tick transition to a replacement session on the same notebook", async () => {
+    // The stale tick persists the job as completed, so the replacement's own
+    // polls never see it in_progress again -- dropping it here would lose the
+    // verification for good.
+    const finish = await stallFirstJobPoll();
+    const replacement = vi.fn();
+    startGalaxyPoller(notify, replacement);
+    finish();
+    await pollGalaxyNow();
+    expect(resume).not.toHaveBeenCalled();
+    expect(replacement).toHaveBeenCalledOnce();
+    expect(runsFrom(replacement.mock.calls[0][0])).toMatchObject([{ id: "job-1" }]);
+  });
+
+  it("does not hand a stale tick's runs to a session on another notebook", async () => {
+    const finish = await stallFirstJobPoll();
+    setNotebookPath(join(dir, "other.md"));
+    const replacement = vi.fn();
+    startGalaxyPoller(notify, replacement);
+    finish();
+    await pollGalaxyNow();
+    expect(resume).not.toHaveBeenCalled();
+    expect(replacement).not.toHaveBeenCalled();
+  });
 });

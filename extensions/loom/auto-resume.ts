@@ -51,3 +51,72 @@ export function buildResumePrompt(runs: GalaxyFollowUp[]): string {
     "already requested."
   );
 }
+
+/**
+ * How long to wait after the agent settles before delivering a held follow-up.
+ * Orbit keeps messages the user typed mid-turn in its own queue and only sends
+ * them once the turn ends, so they reach Pi a beat after it goes idle.
+ */
+export const FOLLOW_UP_GRACE_MS = 1500;
+
+export interface FollowUpDelivery {
+  deliver(text: string): void;
+  agentStarted(): void;
+  agentSettled(): void;
+  clear(): void;
+}
+
+/**
+ * Hold automatic follow-ups while the agent is busy and release them only once
+ * it has settled. Handing one to Pi's followUp queue mid-turn lets it run
+ * before anything the user typed during that turn: Pi drains its own queue
+ * before the turn ends, while Orbit's queued messages only arrive afterwards.
+ * An automatic continuation must never act ahead of a "wait, don't run that".
+ */
+export function createFollowUpDelivery(
+  send: (text: string) => void,
+  graceMs = FOLLOW_UP_GRACE_MS,
+): FollowUpDelivery {
+  let busy = false;
+  let held: string[] = [];
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const cancelTimer = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+  };
+  const flush = () => {
+    timer = null;
+    const batch = held;
+    held = [];
+    // If a user message started a turn during the grace period, followUp
+    // queues these behind it, which is the order we want.
+    for (const text of batch) send(text);
+  };
+
+  return {
+    deliver(text) {
+      if (!busy && !timer) {
+        send(text);
+        return;
+      }
+      held.push(text);
+    },
+    agentStarted() {
+      busy = true;
+      cancelTimer();
+    },
+    agentSettled() {
+      busy = false;
+      if (held.length === 0) return;
+      cancelTimer();
+      timer = setTimeout(flush, graceMs);
+      timer.unref?.();
+    },
+    clear() {
+      busy = false;
+      held = [];
+      cancelTimer();
+    },
+  };
+}
