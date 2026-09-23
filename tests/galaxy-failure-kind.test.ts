@@ -54,9 +54,10 @@ describe("galaxyFailureNudge", () => {
     expect(GALAXY_TIMEOUT_NUDGE).not.toContain("Try asking");
   });
 
-  it("identifies a dropped transport without asking for a manual command", () => {
+  it("identifies a dropped transport and keeps the manual command as a fallback", () => {
     expect(galaxyFailureNudge("dropped")).toBe(GALAXY_RECONNECT_NUDGE);
     expect(GALAXY_RECONNECT_NUDGE).toContain("agent can reconnect");
+    expect(GALAXY_RECONNECT_NUDGE).toContain("if that fails, run /mcp reconnect galaxy");
   });
 
   it("says nothing when there is nothing useful to say", () => {

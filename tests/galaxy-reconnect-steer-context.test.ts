@@ -30,7 +30,10 @@ describe("buildGalaxyContextBlock reconnect steer", () => {
   it("gives the agent the callable reconnect operation", () => {
     const block = buildGalaxyContextBlock();
     expect(block).toContain('mcp({connect: "galaxy"})');
-    expect(block).not.toContain("tell the user to run");
+    // The manual command is a fallback, never the first step.
+    expect(block.indexOf("/mcp reconnect galaxy")).toBeGreaterThan(
+      block.indexOf('mcp({connect: "galaxy"})'),
+    );
   });
 
   it("distinguishes an idle connection from an unknown timeout outcome", () => {

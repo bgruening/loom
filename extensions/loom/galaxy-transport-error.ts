@@ -26,7 +26,7 @@ const TIMEOUT_ERROR_PATTERNS: RegExp[] = [
 const TRANSPORT_ERROR_PATTERNS: RegExp[] = [...DROPPED_ERROR_PATTERNS, ...TIMEOUT_ERROR_PATTERNS];
 
 export const GALAXY_RECONNECT_NUDGE =
-  "Galaxy MCP connection dropped. The agent can reconnect it without restarting Orbit.";
+  "Galaxy MCP connection dropped. The agent can reconnect it; if that fails, run /mcp reconnect galaxy (no restart needed).";
 
 // Deliberately does not claim the server is healthy: a timeout only proves that
 // no response arrived before the timer, so a wedged server looks identical to a
@@ -34,7 +34,8 @@ export const GALAXY_RECONNECT_NUDGE =
 // file's galaxy entry on every launch, the path moves with PI_CODING_AGENT_DIR,
 // and /mcp reconnect reuses the already-loaded config rather than re-reading it.
 // Agent-facing recovery instructions live in mcp-recovery.ts. The UI notice
-// states the uncertainty without asking the user to perform the repair.
+// states the uncertainty, with /mcp reconnect as the user's fallback once the
+// agent's single reconnect attempt is spent.
 export const GALAXY_TIMEOUT_NUDGE =
   "Galaxy MCP request timed out. Its result is unknown; this does not mean a Galaxy job failed.";
 

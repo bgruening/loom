@@ -289,6 +289,8 @@ When it happens -- and before you ever tell the user Galaxy is disconnected:
    then \`galaxy_connect()\`. Verify both results before continuing.
 3. For timeouts, narrow read-only queries first. Before retrying a mutation,
    check whether Galaxy accepted it. Never blindly replay a submission.
+4. Only if your own reconnect fails, tell the user they can run
+   \`/mcp reconnect galaxy\` (no restart needed).
 
 Never report "Galaxy is disconnected" as a final answer without attempting
 \`galaxy_connect()\` in the same turn.

@@ -99,7 +99,7 @@ export function registerMcpRecovery(pi: ExtensionAPI): void {
         return {
           block: true,
           reason:
-            "Automatic Galaxy reconnect was already attempted for this incident. Inspect its result and report the concrete blocker; do not loop or restart Orbit.",
+            "Automatic Galaxy reconnect was already attempted for this incident. Inspect its result and report the concrete blocker; do not loop. The user can run /mcp reconnect galaxy (no restart needed).",
         };
     }
     const call = galaxyCall(event.toolName, event.input);

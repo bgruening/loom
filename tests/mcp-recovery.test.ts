@@ -77,7 +77,10 @@ describe("Galaxy MCP recovery", () => {
     expect(h.check("galaxy_get_dataset_details", args)).toBeUndefined();
     h.result("galaxy_get_dataset_details", args);
     expect(h.check("galaxy_get_dataset_details", args).block).toBe(true);
-    expect(h.check("mcp", { connect: "galaxy" }).block).toBe(true);
+    const capped = h.check("mcp", { connect: "galaxy" });
+    expect(capped.block).toBe(true);
+    // Once the agent's attempt is spent, the user still needs a way out.
+    expect(capped.reason).toContain("/mcp reconnect galaxy");
     expect(h.check("mcp", { connect: "other" })).toBeUndefined();
     h.reset();
     expect(h.check("mcp", { connect: "galaxy" })).toBeUndefined();
