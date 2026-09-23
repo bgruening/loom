@@ -483,7 +483,11 @@ wss.on("connection", (socket) => {
         respond(id, { success: false, error: "config is read-only in remote mode" });
         return;
       }
-      saveConfig(args[0] as Record<string, unknown>);
+      // Preferences sends only the keys it edits. Replacing the file would drop
+      // everything else -- including an explicit experiments.autoResume:false,
+      // which then silently reverts to on. Merge like Orbit's config:save does.
+      const { _mode: _ignored, ...current } = loadConfig();
+      saveConfig({ ...current, ...(args[0] as Record<string, unknown>) });
       stopLoom();
       startLoom();
       respond(id, { success: true });

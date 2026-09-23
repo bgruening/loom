@@ -76,6 +76,7 @@ Implemented and locally tested.
 - **Chat**: streaming responses with thinking indicator; markdown-rendered with proper tables; `team_dispatch` rich card; queue-while-streaming; numbered prompt turns (`/summarize 3 5` works against those numbers).
 - **Slash-command popup** appears as you type `/`. Tab to autocomplete; Enter still submits past it; Esc dismisses.
 - **Prompt history**: ↑ / ↓ in the input recalls previously-submitted prompts (per-cwd, persistent).
+- **Batched SRA imports**: Loom catches compatible per-accession `fastq_dump`/`fasterq_dump` calls before submission and directs the agent to one collection-producing run. Always-loaded guidance covers accession deduplication, history reuse, and output verification.
 - **Galaxy connection indicator** in the footer (RED dot if no API key, GREEN dot if connected). Click to open Preferences.
 - **Cost / token header**: live in-flight cost (computed from Pi-reported `usage.cost`) and token totals.
 - **Preferences dialog** (`Cmd/Ctrl+,`): provider / model / API key, Galaxy credentials, default working directory, package manager, and a configurable list of **skill repositories** (galaxy-skills shipped as default).
@@ -83,6 +84,7 @@ Implemented and locally tested.
 - **Responsive layout**: at narrow widths the file tree (<900 px) and artifact pane (<700 px) auto-collapse so the chat stays usable. Toolbar buttons re-expand them.
 - **Keyboard accessibility**: `Cmd/Ctrl+\` toggles the artifact pane; `Cmd/Ctrl+B` toggles the file tree; `Cmd/Ctrl+,` opens Preferences; `Cmd/Ctrl+O` switches working directory; `Esc` dismisses modals; gold focus-ring on every Tab-reachable control.
 - **Galaxy brand dark theme** with Inter (body) + JetBrains Mono (code) bundled locally.
+- **Automatic Galaxy follow-up**: Loom queues output verification for completed jobs and workflows, and investigates failures without waiting for another prompt. Changes from one poll are batched; a busy agent finishes its current turn first. Verification evidence goes in the notebook, then already-authorized work can continue. Follow-ups pause after 3 automatic turns in a row without user input (`experiments.autoResumeMaxTurns`) or when you stop a turn, until you next say something. Set `LOOM_AUTO_RESUME=0` or `experiments.autoResume: false` in `~/.loom/config.json` to disable automatic follow-up.
 - **Session continuity**: `--continue` on restart preserves chat history; `/new` starts a clean slate; first launch in a directory with an existing Pi session auto-resumes.
 
 ### What the Loom CLI ships today
