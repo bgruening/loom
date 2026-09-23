@@ -22,7 +22,7 @@ vi.mock("../extensions/loom/galaxy-api.js", () => ({
 import { startGalaxyPoller, stopGalaxyPoller } from "../extensions/loom/galaxy-poller";
 
 /** Matches POLL_INTERVAL_MS in galaxy-poller.ts. */
-const POLL_INTERVAL_MS = 120_000;
+const POLL_INTERVAL_MS = 15_000;
 import { checkInvocations } from "../extensions/loom/tools.js";
 
 const mockCheck = vi.mocked(checkInvocations);

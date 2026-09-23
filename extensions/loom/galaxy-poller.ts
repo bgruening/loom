@@ -21,7 +21,7 @@
  *   recorded a new invocation mid-session we'd never wake up — only
  *   another session_start would. Avoids a circular import between
  *   tools.ts (which records invocations) and this file. The cost is
- *   one notebook read + scan per two minutes, which is negligible.
+ *   one notebook read + scan per 15s, which is negligible.
  *
  * Concurrency: ticks are guarded by `inFlight` so a slow Galaxy GET
  * doesn't stack ticks. The check itself uses the existing per-notebook
@@ -56,10 +56,12 @@ import {
   type JobYaml,
 } from "./galaxy-job-block.js";
 import { appendActivityEvent } from "./activity.js";
-import { GALAXY_POLL_INTERVAL_MS } from "./galaxy-poll-guard";
 
-// Background GETs do not invoke the model. Explicit refresh stays immediate.
-const POLL_INTERVAL_MS = GALAXY_POLL_INTERVAL_MS;
+// 15s — ~4 polls/min × a few in-flight invocations stays well under
+// usegalaxy.org's per-user rate budget while still feeling live. Background
+// GETs never invoke the model, so this is independent of the model-facing
+// status-read cooldown in galaxy-poll-guard.ts.
+const POLL_INTERVAL_MS = 15_000;
 
 let timer: ReturnType<typeof setInterval> | null = null;
 /**
@@ -648,7 +650,7 @@ export function startGalaxyPoller(notifyFn?: PollerNotify, resumeFn?: PollerResu
   // background invocation can toast the user. Refreshed each session_start.
   notify = notifyFn ?? null;
   // Null when auto-resume is disabled; the caller decides, so the poller
-  // stays free of config lookups on a two-minute timer.
+  // stays free of config lookups on a 15s timer.
   resume = resumeFn ?? null;
   announcedFailing.clear();
   trackedActive.clear();
@@ -656,14 +658,14 @@ export function startGalaxyPoller(notifyFn?: PollerNotify, resumeFn?: PollerResu
   // session_shutdown firing first in some failure modes. Stop any
   // pre-existing timer so we don't double-poll.
   // Fire one immediate tick so a session resumed with in-flight blocks
-  // gets fresh counters within the first second instead of waiting for the next interval.
+  // gets fresh counters within the first second instead of waiting 15s.
   void tick();
   const interval = setInterval(tick, POLL_INTERVAL_MS);
   // A background refresher must never be the reason the process stays alive.
   // In print/rpc modes (`--mode json`, evals) the work finishes and nothing
   // else holds the loop, so an armed interval kept the process up until
   // something killed it; session_shutdown clears the timer, but relying on
-  // shutdown running is what made that an interval-long tax when it didn't.
+  // shutdown running is what made that a 15s-per-run tax when it didn't.
   // Interactive and Orbit sessions are held open by stdin, so unref costs
   // them nothing.
   interval.unref?.();

@@ -47,9 +47,9 @@ and require Galaxy-state inspection before any retry. The harness does not
 automatically replay mutations.
 
 Running/queued dataset and job metadata responses direct the agent to record the
-run and yield to the background monitor. The monitor checks every two minutes
+run and yield to the background monitor. The monitor checks every 15 seconds
 without model calls. As a fallback, repeated metadata checks of an unfinished
-resource wait in the harness until that interval elapses; Stop cancels the
+resource wait in the harness for two minutes; Stop cancels the
 wait, and a new user request may ask for a fresh check immediately. Terminal
 outputs remain available for immediate verification. While an agent turn is
 active, Loom emits a factual progress notification about once a minute if the

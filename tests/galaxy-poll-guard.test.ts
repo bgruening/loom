@@ -48,7 +48,7 @@ describe("Galaxy polling cooldown", () => {
     expect(result.content[0].text).toContain('"state":"running"');
     expect(result.content[1].text).toContain('"job1"');
     expect(result.content[1].text).toContain("end this turn");
-    expect(result.content[1].text).toContain("two minutes without model calls");
+    expect(result.content[1].text).toContain("15 seconds without model calls");
   });
 
   it("does not dispatch a duplicate for two minutes, without a model-facing retry loop", async () => {

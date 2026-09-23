@@ -2,6 +2,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { galaxyCall } from "./mcp-recovery";
 
+// How long a repeated model-facing status read waits. This throttles token
+// spend, not Galaxy load; the background poller runs on its own 15s timer.
 export const GALAXY_POLL_INTERVAL_MS = 120_000;
 const PENDING = new Set(["new", "upload", "queued", "running", "waiting", "setting_metadata"]);
 const MARKER = "[Loom background monitoring]";
@@ -15,7 +17,7 @@ success from a successful tool response alone.
 
 When a dataset or job is queued/running, record its actual job or invocation ID
 with galaxy_job_record or galaxy_invocation_record and a real notebook anchor.
-The background monitor checks every two minutes without model calls and queues
+The background monitor checks every 15 seconds without model calls and queues
 completion verification. If no other authorized work is ready, report the wait
 and end the turn so the researcher can talk to you. Do not repeatedly call
 galaxy_get_dataset_details, launch a shell polling loop, or use sleep to wait.
@@ -130,7 +132,7 @@ export function registerGalaxyPollGuard(pi: ExtensionAPI): void {
           ...event.content,
           {
             type: "text" as const,
-            text: `${MARKER}\nThe metadata request succeeded, but this resource is still ${state}. ${jobId ? `Its creating job ID is ${JSON.stringify(jobId)}. ` : "Use the job/invocation ID from the submission response. "}Record that run with galaxy_job_record or galaxy_invocation_record using an existing notebook anchor. The background monitor checks every two minutes without model calls. Give the user a short progress update, continue other ready work, or end this turn if waiting is all that remains. Do not repeat metadata calls or sleep in a loop. Verify the outputs when completion wakes you. If automatic follow-up is disabled, disclose that instead of promising a wake-up.`,
+            text: `${MARKER}\nThe metadata request succeeded, but this resource is still ${state}. ${jobId ? `Its creating job ID is ${JSON.stringify(jobId)}. ` : "Use the job/invocation ID from the submission response. "}Record that run with galaxy_job_record or galaxy_invocation_record using an existing notebook anchor. The background monitor checks every 15 seconds without model calls. Give the user a short progress update, continue other ready work, or end this turn if waiting is all that remains. Do not repeat metadata calls or sleep in a loop. Verify the outputs when completion wakes you. If automatic follow-up is disabled, disclose that instead of promising a wake-up.`,
           },
         ],
       };
