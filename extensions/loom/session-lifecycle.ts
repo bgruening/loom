@@ -6,7 +6,11 @@ import {
   stopWatchingNotebook,
 } from "./state.js";
 import { startGalaxyPoller, stopGalaxyPoller } from "./galaxy-poller.js";
-import { createFollowUpDelivery, isAutoResumeEnabled } from "./auto-resume.js";
+import {
+  createFollowUpDelivery,
+  isAutoResumeEnabled,
+  setActiveFollowUpDelivery,
+} from "./auto-resume.js";
 import { initGalaxyPageSync, flushNotebookToGalaxy } from "./galaxy-page-sync.js";
 import {
   upsertSessionSummaryBlock,
@@ -27,16 +31,33 @@ import * as path from "path";
 let sessionStart: { id: string; startedAt: string } | null = null;
 
 export function registerSessionLifecycle(pi: ExtensionAPI): void {
-  const followUps = createFollowUpDelivery((text) => {
-    // Fired from a timer, so a rejected/throwing send must not escape.
-    try {
-      void pi.sendUserMessage(text, { deliverAs: "followUp" });
-    } catch (err) {
-      console.error("[galaxy-poller] auto-resume send failed:", err);
-    }
-  });
+  // Refreshed each session_start; a no-op until then.
+  let notifyUser: (text: string) => void = () => {};
+  const followUps = createFollowUpDelivery(
+    (text) => {
+      // Fired from a timer, so a rejected/throwing send must not escape.
+      try {
+        void pi.sendUserMessage(text, { deliverAs: "followUp" });
+      } catch (err) {
+        console.error("[galaxy-poller] auto-resume send failed:", err);
+      }
+    },
+    { onPaused: (text) => notifyUser(text) },
+  );
+  setActiveFollowUpDelivery(followUps);
   pi.on("agent_start", async () => followUps.agentStarted());
   pi.on("agent_settled", async () => followUps.agentSettled());
+  // Our own follow-ups (and other brain-sent prompts) arrive as "extension";
+  // only what a person typed counts as permission to keep going.
+  pi.on("input", async (event) => {
+    if (event.source !== "extension") followUps.userInput();
+    return { action: "continue" };
+  });
+  // Every shell's Stop ends in Pi's abort, which lands here as an aborted turn.
+  pi.on("agent_end", async (event) => {
+    const last = [...event.messages].reverse().find((m) => m.role === "assistant");
+    if (last && "stopReason" in last && last.stopReason === "aborted") followUps.aborted();
+  });
 
   pi.on("session_start", async (_event, ctx) => {
     ctx.ui.setToolsExpanded(false);
@@ -66,13 +87,15 @@ export function registerSessionLifecycle(pi: ExtensionAPI): void {
     // "Agent is already processing".
     const resumeFn = isAutoResumeEnabled() ? (text: string) => followUps.deliver(text) : undefined;
 
-    startGalaxyPoller((text, level) => {
+    const toast = (text: string, level: "info" | "warning" | "error") => {
       try {
         if (ctx.hasUI) ctx.ui.notify(text, level);
       } catch {
         /* stale/headless context — a dropped completion toast is fine */
       }
-    }, resumeFn);
+    };
+    notifyUser = (text) => toast(text, "info");
+    startGalaxyPoller(toast, resumeFn);
 
     sessionStart = {
       id: ctx.sessionManager?.getSessionId?.() ?? `session-${Date.now()}`,

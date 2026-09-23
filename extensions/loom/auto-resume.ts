@@ -1,3 +1,4 @@
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./config";
 
 /**
@@ -59,11 +60,34 @@ export function buildResumePrompt(runs: GalaxyFollowUp[]): string {
  */
 export const FOLLOW_UP_GRACE_MS = 1500;
 
+/**
+ * Automatic turns allowed back to back before the user has to say something.
+ * Each follow-up may submit work whose completion wakes the agent again, so
+ * without a ceiling an unattended session can keep itself busy indefinitely.
+ */
+export const DEFAULT_MAX_AUTO_FOLLOW_UPS = 3;
+
+export function maxAutoFollowUps(): number {
+  const n = loadConfig().experiments?.autoResumeMaxTurns;
+  return typeof n === "number" && Number.isInteger(n) && n >= 0 ? n : DEFAULT_MAX_AUTO_FOLLOW_UPS;
+}
+
 export interface FollowUpDelivery {
   deliver(text: string): void;
   agentStarted(): void;
   agentSettled(): void;
+  /** Real user input: a typed prompt or a slash command. Lifts any pause. */
+  userInput(): void;
+  /** The user stopped a turn: drop anything held and pause until they speak. */
+  aborted(): void;
   clear(): void;
+}
+
+export interface FollowUpDeliveryOptions {
+  graceMs?: number;
+  maxConsecutive?: number;
+  /** Told once per pause, so results don't sit waiting without the user knowing. */
+  onPaused?: (text: string) => void;
 }
 
 /**
@@ -72,32 +96,55 @@ export interface FollowUpDelivery {
  * before anything the user typed during that turn: Pi drains its own queue
  * before the turn ends, while Orbit's queued messages only arrive afterwards.
  * An automatic continuation must never act ahead of a "wait, don't run that".
+ *
+ * Because nothing is sent while the agent is busy, held follow-ups never sit in
+ * Pi's own queue, which extensions have no way to clear on Stop.
  */
 export function createFollowUpDelivery(
   send: (text: string) => void,
-  graceMs = FOLLOW_UP_GRACE_MS,
+  opts: FollowUpDeliveryOptions = {},
 ): FollowUpDelivery {
+  const graceMs = opts.graceMs ?? FOLLOW_UP_GRACE_MS;
   let busy = false;
   let held: string[] = [];
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let consecutive = 0;
+  let stopped = false;
+  let pauseAnnounced = false;
 
   const cancelTimer = () => {
     if (timer) clearTimeout(timer);
     timer = null;
   };
+  const sendNow = (texts: string[]) => {
+    if (texts.length === 0) return;
+    const max = opts.maxConsecutive ?? maxAutoFollowUps();
+    if (stopped || consecutive >= max) {
+      if (!pauseAnnounced) {
+        pauseAnnounced = true;
+        opts.onPaused?.(
+          stopped
+            ? "Galaxy results are waiting -- automatic follow-up is paused since you stopped. Say continue when you're ready."
+            : `Galaxy results are waiting -- automatic follow-up paused after ${consecutive} automatic turn(s). Say continue to resume.`,
+        );
+      }
+      return;
+    }
+    consecutive++;
+    // Several held batches become one turn rather than several.
+    send(texts.join("\n\n"));
+  };
   const flush = () => {
     timer = null;
     const batch = held;
     held = [];
-    // If a user message started a turn during the grace period, followUp
-    // queues these behind it, which is the order we want.
-    for (const text of batch) send(text);
+    sendNow(batch);
   };
 
   return {
     deliver(text) {
       if (!busy && !timer) {
-        send(text);
+        sendNow([text]);
         return;
       }
       held.push(text);
@@ -113,10 +160,46 @@ export function createFollowUpDelivery(
       timer = setTimeout(flush, graceMs);
       timer.unref?.();
     },
+    userInput() {
+      consecutive = 0;
+      stopped = false;
+      pauseAnnounced = false;
+    },
+    aborted() {
+      held = [];
+      cancelTimer();
+      stopped = true;
+    },
     clear() {
       busy = false;
       held = [];
       cancelTimer();
+      consecutive = 0;
+      stopped = false;
+      pauseAnnounced = false;
     },
   };
+}
+
+let activeDelivery: FollowUpDelivery | null = null;
+
+export function setActiveFollowUpDelivery(d: FollowUpDelivery | null): void {
+  activeDelivery = d;
+}
+
+/**
+ * Slash commands run without firing Pi's `input` event, so they report user
+ * input here. Wrapping registration covers every command at once, including
+ * /execute and /run, which are exactly the "keep going" signals.
+ */
+export function registerCommandsAsUserInput(pi: ExtensionAPI): void {
+  const register = pi.registerCommand.bind(pi);
+  pi.registerCommand = (name, options) =>
+    register(name, {
+      ...options,
+      handler: (args, ctx) => {
+        activeDelivery?.userInput();
+        return options.handler(args, ctx);
+      },
+    });
 }

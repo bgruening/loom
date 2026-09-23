@@ -20,6 +20,7 @@ vi.mock("../extensions/loom/config", () => ({ loadConfig: vi.fn(() => ({})) }));
 
 import { startGalaxyPoller } from "../extensions/loom/galaxy-poller.js";
 import { registerSessionLifecycle } from "../extensions/loom/session-lifecycle";
+import { registerCommandsAsUserInput } from "../extensions/loom/auto-resume";
 
 type SessionHandler = (event: unknown, ctx: ExtensionContext) => void | Promise<void>;
 
@@ -27,10 +28,15 @@ async function start(hasUI = true) {
   const handlers = new Map<string, SessionHandler>();
   const sendUserMessage = vi.fn();
   const notify = vi.fn();
+  const commands = new Map<string, { handler: (args: string, ctx: unknown) => unknown }>();
   const pi = {
     on: (name: string, handler: SessionHandler) => handlers.set(name, handler),
     sendUserMessage,
+    registerCommand: (name: string, opts: { handler: (args: string, ctx: unknown) => unknown }) =>
+      commands.set(name, opts),
   } as unknown as ExtensionAPI;
+  registerCommandsAsUserInput(pi);
+  pi.registerCommand("execute", { description: "", handler: vi.fn() });
   const ctx = {
     hasUI,
     ui: { setToolsExpanded: vi.fn(), notify },
@@ -38,7 +44,8 @@ async function start(hasUI = true) {
   } as unknown as ExtensionContext;
   registerSessionLifecycle(pi);
   await handlers.get("session_start")!({}, ctx);
-  return { sendUserMessage, notify };
+  const emit = (name: string, event: unknown) => handlers.get(name)!(event, ctx);
+  return { sendUserMessage, notify, emit, commands };
 }
 
 beforeEach(() => {
@@ -68,6 +75,54 @@ describe("session Galaxy follow-up wiring", () => {
   it("keeps explicit opt-out sessions notification-only", async () => {
     vi.stubEnv("LOOM_AUTO_RESUME", "0");
     await start();
+    expect(vi.mocked(startGalaxyPoller).mock.calls[0][1]).toBeUndefined();
+  });
+
+  const aborted = { messages: [{ role: "assistant", stopReason: "aborted", content: [] }] };
+  const resumeFn = () => vi.mocked(startGalaxyPoller).mock.calls[0][1]!;
+
+  it("pauses after the cap and notifies, until the user types or runs a command", async () => {
+    const { sendUserMessage, notify, emit, commands } = await start();
+    for (let i = 0; i < 5; i++) resumeFn()(`auto ${i}`);
+    expect(sendUserMessage).toHaveBeenCalledTimes(3);
+    expect(notify).toHaveBeenCalledWith(expect.stringMatching(/paused after 3/), "info");
+
+    // The brain's own prompts don't count as the user saying "keep going".
+    await emit("input", { type: "input", text: "x", source: "extension" });
+    resumeFn()("still paused");
+    expect(sendUserMessage).toHaveBeenCalledTimes(3);
+
+    await emit("input", { type: "input", text: "continue", source: "rpc" });
+    resumeFn()("resumed by input");
+    expect(sendUserMessage).toHaveBeenCalledTimes(4);
+
+    for (let i = 0; i < 3; i++) resumeFn()("fill");
+    await commands.get("execute")!.handler("", {});
+    resumeFn()("resumed by /execute");
+    expect(sendUserMessage).toHaveBeenLastCalledWith("resumed by /execute", {
+      deliverAs: "followUp",
+    });
+  });
+
+  it("stops waking the agent after the user stops a turn, until they speak again", async () => {
+    const { sendUserMessage, emit } = await start();
+    await emit("agent_start", {});
+    resumeFn()("held during the turn");
+    await emit("agent_end", aborted);
+    await emit("agent_settled", {});
+    resumeFn()("after stop");
+    expect(sendUserMessage).not.toHaveBeenCalled();
+    await emit("input", { type: "input", text: "go on", source: "interactive" });
+    resumeFn()("after input");
+    expect(sendUserMessage).toHaveBeenCalledExactlyOnceWith("after input", {
+      deliverAs: "followUp",
+    });
+  });
+
+  it("lets an explicit opt-out win over user input", async () => {
+    vi.stubEnv("LOOM_AUTO_RESUME", "0");
+    const { emit } = await start();
+    await emit("input", { type: "input", text: "continue", source: "rpc" });
     expect(vi.mocked(startGalaxyPoller).mock.calls[0][1]).toBeUndefined();
   });
 });

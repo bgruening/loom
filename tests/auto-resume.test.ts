@@ -94,7 +94,7 @@ describe("createFollowUpDelivery", () => {
 
   it("sends straight away when the agent is idle", () => {
     const send = vi.fn();
-    createFollowUpDelivery(send, 100).deliver("a");
+    createFollowUpDelivery(send, { graceMs: 100 }).deliver("a");
     expect(send).toHaveBeenCalledWith("a");
   });
 
@@ -103,7 +103,7 @@ describe("createFollowUpDelivery", () => {
     // automatic follow-up must not jump ahead of it.
     vi.useFakeTimers();
     const send = vi.fn();
-    const d = createFollowUpDelivery(send, 100);
+    const d = createFollowUpDelivery(send, { graceMs: 100 });
     d.agentStarted();
     d.deliver("auto");
     d.agentSettled();
@@ -116,10 +116,51 @@ describe("createFollowUpDelivery", () => {
     expect(send).toHaveBeenCalledExactlyOnceWith("auto");
   });
 
+  it("pauses after the cap, tells the user once, and resumes on user input", () => {
+    const send = vi.fn();
+    const onPaused = vi.fn();
+    const d = createFollowUpDelivery(send, { maxConsecutive: 3, onPaused });
+    for (const t of ["1", "2", "3", "4", "5"]) d.deliver(t);
+    expect(send.mock.calls.map(([t]) => t)).toEqual(["1", "2", "3"]);
+    expect(onPaused).toHaveBeenCalledOnce();
+    expect(onPaused.mock.calls[0][0]).toMatch(/paused after 3 automatic turn/);
+    d.userInput();
+    d.deliver("6");
+    expect(send).toHaveBeenLastCalledWith("6");
+  });
+
+  it("takes the default cap from config", () => {
+    const send = vi.fn();
+    vi.mocked(loadConfig).mockReturnValue({ experiments: { autoResumeMaxTurns: 1 } });
+    const d = createFollowUpDelivery(send);
+    d.deliver("1");
+    d.deliver("2");
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it("drops held follow-ups on Stop and stays quiet until the user speaks", () => {
+    vi.useFakeTimers();
+    const send = vi.fn();
+    const onPaused = vi.fn();
+    const d = createFollowUpDelivery(send, { graceMs: 100, onPaused });
+    d.agentStarted();
+    d.deliver("held");
+    d.aborted();
+    d.agentSettled();
+    vi.advanceTimersByTime(500);
+    d.deliver("later");
+    expect(send).not.toHaveBeenCalled();
+    expect(onPaused).toHaveBeenCalledOnce();
+    expect(onPaused.mock.calls[0][0]).toMatch(/stopped/);
+    d.userInput();
+    d.deliver("after");
+    expect(send).toHaveBeenCalledExactlyOnceWith("after");
+  });
+
   it("drops held follow-ups when the session shuts down", () => {
     vi.useFakeTimers();
     const send = vi.fn();
-    const d = createFollowUpDelivery(send, 100);
+    const d = createFollowUpDelivery(send, { graceMs: 100 });
     d.agentStarted();
     d.deliver("auto");
     d.agentSettled();

@@ -92,6 +92,11 @@ export interface LoomConfig {
      */
     autoResume?: boolean;
     /**
+     * Consecutive automatic follow-up turns allowed without user input before
+     * they pause (default 3). Stopping a turn also pauses them.
+     */
+    autoResumeMaxTurns?: number;
+    /**
      * Register the experimental session-index tools (chat_search,
      * chat_session_context, chat_find_tool_calls) that query Pi's JSONL
      * session corpus via a SQLite+FTS5 mirror at ~/.loom/sessions-index.db.

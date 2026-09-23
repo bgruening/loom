@@ -426,7 +426,8 @@ is invisible to the background poller. Use the IDs returned by Galaxy.
   immediately; verification need not wait for another turn.
 - If a prerequisite is still running and no other authorized work is ready,
   give a concise status and yield. The background poller queues verification
-  or investigation on completion by default. If automatic follow-up has been
+  or investigation on completion by default. It pauses after a few automatic
+  turns without user input, and when the user stops a turn. If it has been
   explicitly disabled, say so; do not promise automatic continuation.
 - On success, verify output datasets/collections, record the evidence in the
   notebook, then mark the existing step verified and continue the next

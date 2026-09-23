@@ -159,6 +159,11 @@ failure before repairing it, avoid blind or repeated retries, and ask only when
 a necessary decision, information, or authorization is missing. Cancelled and
 conditionally skipped runs do not trigger a follow-up.
 
+Follow-ups pause after 3 consecutive automatic turns with no user input
+(`experiments.autoResumeMaxTurns`), and when the user stops a turn; the user is
+notified and the next message or command resumes them. Results that arrive
+while paused are still recorded in the notebook.
+
 Automatic follow-up can be disabled with `LOOM_AUTO_RESUME=0` or
 `experiments.autoResume: false` in `~/.loom/config.json`.
 

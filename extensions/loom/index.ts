@@ -16,6 +16,7 @@ import { registerSkillsCommand } from "./skills-command";
 import { setupContextInjection, formatConnectionStatus } from "./context";
 import { setupUIBridge } from "./ui-bridge";
 import { registerSessionLifecycle } from "./session-lifecycle";
+import { registerCommandsAsUserInput } from "./auto-resume";
 import { recordGalaxyConnected } from "./galaxy-cred-drift";
 import { registerActivityHooks } from "./activity-hooks";
 import { registerExecutionCommands } from "./execution-commands";
@@ -59,6 +60,9 @@ import {
 import { LoomWidgetKey, encodeMarkdownWidget } from "../../shared/loom-shell-contract.js";
 
 export default function galaxyAnalystExtension(pi: ExtensionAPI): void {
+  // Before anything registers a command, so every one of them counts as user
+  // input for the automatic follow-up cap.
+  registerCommandsAsUserInput(pi);
   // Local-execution safety gate + opt-in bash sandbox. Both only make sense
   // when the brain has a local execution surface. A shell that runs the brain
   // with no local exec -- the web/container remote shell (and eventually native
