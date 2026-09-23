@@ -58,7 +58,9 @@ import {
 import { appendActivityEvent } from "./activity.js";
 
 // 15s — ~4 polls/min × a few in-flight invocations stays well under
-// usegalaxy.org's per-user rate budget while still feeling live.
+// usegalaxy.org's per-user rate budget while still feeling live. Background
+// GETs never invoke the model, so this is independent of the model-facing
+// status-read cooldown in galaxy-poll-guard.ts.
 const POLL_INTERVAL_MS = 15_000;
 
 let timer: ReturnType<typeof setInterval> | null = null;

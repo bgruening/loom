@@ -8,6 +8,7 @@ Loom registers a small set of tools at the extension layer:
 | ---------------------------- | ----------------------------------------------------------------------------------------------- |
 | GTN tutorials                | `gtn_search`, `gtn_fetch`                                                                       |
 | Skills                       | `skills_fetch` (fetch SKILL.md / reference docs from configured repos)                          |
+| Saved MCP output             | `mcp_read_output` (search/page a response already saved by the MCP adapter)                     |
 | Galaxy invocations           | `galaxy_invocation_record`, `galaxy_invocation_check_all`, `galaxy_invocation_check_one`        |
 | Dashboard                    | `dashboard_read`, `dashboard_update`                                                            |
 | Multi-agent (experimental)   | `team_dispatch` (gated by `LOOM_TEAM_DISPATCH=1`)                                               |
@@ -22,6 +23,39 @@ Pi built-ins (`bash`, `read_file`, `write_file`, `edit_file`, `glob`,
 `grep`, `list_files`) are always available.
 
 There are no `analysis_*` plan tools. Plans are markdown sections.
+
+Oversized MCP responses get an automatic bounded preview. Use
+`mcp_read_output` with the notice's `outputId` (or an older notice's saved
+path) to search with a literal `query`, navigate via JSON `pointer`, or page
+with `offset`/`limit`. Object previews explicitly omit large/nested values;
+follow their pointers for exact fields. Text offsets count characters,
+so single-line JSON does not trap the reader at a line-size limit.
+Only adapter artifacts registered on the current session branch are readable,
+including after resume. Inspection is capped at 32 MB per file; pages are
+bounded and known secret values are redacted. Temporary files can expire:
+repeat only a narrower read-only lookup, never a submission just to recover
+its output.
+
+For installed tools, use `galaxy_search_tools_by_name` (name, ID, description)
+and inspect candidate schemas. Loom blocks the catalog-wide
+`search_tools_by_keywords` schema fan-out before dispatch. Input-datatype-only
+matches still require schema inspection; a name search does not prove absence.
+Timeouts receive agent-facing recovery guidance. Identical timed-out reads are
+held until one verified adapter reconnect permits a retry; a successful read
+allows later polling again. Submissions have unknown outcomes after a timeout
+and require Galaxy-state inspection before any retry. The harness does not
+automatically replay mutations.
+
+Running/queued dataset and job metadata responses direct the agent to record the
+run and yield to the background monitor. The monitor checks every 15 seconds
+without model calls. As a fallback, repeated metadata checks of an unfinished
+resource wait in the harness for two minutes; Stop cancels the
+wait, and a new user request may ask for a fresh check immediately. Terminal
+outputs remain available for immediate verification. While an agent turn is
+active, Loom emits a factual progress notification about once a minute if the
+assistant has been silent. Orbit displays these in the main chat; they do not
+consume model tokens. These updates do not imply that scientific results passed
+verification or that a background LLM worker has been started.
 
 ## Slash commands
 
