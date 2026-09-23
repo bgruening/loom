@@ -24,6 +24,7 @@ import {
 import { findGalaxyPageBlocks } from "./galaxy-page-binding";
 import { isLocalShellDisabled } from "./local-exec.js";
 import { SRA_IMPORT_GUIDANCE } from "./sra-import-gate";
+import { MCP_RECOVERY_GUIDANCE } from "./mcp-recovery";
 import { GALAXY_PAGE_MARKDOWN_GUIDANCE } from "./galaxy-page-markdown-guidance";
 import {
   buildUserInstructionsBlock,
@@ -275,19 +276,18 @@ Galaxy is connected.
 
 ### If a Galaxy tool reports it's not connected
 
-The live Galaxy MCP connection is per-session and does **not** survive a resume
-or a long idle period, even though the credentials above stay configured. So a
-\`galaxy_*\` tool can come back "not connected" / "connection closed" / with a
-transport timeout at any time -- most often on the first Galaxy action after
-resuming this project. That does **not** mean Galaxy is unavailable; it means
-this session's connection needs to be re-established.
+The live Galaxy MCP connection may need to be re-established after a resume
+or long idle period, even though credentials stay configured. Distinguish
+Galaxy authentication errors from a dropped MCP transport and request timeouts.
+A timeout alone does not prove that the connection is dead.
 
 When it happens -- and before you ever tell the user Galaxy is disconnected:
-1. Call \`galaxy_connect()\` first to re-bind this session. Do NOT report a
-   disconnection you haven't tried to fix.
-2. If \`galaxy_connect()\` itself fails with a transport error (connection
-   closed / timed out, not an auth error), tell the user to run
-   \`/mcp reconnect galaxy\` (no restart needed), then retry.
+1. For "Not connected to Galaxy", call \`galaxy_connect()\` to re-bind
+   this session. Do not report a disconnection you haven't tried to fix.
+2. For a dropped transport, call \`mcp({connect: "galaxy"})\` yourself,
+   then \`galaxy_connect()\`. Verify both results before continuing.
+3. For timeouts, narrow read-only queries first. Before retrying a mutation,
+   check whether Galaxy accepted it. Never blindly replay a submission.
 
 Never report "Galaxy is disconnected" as a final answer without attempting
 \`galaxy_connect()\` in the same turn.
@@ -1216,6 +1216,7 @@ export function setupContextInjection(pi: ExtensionAPI): void {
       buildNotebookWriteBlock(),
       buildExecutionModeBlock(),
       buildGalaxyContextBlock(),
+      MCP_RECOVERY_GUIDANCE,
       buildSkillsContext(),
       buildLocalEnvContext(),
       buildNoLocalShellBlock(),

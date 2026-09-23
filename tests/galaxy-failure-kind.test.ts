@@ -48,18 +48,15 @@ describe("classifyGalaxyFailure", () => {
 });
 
 describe("galaxyFailureNudge", () => {
-  it("leads a timed-out call with narrowing the request, not with reconnect", () => {
-    const nudge = galaxyFailureNudge("timeout") ?? "";
-    expect(nudge).toBe(GALAXY_TIMEOUT_NUDGE);
-    expect(nudge).toMatch(/asking for less/);
-    // Reconnect stays available as the fallback for a wedged server -- a timeout
-    // can't rule that out -- but it must not be the headline. That was #410.
-    expect(nudge.indexOf("asking for less")).toBeLessThan(nudge.indexOf("/mcp reconnect"));
+  it("reports an unknown outcome without delegating recovery to the user", () => {
+    expect(galaxyFailureNudge("timeout")).toBe(GALAXY_TIMEOUT_NUDGE);
+    expect(GALAXY_TIMEOUT_NUDGE).toContain("result is unknown");
+    expect(GALAXY_TIMEOUT_NUDGE).not.toContain("Try asking");
   });
 
-  it("keeps the reconnect advice for a genuinely dropped transport", () => {
+  it("identifies a dropped transport without asking for a manual command", () => {
     expect(galaxyFailureNudge("dropped")).toBe(GALAXY_RECONNECT_NUDGE);
-    expect(galaxyFailureNudge("dropped")).toContain("/mcp reconnect galaxy");
+    expect(GALAXY_RECONNECT_NUDGE).toContain("agent can reconnect");
   });
 
   it("says nothing when there is nothing useful to say", () => {
