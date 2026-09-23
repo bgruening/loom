@@ -10,6 +10,7 @@ vi.mock("../extensions/loom/state.js", () => ({
 vi.mock("../extensions/loom/galaxy-poller.js", () => ({
   startGalaxyPoller: vi.fn(),
   stopGalaxyPoller: vi.fn(),
+  setPollTickHook: vi.fn(),
 }));
 vi.mock("../extensions/loom/galaxy-page-sync.js", () => ({
   initGalaxyPageSync: vi.fn(),

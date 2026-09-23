@@ -6,6 +6,7 @@ import {
   stopWatchingNotebook,
 } from "./state.js";
 import { startGalaxyPoller, stopGalaxyPoller } from "./galaxy-poller.js";
+import { armGalaxyLivePanel, disarmGalaxyLivePanel } from "./galaxy-live-source.js";
 import {
   createFollowUpDelivery,
   isAutoResumeEnabled,
@@ -97,6 +98,12 @@ export function registerSessionLifecycle(pi: ExtensionAPI): void {
     notifyUser = (text) => toast(text, "info");
     startGalaxyPoller(toast, resumeFn);
 
+    // Live Galaxy history for the dashboard panel, pushed from the poller tick
+    // above rather than a timer of its own. A no-op outside a shell that draws
+    // a dashboard, so the terminal pays nothing for it -- and inside one it
+    // asks Galaxy nothing until some dashboard actually holds the panel.
+    armGalaxyLivePanel(ctx);
+
     sessionStart = {
       id: ctx.sessionManager?.getSessionId?.() ?? `session-${Date.now()}`,
       startedAt: new Date().toISOString(),
@@ -129,6 +136,7 @@ export function registerSessionLifecycle(pi: ExtensionAPI): void {
 
   pi.on("session_shutdown", async () => {
     stopGalaxyPoller();
+    disarmGalaxyLivePanel();
     followUps.clear();
     // Close the notebook FSWatcher before the summary write below. The watcher
     // otherwise keeps the event loop alive (so --print never exits) and, since
