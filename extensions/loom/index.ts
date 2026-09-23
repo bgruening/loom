@@ -40,6 +40,8 @@ import { isLocalExecDisabled } from "./local-exec";
 import { registerSecretRedaction } from "./secret-redaction";
 import { registerMcpOutputRecovery } from "./mcp-output";
 import { galaxyCall, registerMcpRecovery } from "./mcp-recovery";
+import { registerGalaxyPollGuard } from "./galaxy-poll-guard";
+import { registerProgressUpdates } from "./progress-updates";
 import {
   ALL_NUDGES_ARMED,
   transportNudgeDecision,
@@ -95,6 +97,8 @@ export default function galaxyAnalystExtension(pi: ExtensionAPI): void {
   // secret scrubbing as ordinary tool results (including in remote shells).
   registerMcpOutputRecovery(pi);
   registerMcpRecovery(pi);
+  registerGalaxyPollGuard(pi);
+  registerProgressUpdates(pi);
   registerSecretRedaction(pi);
 
   setupUIBridge(pi);

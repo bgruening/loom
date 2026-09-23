@@ -25,6 +25,7 @@ import { findGalaxyPageBlocks } from "./galaxy-page-binding";
 import { isLocalShellDisabled } from "./local-exec.js";
 import { SRA_IMPORT_GUIDANCE } from "./sra-import-gate";
 import { MCP_RECOVERY_GUIDANCE } from "./mcp-recovery";
+import { GALAXY_POLL_GUIDANCE } from "./galaxy-poll-guard";
 import { GALAXY_PAGE_MARKDOWN_GUIDANCE } from "./galaxy-page-markdown-guidance";
 import {
   buildUserInstructionsBlock,
@@ -1217,6 +1218,7 @@ export function setupContextInjection(pi: ExtensionAPI): void {
       buildExecutionModeBlock(),
       buildGalaxyContextBlock(),
       MCP_RECOVERY_GUIDANCE,
+      GALAXY_POLL_GUIDANCE,
       buildSkillsContext(),
       buildLocalEnvContext(),
       buildNoLocalShellBlock(),

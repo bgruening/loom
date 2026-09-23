@@ -22,7 +22,7 @@ vi.mock("../extensions/loom/galaxy-api.js", () => ({
 import { startGalaxyPoller, stopGalaxyPoller } from "../extensions/loom/galaxy-poller";
 
 /** Matches POLL_INTERVAL_MS in galaxy-poller.ts. */
-const POLL_INTERVAL_MS = 15_000;
+const POLL_INTERVAL_MS = 120_000;
 import { checkInvocations } from "../extensions/loom/tools.js";
 
 const mockCheck = vi.mocked(checkInvocations);
@@ -41,7 +41,7 @@ describe("galaxy-poller completion notifications", () => {
   });
 
   afterEach(() => {
-    // Clear the 15s interval the poller installs so it doesn't leak between tests.
+    // Clear the poll interval the poller installs so it doesn't leak between tests.
     stopGalaxyPoller();
   });
 
@@ -180,7 +180,7 @@ describe("galaxy-poller completion notifications", () => {
 
   it("does not hold the event loop open on the poll interval", () => {
     // `--mode json` runs finish with nothing else holding the loop, so a refed
-    // 15s interval kept the process up until something killed it.
+    // poll interval kept the process up until something killed it.
     const spy = vi.spyOn(globalThis, "setInterval");
     mockCheck.mockResolvedValue(resultWith([]));
 

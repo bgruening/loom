@@ -46,6 +46,17 @@ allows later polling again. Submissions have unknown outcomes after a timeout
 and require Galaxy-state inspection before any retry. The harness does not
 automatically replay mutations.
 
+Running/queued dataset and job metadata responses direct the agent to record the
+run and yield to the background monitor. The monitor checks every two minutes
+without model calls. As a fallback, repeated metadata checks of an unfinished
+resource wait in the harness until that interval elapses; Stop cancels the
+wait, and a new user request may ask for a fresh check immediately. Terminal
+outputs remain available for immediate verification. While an agent turn is
+active, Loom emits a factual progress notification about once a minute if the
+assistant has been silent. Orbit displays these in the main chat; they do not
+consume model tokens. These updates do not imply that scientific results passed
+verification or that a background LLM worker has been started.
+
 ## Slash commands
 
 | Command                   | What it does                                                                                                                                      |
