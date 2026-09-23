@@ -311,12 +311,20 @@ describe("/dashboard reset is the escape hatch, so it must not need the old file
     ]);
   });
 
-  it("can still put the oversized one back", async () => {
+  it("says the oversized one cannot come back, rather than holding it in memory", async () => {
+    // The reader is bounded, on purpose: an undo snapshot of a file the cap
+    // refuses would be the one unbounded read left. The reset still lands; it
+    // just says so.
     oversize();
-    const before = fs.readFileSync(dashPath, "utf-8");
-    await dash("reset");
-    await dash("undo");
-    expect(fs.readFileSync(dashPath, "utf-8")).toBe(before);
+    const reset = await dash("reset");
+    expect(reset.text).toContain("cannot be undone");
+    const undo = await dash("undo");
+    expect(undo.text).toContain("Nothing to undo");
+    expect(onDisk().dashboards[0].panels.map((p) => p.id)).toEqual([
+      "p-plan",
+      "p-jobs",
+      "p-notebook",
+    ]);
   });
 
   it("still refuses a symlink, because the user did not ask for a file of theirs", async () => {

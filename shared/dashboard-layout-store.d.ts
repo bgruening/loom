@@ -16,7 +16,11 @@ export type LayoutWriteResult =
       revision?: string | null;
     };
 
-/** Run `fn` with nothing else on this path running at the same time. */
+/**
+ * Run `fn` with nothing else on this path running at the same time, in this
+ * process or any other. Rejects if the lock file cannot be taken within a few
+ * seconds; `casWriteLayoutFile` turns that into a failed result.
+ */
 export function withLayoutLock<T>(absPath: string, fn: () => Promise<T>): Promise<T>;
 
 /** For tests: is anything queued on any path? */

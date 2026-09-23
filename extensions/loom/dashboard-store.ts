@@ -15,7 +15,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { withLayoutLock } from "../../shared/dashboard-layout-store.js";
+import { readLayoutFile, withLayoutLock } from "../../shared/dashboard-layout-store.js";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import {
@@ -101,18 +101,25 @@ async function refuseSymlink(filePath: string, checkSize = true): Promise<string
 /**
  * The file's text, or null when there is genuinely no file.
  *
- * Only ENOENT counts as "no file". Swallowing every error would turn an
- * unreadable layout -- a permissions problem, a directory left at that name --
- * into "there is nothing here", and the compare-and-swap below would then
- * happily rename over something it could not read.
+ * Through the shared reader, so the brain reads the layout the way the shells
+ * do: by descriptor, with the symlink and size checks on the thing actually
+ * opened rather than on the name a moment earlier. Only a missing file is "no
+ * file"; every other refusal throws, because turning an unreadable layout into
+ * "there is nothing here" would let the compare-and-swap below rename over
+ * something it could not read.
  */
 async function readRaw(filePath: string): Promise<string | null> {
-  try {
-    return await fsp.readFile(filePath, "utf-8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return null;
-    throw err;
-  }
+  const res = await readLayoutFile(filePath, DASHBOARD_MAX_BYTES);
+  if (!res.ok) throw new Error(res.error);
+  return res.raw;
+}
+
+/** A lock the other process would not give up is a failed write, not a crash. */
+function lockFailure<T extends { ok: false; error: string }>(err: unknown): T {
+  return {
+    ok: false,
+    error: `Could not write ${DASHBOARD_FILENAME}: ${err instanceof Error ? err.message : String(err)}.`,
+  } as T;
 }
 
 /**
@@ -269,7 +276,7 @@ export async function updateDashboardDocument(
   // Serialized per path, for the same reason the shells are: two tool calls in
   // the same turn could otherwise both read, both apply and both write, and the
   // second would silently replace the first.
-  return withLayoutLock(filePath, () => updateLocked(filePath, apply));
+  return withLayoutLock(filePath, () => updateLocked(filePath, apply)).catch(lockFailure);
 }
 
 async function updateLocked(
@@ -343,7 +350,7 @@ export async function replaceDashboardDocument(
   // the reset's bytes were not the ones on disk in the large majority of
   // trials. Which one loses depends on where the renames fall relative to the
   // update's check; the lock is what stops there being a question.
-  return withLayoutLock(filePath, () => replaceLocked(filePath, document));
+  return withLayoutLock(filePath, () => replaceLocked(filePath, document)).catch(lockFailure);
 }
 
 async function replaceLocked(
@@ -401,7 +408,7 @@ export async function undoDashboardChange(): Promise<DashboardUndoResult> {
   //
   // One consequence worth knowing: an undo typed during a tool call now queues
   // behind that call rather than racing it, so it undoes the tool's write.
-  return withLayoutLock(filePath, () => undoLocked(filePath));
+  return withLayoutLock(filePath, () => undoLocked(filePath)).catch(lockFailure);
 }
 
 async function undoLocked(filePath: string): Promise<DashboardUndoResult> {

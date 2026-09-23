@@ -159,7 +159,7 @@ describe("casWriteLayoutFile", () => {
     // And the file holds the winner's bytes, whole.
     const onDisk = fs.readFileSync(file, "utf8");
     expect(["WRITER-A\n", "WRITER-B\n"]).toContain(onDisk);
-    expect(onDisk).toBe(winners[0].ok ? "WRITER-A\n" : onDisk);
+    expect(onDisk).toBe(a.ok ? "WRITER-A\n" : "WRITER-B\n");
   });
 
   it("holds under many concurrent writers, losing none of the winners' bytes", async () => {
