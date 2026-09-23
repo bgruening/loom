@@ -47,7 +47,7 @@ import {
   sameGalaxyServer,
   type GalaxyInvocationResponse,
 } from "./galaxy-api.js";
-import { buildResumePrompt } from "./auto-resume.js";
+import { buildResumePrompt, isResumableOutcome, type GalaxyFollowUp } from "./auto-resume.js";
 import {
   applyJobPollUpdate,
   findJobBlocks,
@@ -76,13 +76,22 @@ let notify: PollerNotify | null = null;
 /**
  * Hand a finished run back to the agent as a queued follow-up, so it verifies
  * outputs itself instead of the toast asking the user to relay. Null when
- * auto-resume is off, which is the default.
+ * auto-resume is explicitly disabled.
  *
  * Must queue rather than interrupt: delivering a prompt to a brain that is
  * mid-turn fails outright with "Agent is already processing".
  */
 type PollerResume = (text: string) => void;
 let resume: PollerResume | null = null;
+
+function notifySafely(text: string, level: "info" | "warning" | "error"): void {
+  try {
+    notify?.(text, level);
+  } catch (err) {
+    // A stale shell must not prevent the agent from receiving its follow-up.
+    console.error("[galaxy-poller] notification failed:", err);
+  }
+}
 
 /** Subset of a checkInvocations result entry the poller needs for notifications. */
 interface PollResultEntry {
@@ -319,7 +328,7 @@ function jobFinishedToast(
   switch (status) {
     case "completed":
       return [
-        `✅ Galaxy: "${label}" finished${willResume ? " — verifying outputs…" : " — ask me to verify the outputs."}`,
+        `✅ Galaxy: "${label}" finished${willResume ? " — output verification queued." : " — automatic follow-up disabled."}`,
         "info",
       ];
     case "cancelled":
@@ -328,7 +337,7 @@ function jobFinishedToast(
       return [`⏭️ Galaxy: "${label}" was skipped — its step's condition wasn't met.`, "info"];
     default:
       return [
-        `❌ Galaxy: "${label}" failed (${state})${willResume ? " — investigating…" : " — ask me to investigate."}`,
+        `❌ Galaxy: "${label}" failed (${state})${willResume ? " — investigation queued." : " — automatic follow-up disabled."}`,
         "warning",
       ];
   }
@@ -356,7 +365,7 @@ function hasInProgressInvocations(content: string): boolean {
  * still running, so an idle notebook costs nothing beyond the scan the
  * invocation path already does.
  */
-async function tickJobs(content: string): Promise<void> {
+async function tickJobs(content: string, followUps: GalaxyFollowUp[]): Promise<void> {
   const nbPath = getNotebookPath();
   if (!nbPath) return;
 
@@ -436,10 +445,17 @@ async function tickJobs(content: string): Promise<void> {
       galaxyState: state ?? null,
       lastPolledAt: polledAt,
     });
-    const willResume = resume !== null && (status === "completed" || status === "failed");
-    if (notify) notify(...jobFinishedToast(status, label, state, willResume));
-    if (status === "completed" || status === "failed") {
-      resume?.(buildResumePrompt(label, status, status === "failed" ? state : undefined));
+    const willResume = resume !== null && isResumableOutcome(status);
+    notifySafely(...jobFinishedToast(status, label, state, willResume));
+    if (isResumableOutcome(status)) {
+      followUps.push({
+        kind: "job",
+        id: job.jobId,
+        label,
+        notebookAnchor: job.notebookAnchor,
+        outcome: status,
+        detail: state,
+      });
     }
   }
 }
@@ -462,6 +478,8 @@ export function pollGalaxyNow(): Promise<void> {
 }
 
 async function runTick(): Promise<void> {
+  const tickNotebook = getNotebookPath();
+  const followUps: GalaxyFollowUp[] = [];
   try {
     // One read per tick, shared by everything below: what the notebook says is
     // in flight is the whole of the poller's worklist.
@@ -479,7 +497,7 @@ async function runTick(): Promise<void> {
 
     // Tool runs are tracked separately from workflow invocations and are the
     // only thing advancing in a session that never invoked a workflow (#413).
-    await tickJobs(content);
+    await tickJobs(content, followUps);
 
     // Cheap path when nothing's in-flight: scan and return.
     if (!hasInProgressInvocations(content)) return;
@@ -518,28 +536,49 @@ async function runTick(): Promise<void> {
           });
         }
         if (r.autoAction === "completed") {
-          notify?.(
-            `✅ Galaxy: "${label}" finished (${r.jobSummary?.ok ?? 0} jobs ok)${willResume ? " — verifying outputs…" : " — ask me to verify the outputs."}`,
+          notifySafely(
+            `✅ Galaxy: "${label}" finished (${r.jobSummary?.ok ?? 0} jobs ok)${willResume ? " — output verification queued." : " — automatic follow-up disabled."}`,
             "info",
           );
-          resume?.(buildResumePrompt(label, "completed"));
+          followUps.push({
+            kind: "invocation",
+            id: r.invocationId,
+            label,
+            notebookAnchor: r.notebookAnchor,
+            outcome: "completed",
+          });
         } else if (r.autoAction === "failed") {
-          notify?.(
-            `❌ Galaxy: "${label}" failed (${r.jobSummary?.error ?? 0} job error(s))${willResume ? " — investigating…" : " — ask me to investigate."}`,
+          notifySafely(
+            `❌ Galaxy: "${label}" failed (${r.jobSummary?.error ?? 0} job error(s))${willResume ? " — investigation queued." : " — automatic follow-up disabled."}`,
             "warning",
           );
-          resume?.(buildResumePrompt(label, "failed", `${r.jobSummary?.error ?? 0} job error(s)`));
+          followUps.push({
+            kind: "invocation",
+            id: r.invocationId,
+            label,
+            notebookAnchor: r.notebookAnchor,
+            outcome: "failed",
+            detail: `${r.jobSummary?.error ?? 0} job error(s)`,
+          });
         } else if (r.autoAction === "cancelled") {
-          notify?.(
+          notifySafely(
             `⏹️ Galaxy: "${label}" was cancelled — ${r.jobSummary?.ok ?? 0} job(s) finished before it stopped.`,
             "info",
           );
         } else if (r.autoAction === "failing" && !announcedFailing.has(r.invocationId)) {
           announcedFailing.add(r.invocationId);
-          notify?.(
-            `⚠️ Galaxy: "${label}" — ${r.jobSummary?.error ?? 0} job(s) failed, ${r.activeJobs ?? 0} still running — ask me to investigate.`,
+          notifySafely(
+            `⚠️ Galaxy: "${label}" — ${r.jobSummary?.error ?? 0} job(s) failed, ${r.activeJobs ?? 0} still running${willResume ? " — investigation queued." : " — automatic follow-up disabled."}`,
             "warning",
           );
+          followUps.push({
+            kind: "invocation",
+            id: r.invocationId,
+            label,
+            notebookAnchor: r.notebookAnchor,
+            outcome: "failing",
+            detail: `${r.jobSummary?.error ?? 0} job(s) failed, ${r.activeJobs ?? 0} still running`,
+          });
         }
       }
     }
@@ -547,14 +586,30 @@ async function runTick(): Promise<void> {
     // Don't kill the timer on a single bad poll — Galaxy may be
     // briefly unreachable. Log and try again on the next tick.
     console.error("[galaxy-poller] tick failed:", err);
+  } finally {
+    // Batch jobs and workflows into one turn, even if a later poll request
+    // failed. Queuing each finished import separately floods the agent.
+    // Deliver through whoever owns the poller now, not whoever started this
+    // tick: the transitions are already persisted, so a replacement session
+    // on the same notebook would never see them in_progress again. A stopped
+    // poller has no resume, and a different notebook's session isn't ours.
+    const deliver = resume;
+    if (deliver && followUps.length > 0 && getNotebookPath() === tickNotebook) {
+      try {
+        deliver(buildResumePrompt(followUps));
+      } catch (err) {
+        console.error("[galaxy-poller] auto-resume send failed:", err);
+      }
+    }
   }
 }
 
 export function startGalaxyPoller(notifyFn?: PollerNotify, resumeFn?: PollerResume): void {
+  stopGalaxyPoller();
   // Capture the shell notifier (from the session_start ctx) so a completed
   // background invocation can toast the user. Refreshed each session_start.
   notify = notifyFn ?? null;
-  // Null unless auto-resume is opted in; the caller decides, so the poller
+  // Null when auto-resume is disabled; the caller decides, so the poller
   // stays free of config lookups on a 15s timer.
   resume = resumeFn ?? null;
   announcedFailing.clear();
@@ -562,7 +617,6 @@ export function startGalaxyPoller(notifyFn?: PollerNotify, resumeFn?: PollerResu
   // Idempotent: a brain restart triggers a new session_start without
   // session_shutdown firing first in some failure modes. Stop any
   // pre-existing timer so we don't double-poll.
-  stopGalaxyPoller();
   // Fire one immediate tick so a session resumed with in-flight blocks
   // gets fresh counters within the first second instead of waiting 15s.
   void tick();
@@ -579,6 +633,7 @@ export function startGalaxyPoller(notifyFn?: PollerNotify, resumeFn?: PollerResu
 }
 
 export function stopGalaxyPoller(): void {
+  resume = null;
   if (timer) {
     clearInterval(timer);
     timer = null;
