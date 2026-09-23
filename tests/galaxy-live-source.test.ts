@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   GalaxyLiveTicker,
@@ -17,8 +18,15 @@ import { GalaxyApiError, type GalaxyHistorySummary } from "../extensions/loom/ga
 import {
   armGalaxyLivePanel,
   disarmGalaxyLivePanel,
+  layoutWantsGalaxyLive,
+  resetGalaxyLiveWantedCache,
 } from "../extensions/loom/galaxy-live-source.js";
 import { getPollTickHook } from "../extensions/loom/galaxy-poller.js";
+import { resetState, setNotebookPath } from "../extensions/loom/state";
+import {
+  createDefaultDashboardDocument,
+  serializeDashboardDocument,
+} from "../shared/dashboard-contract.js";
 import {
   GALAXY_LIVE_MAX_ITEMS,
   normalizeGalaxyLivePayload,
@@ -1120,6 +1128,31 @@ describe("armGalaxyLivePanel", () => {
     return { ctx: { ui: { setWidget: vi.fn() } } };
   }
 
+  /** A layout with the panel, or without one, at a notebook the brain knows. */
+  function layoutHolding(widget: string | null): string {
+    const dir = mkdtempSync(join(tmpdir(), "galaxy-live-arm-"));
+    setNotebookPath(join(dir, "notebook.md"));
+    const doc = createDefaultDashboardDocument();
+    if (widget) {
+      doc.dashboards[0].panels.push({
+        id: "p-live",
+        widget,
+        config: {},
+        layout: { span: 1, rows: 2 },
+        addedBy: "user",
+      } as never);
+    }
+    writeFileSync(join(dir, ".loom-dashboard.json"), serializeDashboardDocument(doc), "utf-8");
+    resetGalaxyLiveWantedCache();
+    return dir;
+  }
+  const dirs: string[] = [];
+  afterEach(() => {
+    resetState();
+    resetGalaxyLiveWantedCache();
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
   it("costs the terminal nothing: no hook, so the poller tick does no extra work", () => {
     delete process.env.LOOM_SHELL_KIND;
     const { ctx } = fakeCtx();
@@ -1149,8 +1182,40 @@ describe("armGalaxyLivePanel", () => {
     expect(first.ctx.ui.setWidget).not.toHaveBeenCalled();
   });
 
+  it("asks Galaxy nothing and pushes nothing while no dashboard holds the panel", async () => {
+    process.env.LOOM_SHELL_KIND = "orbit";
+    dirs.push(layoutHolding(null));
+    const { ctx } = fakeCtx();
+    armGalaxyLivePanel(ctx as never);
+    await getPollTickHook()!(null);
+    expect(ctx.ui.setWidget).not.toHaveBeenCalled();
+  });
+
+  it("starts the moment a dashboard gains the panel", async () => {
+    process.env.LOOM_SHELL_KIND = "orbit";
+    const dir = layoutHolding(null);
+    dirs.push(dir);
+    const { ctx } = fakeCtx();
+    armGalaxyLivePanel(ctx as never);
+    await getPollTickHook()!(null);
+    expect(ctx.ui.setWidget).not.toHaveBeenCalled();
+    // The user adds the panel: same directory, new layout.
+    const doc = createDefaultDashboardDocument();
+    doc.dashboards[0].panels.push({
+      id: "p-live",
+      widget: "galaxy-history",
+      config: {},
+      layout: { span: 1, rows: 2 },
+      addedBy: "user",
+    } as never);
+    writeFileSync(join(dir, ".loom-dashboard.json"), serializeDashboardDocument(doc), "utf-8");
+    await getPollTickHook()!(null);
+    expect(ctx.ui.setWidget).toHaveBeenCalledTimes(1);
+  });
+
   it("pushes the projection under the galaxy-live widget key", async () => {
     process.env.LOOM_SHELL_KIND = "orbit";
+    dirs.push(layoutHolding("galaxy-history"));
     const { ctx } = fakeCtx();
     armGalaxyLivePanel(ctx as never);
     await getPollTickHook()!(null);
@@ -1175,6 +1240,7 @@ describe("armGalaxyLivePanel", () => {
       },
     };
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    dirs.push(layoutHolding("galaxy-history"));
     armGalaxyLivePanel(ctx as never);
     await getPollTickHook()!(null);
     expect(spy).not.toHaveBeenCalled();
@@ -1277,5 +1343,93 @@ describe("normalizeGalaxyLivePayload", () => {
       updatedAt: "2026-09-18T06:00:00.000Z",
     };
     expect(normalizeGalaxyLivePayload(JSON.parse(JSON.stringify(real)))).toEqual(real);
+  });
+});
+
+// ── The panel gate ───────────────────────────────────────────────────────────
+
+describe("GalaxyLiveTicker with no panel to draw for", () => {
+  it("asks Galaxy nothing, not even the not-configured line", async () => {
+    const h = tickerHarness({ wanted: async () => false, config: () => null });
+    await h.ticker.tick(bound);
+    h.advance(600_000);
+    await h.ticker.tick(bound);
+    expect(h.snapshot).not.toHaveBeenCalled();
+    expect(h.pushes).toHaveLength(0);
+  });
+
+  it("asks at once when the panel appears, ignoring the cadence, and re-pushes for it", async () => {
+    let wanted = true;
+    const h = tickerHarness({ wanted: async () => wanted });
+    await h.ticker.tick(bound);
+    expect(h.snapshot).toHaveBeenCalledTimes(1);
+    expect(h.pushes).toHaveLength(1);
+
+    // Panel removed: the next ticks are free.
+    wanted = false;
+    h.advance(600_000);
+    await h.ticker.tick(bound);
+    expect(h.snapshot).toHaveBeenCalledTimes(1);
+
+    // Panel back, one second later -- well inside the cadence -- and the
+    // unchanged payload goes out again because the new panel has never seen it.
+    wanted = true;
+    h.advance(1_000);
+    await h.ticker.tick(bound);
+    expect(h.snapshot).toHaveBeenCalledTimes(2);
+    expect(h.pushes).toHaveLength(2);
+  });
+});
+
+describe("layoutWantsGalaxyLive", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "galaxy-live-wanted-"));
+    setNotebookPath(join(dir, "notebook.md"));
+    resetGalaxyLiveWantedCache();
+  });
+  afterEach(() => {
+    resetState();
+    resetGalaxyLiveWantedCache();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function write(widget: string | null): void {
+    const doc = createDefaultDashboardDocument();
+    if (widget) {
+      doc.dashboards[0].panels.push({
+        id: "p-x",
+        widget,
+        config: {},
+        layout: { span: 1, rows: 2 },
+        addedBy: "user",
+      } as never);
+    }
+    writeFileSync(join(dir, ".loom-dashboard.json"), serializeDashboardDocument(doc), "utf-8");
+  }
+
+  it("is false with no layout, since neither preset holds the panel", async () => {
+    expect(await layoutWantsGalaxyLive()).toBe(false);
+  });
+
+  it("is false with no notebook at all", async () => {
+    setNotebookPath(null);
+    expect(await layoutWantsGalaxyLive()).toBe(false);
+  });
+
+  it("follows the layout as it changes", async () => {
+    write("jobs");
+    expect(await layoutWantsGalaxyLive()).toBe(false);
+    write("galaxy-history");
+    expect(await layoutWantsGalaxyLive()).toBe(true);
+    write(null);
+    expect(await layoutWantsGalaxyLive()).toBe(false);
+  });
+
+  it("is false for a layout the brain refuses to read", async () => {
+    writeFileSync(join(dir, "elsewhere.json"), "{}", "utf-8");
+    const { symlinkSync } = await import("node:fs");
+    symlinkSync(join(dir, "elsewhere.json"), join(dir, ".loom-dashboard.json"));
+    expect(await layoutWantsGalaxyLive()).toBe(false);
   });
 });

@@ -76,7 +76,8 @@ export function registerSessionLifecycle(pi: ExtensionAPI): void {
 
     // Live Galaxy history for the dashboard panel, pushed from the poller tick
     // above rather than a timer of its own. A no-op outside a shell that draws
-    // a dashboard, so the terminal pays nothing for it.
+    // a dashboard, so the terminal pays nothing for it -- and inside one it
+    // asks Galaxy nothing until some dashboard actually holds the panel.
     armGalaxyLivePanel(ctx);
 
     sessionStart = {

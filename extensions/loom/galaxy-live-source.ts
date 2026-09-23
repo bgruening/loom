@@ -27,6 +27,8 @@
  * over-fetching rather than showing deleted rows as live.
  */
 
+import * as fsp from "node:fs/promises";
+
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   GALAXY_LIVE_MAX_ITEMS,
@@ -54,6 +56,7 @@ import { findGalaxyPageBlocks } from "./galaxy-page-binding.js";
 import { findJobBlocks } from "./galaxy-job-block.js";
 import { findInvocationBlocks } from "./notebook-writer.js";
 import { setPollTickHook } from "./galaxy-poller.js";
+import { getDashboardPath, readDashboardDocument } from "./dashboard-store.js";
 
 /** The only Galaxy reads this source is allowed to make. Anything not built by
  *  these two functions never leaves the module, so there is no path from a
@@ -520,6 +523,12 @@ export interface GalaxyLiveTickerDeps {
   /** Hand a payload to the shell. Must not throw. */
   push: (payload: GalaxyLivePayload) => void;
   now: () => number;
+  /**
+   * Is there a panel to draw this? Checked at the top of every tick, before
+   * the cadence, so a session whose dashboards never include the live history
+   * asks Galaxy nothing at all. Absent means always.
+   */
+  wanted?: () => Promise<boolean>;
 }
 
 /** Everything except `updatedAt`, which moves on every read and would defeat
@@ -551,6 +560,9 @@ export class GalaxyLiveTicker {
   private historyId: string | null = null;
   private failures = 0;
   private resolved: { id: string; at: number; server: string } | null = null;
+  /** Whether the previous tick found a panel. Starts false so the first tick
+   *  that finds one is treated as the panel appearing. */
+  private panelWanted = false;
   /**
    * Everything this ticker asks Galaxy hangs off this, so `stop()` abandons
    * whatever is in flight. Without it a `session_shutdown` landing on a read
@@ -681,6 +693,20 @@ export class GalaxyLiveTicker {
   }
 
   private async runTick(content: string | null): Promise<void> {
+    const wanted = this.deps.wanted ? await this.deps.wanted() : true;
+    if (!wanted) {
+      this.panelWanted = false;
+      return;
+    }
+    if (!this.panelWanted) {
+      // The panel just appeared, or this is the first tick. Ask now rather than
+      // up to a minute from now, and push whatever comes back even if it is
+      // what was pushed before the panel went away: the widget that was just
+      // added has never seen it.
+      this.panelWanted = true;
+      this.lastAttemptAt = 0;
+      this.lastFingerprint = null;
+    }
     const now = this.deps.now();
     const cfg = this.deps.config();
     if (!cfg) {
@@ -783,6 +809,48 @@ export class GalaxyLiveTicker {
 
 // ── Arming ───────────────────────────────────────────────────────────────────
 
+const GALAXY_HISTORY_WIDGET = "galaxy-history";
+
+/** The last answer, keyed on the layout file's identity, so a tick that finds
+ *  the file unchanged pays one lstat and no parse. */
+let wantedCache: { key: string; wanted: boolean } | null = null;
+
+/**
+ * Does any dashboard in this analysis hold the live-history panel?
+ *
+ * Neither shipped preset does, so for most sessions the answer is no and the
+ * ticker never talks to Galaxy. A layout the brain cannot read -- a symlink,
+ * over the cap -- counts as no: nothing it would draw for can be trusted to
+ * exist. Read through the brain's own store, so the file is read the way every
+ * other reader reads it.
+ */
+export async function layoutWantsGalaxyLive(): Promise<boolean> {
+  const filePath = getDashboardPath();
+  if (!filePath) return false;
+  let key: string;
+  try {
+    const st = await fsp.lstat(filePath);
+    key = `${filePath}|${st.ino}|${st.size}|${st.mtimeMs}`;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") return false;
+    key = `${filePath}|absent`;
+  }
+  if (wantedCache?.key === key) return wantedCache.wanted;
+  const read = await readDashboardDocument();
+  const wanted =
+    read.ok &&
+    read.document.dashboards.some((d) =>
+      d.panels.some((panel) => panel.widget === GALAXY_HISTORY_WIDGET),
+    );
+  wantedCache = { key, wanted };
+  return wanted;
+}
+
+/** For tests: forget the cached answer. */
+export function resetGalaxyLiveWantedCache(): void {
+  wantedCache = null;
+}
+
 let ticker: GalaxyLiveTicker | null = null;
 /** Bumped by every arm and every disarm, so a push from a tick that was already
  *  in flight when the session ended lands nowhere. */
@@ -841,6 +909,7 @@ export function armGalaxyLivePanel(ctx: ExtensionContext): void {
     mostRecentHistory: galaxyGetMostRecentHistory,
     push,
     now: () => Date.now(),
+    wanted: layoutWantsGalaxyLive,
   });
   const own = ticker;
   setPollTickHook((content) => (own === ticker ? own.tick(content) : Promise.resolve()));
