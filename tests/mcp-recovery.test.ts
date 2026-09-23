@@ -125,6 +125,18 @@ describe("Galaxy MCP recovery", () => {
     }
   });
 
+  it("does not give read-only or session-binding calls the mutation warning", () => {
+    const h = harness();
+    const download = JSON.stringify(
+      h.result("galaxy_download_dataset", { dataset_id: "d" }).content,
+    );
+    expect(download).toContain("This was a read-only lookup");
+    expect(download).not.toContain("result is UNKNOWN");
+    const connect = JSON.stringify(h.result("galaxy_connect").content);
+    expect(connect).toContain("safe to call again after reconnecting");
+    expect(connect).not.toContain("result is UNKNOWN");
+  });
+
   it("gives dropped connections an agent-callable reconnect", () => {
     const text = JSON.stringify(
       harness().result("galaxy_get_histories", {}, "Connection closed (-32000)").content,

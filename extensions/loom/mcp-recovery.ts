@@ -23,6 +23,9 @@ export function galaxyCall(name: string, input: Args): { name: string; args: Arg
 const DISCOVERY_HINT =
   "Use galaxy_search_tools_by_name with a specific name, ID, or description term (one term per call), then inspect schemas only for matching candidates. If a full catalog is needed, fetch galaxy_get_tool_panel once and search its saved response with mcp_read_output. Name searches do not establish absence of tools matching only an input datatype; inspect candidate input schemas when that distinction matters.";
 const MARKER = "[loom Galaxy MCP recovery]";
+// Calls that never change Galaxy state, so a timeout can't leave an accepted
+// operation behind.
+const READ_ONLY = /^galaxy_(get_|list_|search_|download_)/;
 export const MCP_RECOVERY_GUIDANCE = `### Oversized MCP output and slow Galaxy requests
 
 Loom automatically previews oversized MCP results and provides mcp_read_output
@@ -54,12 +57,17 @@ fail, report the concrete blocker and preserve work instead of looping.
 `;
 
 export function galaxyRecoveryHint(name: string, kind: Exclude<GalaxyFailureKind, null>): string {
-  const readOnly = /^galaxy_(get_|list_|search_)/.test(name);
+  const outcome =
+    name === "galaxy_connect"
+      ? "galaxy_connect only binds this session and changes nothing in Galaxy; it is safe to call again after reconnecting."
+      : READ_ONLY.test(name)
+        ? "This was a read-only lookup. Continue the authorized task using a smaller query or saved response."
+        : "This operation may already have been accepted by Galaxy. Its result is UNKNOWN. Inspect the destination history, jobs/invocations or affected resource before considering any retry. Reuse accepted work. Do not blindly repeat a submission, upload, create, update or delete; do not invent IDs or claim success.";
   const action =
     kind === "dropped"
       ? 'Call mcp({"connect":"galaxy"}) yourself once, then galaxy_connect(). Check their results before continuing; do not ask the user to reconnect or restart Orbit.'
       : 'Narrow or paginate the request before one read-only retry; do not repeat the same expensive call. If even a small request times out, call mcp({"connect":"galaxy"}) once, then galaxy_connect(), and check the results.';
-  return `${MARKER}\n${action}\n${readOnly ? "This was a read-only lookup. Continue the authorized task using a smaller query or saved response." : "This operation may already have been accepted by Galaxy. Its result is UNKNOWN. Inspect the destination history, jobs/invocations or affected resource before considering any retry. Reuse accepted work. Do not blindly repeat a submission, upload, create, update or delete; do not invent IDs or claim success."}\n${name.includes("search_tools") || name === "galaxy_get_tool_panel" ? DISCOVERY_HINT : ""}\nDo the recovery now without another permission question. After one narrowed retry and one reconnect fail, report a concrete blocker rather than looping. Respect Stop/pause.`;
+  return `${MARKER}\n${action}\n${outcome}\n${name.includes("search_tools") || name === "galaxy_get_tool_panel" ? DISCOVERY_HINT : ""}\nDo the recovery now without another permission question. After one narrowed retry and one reconnect fail, report a concrete blocker rather than looping. Respect Stop/pause.`;
 }
 
 function stable(value: unknown): string {
@@ -138,7 +146,7 @@ export function registerMcpRecovery(pi: ExtensionAPI): void {
     const call = galaxyCall(event.toolName, event.input);
     if (!call) return;
     if (!event.isError && !details?.error) {
-      if (/^galaxy_(get_|list_|search_)/.test(call.name)) {
+      if (READ_ONLY.test(call.name)) {
         // A verified read ends this incident. Future polling of the same
         // dataset/history must remain possible after a successful retry.
         const key = call.name + stable(call.args);
@@ -158,7 +166,7 @@ export function registerMcpRecovery(pi: ExtensionAPI): void {
     const kind = classifyGalaxyFailure(call.name, text);
     if (!kind) return;
     transportFailed = true;
-    if (kind === "timeout" && /^galaxy_(get_|list_|search_)/.test(call.name))
+    if (kind === "timeout" && READ_ONLY.test(call.name))
       timedOutReads.add(call.name + stable(call.args));
     return {
       content: [
