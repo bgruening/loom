@@ -42,7 +42,7 @@ cd app && npm start
 - Shared cross-boundary contracts belong in `shared/`, not in duplicated ad hoc payload logic.
 - Galaxy is the primary execution path. Local mode is an exception path, not the main runtime model.
 - Startup/shutdown/restore behavior belongs in `extensions/loom/session-lifecycle.ts`.
-- `/review`, `/test`, `/execute`, and `/run` are brain-owned command semantics in `extensions/loom/execution-commands.ts`.
+- `/execute` and `/run` are brain-owned command semantics in `extensions/loom/execution-commands.ts`.
 - Orbit should stay a shell, not a second brain.
 - `extensions/loom/vendor/` is generated from `galaxyproject/agentic-plugins` at the commit pinned
   in `scripts/skills.manifest.json`. Change the manifest and run `npm run sync:skills`; never

@@ -19,12 +19,13 @@ import { noLocalShellSpawnExtras } from "./local-shell.js";
 import { TurnWatchdog } from "./turn-watchdog.js";
 import { formatWindowTitle } from "./window-title.js";
 import { isOAuthOnlyProvider } from "./oauth-handler.js";
+import { DESKTOP_SHELL_KIND, readEnv, writeEnv } from "../../../shared/orbit-env.js";
 
 /**
  * How long the brain may stay completely silent mid-turn before Orbit treats the
  * turn as stalled and recovers the UI (#185). Generous on purpose: tool runs and
- * UI modals are excluded by the watchdog, so the only window this guards is
- * "waiting on the model", where multi-minute silence is unambiguously a failure.
+ * UI modals and system sleep are excluded by the watchdog. A waking system gets
+ * a fresh window so the provider connection has time to recover.
  */
 export const TURN_SILENCE_TIMEOUT_MS = 120_000;
 
@@ -57,14 +58,16 @@ function buildSecretEnv(): Record<string, string> {
   if (!isOAuthOnlyProvider(provider)) {
     // Custom OpenAI-compatible endpoints route through pi's --api-key via
     // LOOM_ACTIVE_LLM_API_KEY; built-in providers use their own env var.
-    const targetVar = isCustom
-      ? "LOOM_ACTIVE_LLM_API_KEY"
-      : PROVIDER_ENV_MAP[provider] || "AI_GATEWAY_API_KEY";
+    const targetVar = PROVIDER_ENV_MAP[provider] || "AI_GATEWAY_API_KEY";
     // Config key wins; otherwise fall back to a key exported into Orbit's own
     // env (`export ANTHROPIC_API_KEY=...; npm start`). In dev with safeStorage
     // off this is the only key path; in prod it's a handy CI/power-user override.
-    const llmKey = resolveLlmApiKey(cfg) ?? process.env[targetVar];
-    if (llmKey) env[targetVar] = llmKey;
+    const llmKey =
+      resolveLlmApiKey(cfg) ?? (isCustom ? readEnv("ACTIVE_LLM_API_KEY") : process.env[targetVar]);
+    // Custom keys go under both spellings so a stale ambient ORBIT_ twin
+    // forwarded by the base env can't outrank the configured key.
+    if (llmKey && isCustom) writeEnv(env, "ACTIVE_LLM_API_KEY", llmKey);
+    else if (llmKey) env[targetVar] = llmKey;
   }
 
   // Galaxy key: config wins, else an exported GALAXY_API_KEY.
@@ -127,12 +130,12 @@ function log(...args: unknown[]): void {
 }
 
 function buildBrainEnv(fresh: boolean): NodeJS.ProcessEnv {
-  // Base curation (named passthrough + LOOM_/GALAXY_/PI_ prefixes) lives in
+  // Base curation (named passthrough + LOOM_/ORBIT_/GALAXY_/PI_ prefixes) lives in
   // shared/brain-env.js so web/server.ts uses the same allowlist. Provider
   // keys come from the OS keychain via buildSecretEnv on desktop, so we don't
   // ask the base helper to forward them from shell env.
   const env = buildBaseBrainEnv();
-  env.LOOM_SHELL_KIND = "orbit";
+  writeEnv(env, "SHELL_KIND", DESKTOP_SHELL_KIND);
   // The desktop always has a local *file* surface, so exec-guard stays on
   // everywhere. LOOM_LOCAL_EXEC is the shell->brain capability signal
   // (extensions/loom/local-exec.ts); set it authoritatively so an ambient
@@ -140,9 +143,9 @@ function buildBrainEnv(fresh: boolean): NodeJS.ProcessEnv {
   // guard. Windows remote-only does NOT flip this: it keeps the file write-jail
   // and instead removes the bash *tool* (see noLocalShellSpawnExtras / the args
   // pushed in start()), flagging the brain via LOOM_LOCAL_SHELL=off.
-  env.LOOM_LOCAL_EXEC = "on";
+  writeEnv(env, "LOCAL_EXEC", "on");
   Object.assign(env, noLocalShellSpawnExtras().env);
-  if (fresh) env.LOOM_FRESH_SESSION = "1";
+  if (fresh) writeEnv(env, "FRESH_SESSION", "1");
   // Prepend the bundled uv directory to PATH when packaged so MCP servers
   // configured with `command: "uvx"` (Galaxy MCP) find the shipped binary.
   if (UV_DIR) {
@@ -202,6 +205,15 @@ export class AgentManager {
       onTimeout: () => this.handleTurnStalled(),
     });
     this.refreshWindowTitle();
+  }
+
+  /** Called by the shell's power monitor; this does not stop the brain. */
+  suspendWatchdog(): void {
+    this.watchdog.suspend();
+  }
+
+  resumeWatchdog(): void {
+    this.watchdog.resume();
   }
 
   /**
@@ -684,8 +696,8 @@ export class AgentManager {
       this.window.webContents.send("agent:event", {
         type: "error",
         message:
-          "The assistant stopped responding. The request may have failed or " +
-          "been blocked -- please try again.",
+          "The assistant stopped responding for two minutes, so Orbit cancelled " +
+          "the request. Please try again.",
       });
     }
     // Best-effort: unstick pi's streaming state so the next prompt runs. If the

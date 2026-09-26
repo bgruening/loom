@@ -23,11 +23,18 @@ import {
 } from "./skills-discovery";
 import { findGalaxyPageBlocks } from "./galaxy-page-binding";
 import { isLocalShellDisabled } from "./local-exec.js";
+import { resolveWorkspaceStateDirName, type WorkspaceStateDirName } from "./workspace-state-dir";
+import { SRA_IMPORT_GUIDANCE } from "./sra-import-gate";
+import { MCP_RECOVERY_GUIDANCE } from "./mcp-recovery";
+import { GALAXY_POLL_GUIDANCE } from "./galaxy-poll-guard";
 import { GALAXY_PAGE_MARKDOWN_GUIDANCE } from "./galaxy-page-markdown-guidance";
 import {
   buildUserInstructionsBlock,
   buildWorkspaceInstructionsContext,
+  discoverInstructionFiles,
+  takeShadowNotices,
 } from "./user-instructions.js";
+import { readEnv } from "../../shared/orbit-env.js";
 
 const NOTEBOOK_HEAD_MAX_CHARS = 2000;
 const NOTEBOOK_TAIL_MAX_CHARS = 4000;
@@ -166,7 +173,7 @@ You are **${modelStr}** running via the **${active}** provider. This is your cur
  * rest of the config, and never tells the agent to open the file (#183).
  */
 export function buildTesterIdBlock(): string {
-  const testerId = loadConfig().testerId || process.env.LOOM_TESTER_ID;
+  const testerId = loadConfig().testerId || readEnv("TESTER_ID");
   if (!testerId) return "";
   return `## Orbit tester ID
 
@@ -274,19 +281,20 @@ Galaxy is connected.
 
 ### If a Galaxy tool reports it's not connected
 
-The live Galaxy MCP connection is per-session and does **not** survive a resume
-or a long idle period, even though the credentials above stay configured. So a
-\`galaxy_*\` tool can come back "not connected" / "connection closed" / with a
-transport timeout at any time -- most often on the first Galaxy action after
-resuming this project. That does **not** mean Galaxy is unavailable; it means
-this session's connection needs to be re-established.
+The live Galaxy MCP connection may need to be re-established after a resume
+or long idle period, even though credentials stay configured. Distinguish
+Galaxy authentication errors from a dropped MCP transport and request timeouts.
+A timeout alone does not prove that the connection is dead.
 
 When it happens -- and before you ever tell the user Galaxy is disconnected:
-1. Call \`galaxy_connect()\` first to re-bind this session. Do NOT report a
-   disconnection you haven't tried to fix.
-2. If \`galaxy_connect()\` itself fails with a transport error (connection
-   closed / timed out, not an auth error), tell the user to run
-   \`/mcp reconnect galaxy\` (no restart needed), then retry.
+1. For "Not connected to Galaxy", call \`galaxy_connect()\` to re-bind
+   this session. Do not report a disconnection you haven't tried to fix.
+2. For a dropped transport, call \`mcp({connect: "galaxy"})\` yourself,
+   then \`galaxy_connect()\`. Verify both results before continuing.
+3. For timeouts, narrow read-only queries first. Before retrying a mutation,
+   check whether Galaxy accepted it. Never blindly replay a submission.
+4. Only if your own reconnect fails, tell the user they can run
+   \`/mcp reconnect galaxy\` (no restart needed).
 
 Never report "Galaxy is disconnected" as a final answer without attempting
 \`galaxy_connect()\` in the same turn.
@@ -388,6 +396,7 @@ connection, where a server-side fetch runs at datacenter bandwidth.
   genuinely local: a file the user created, or one that exists only on
   this machine with no URL Galaxy can reach itself.
 
+${SRA_IMPORT_GUIDANCE}
 ### Invoking a Galaxy workflow
 
 Call \`galaxy_get_workflow_input_template\` before \`galaxy_invoke_workflow\`.
@@ -410,66 +419,78 @@ whole wrapper — keep its keys, replace every placeholder (\`<value>\`,
 
 ### Executing a Galaxy step
 
-**Galaxy invocations run in the background by default — submit and hand
-control back to the user.** Do NOT block the turn polling a Galaxy job to
-completion; the user wants to keep working with you while it runs.
+**Galaxy jobs run in the background while you remain responsible for the
+approved analysis.** Submit and record each run, then continue any other
+ready, authorized work. Do not spend a turn in a polling/sleep loop.
 
-This applies to single **tool** runs too, not just workflows — record those
-with \`galaxy_job_record({ jobId, notebookAnchor, label })\` right after
-\`galaxy_run_tool\` returns a job id. An unrecorded run is invisible to the
-poller: nothing advances it, nothing notices when it finishes, and the
-analysis stalls until the user asks. If you did not record it, you must not
-claim a poller is watching it.
+Record workflow runs with \`galaxy_invocation_record({ invocationId,
+notebookAnchor, label })\` and tool runs with \`galaxy_job_record({ jobId,
+notebookAnchor, label })\` immediately after submission. An unrecorded run
+is invisible to the background poller. Use the IDs returned by Galaxy.
 
-After invoking via Galaxy MCP and getting an \`invocationId\` back:
-1. Call \`galaxy_invocation_record({ invocationId, notebookAnchor, label })\`.
-   The \`notebookAnchor\` is a stable id like \`plan-1-step-3\` that
-   matches an anchor you wrote in the markdown plan section.
-2. **Return to the user now.** Tell them it's submitted and running in the
-   background (the Activity tab shows live progress), and stop. Leave the
-   step's checkbox \`- [ ]\`. A background poller advances the invocation's
-   YAML status automatically (all-jobs-ok → completed, any-error → failed)
-   and the user is notified when it reaches a terminal state — you do not
-   need to sit here calling \`galaxy_invocation_check_all\` in a loop. Only
-   wait in-turn if the user explicitly asked you to.
-3. **Verify later, on demand.** When the user asks (or after the completion
-   notification), call \`galaxy_invocation_check_all\`, inspect the output
-   datasets, record verification evidence in the notebook, then edit the
-   markdown checkbox from \`- [ ]\` to \`- [x]\`. On failure, record the error
-   evidence and use \`- [!]\`. Do not verify or check off a Galaxy step in the
-   submit turn — it isn't done yet.
+- If the submission result or a current check already shows terminal state,
+  inspect the outputs now. A quick merge or metadata operation can finish
+  immediately; verification need not wait for another turn.
+- If a prerequisite is still running and no other authorized work is ready,
+  give a concise status and yield. The background poller queues verification
+  or investigation on completion by default. It pauses after a few automatic
+  turns without user input, and when the user stops a turn. If it has been
+  explicitly disabled, say so; do not promise automatic continuation.
+- On success, verify output datasets/collections, record the evidence in the
+  notebook, then mark the existing step verified and continue the next
+  authorized work whose prerequisites pass. Never require the user to repeat
+  an execution request or ask for verification again.
+- On failure, investigate immediately and record the cause. Stop dependent
+  work; perform safe recovery within existing authorization. Ask only for a
+  necessary missing decision, information or authorization. Respect explicit
+  pause/stop requests. Never advance past a failed or unverified prerequisite.
+
 `;
+}
+
+// Resolved once per workspace for the life of the process: the system prompt
+// is one cached block, and the agent creating the dir mid-session must not
+// flip its name and bust that cache.
+const stateDirNameByCwd = new Map<string, WorkspaceStateDirName>();
+function sessionStateDirName(cwd: string): WorkspaceStateDirName {
+  let name = stateDirNameByCwd.get(cwd);
+  if (!name) {
+    name = resolveWorkspaceStateDirName(cwd);
+    stateDirNameByCwd.set(cwd, name);
+  }
+  return name;
 }
 
 /**
  * Local-tool environment convention — per-analysis conda env rooted in
  * the analysis cwd. Always relevant; no longer mode-gated.
  */
-export function buildLocalEnvContext(): string {
+export function buildLocalEnvContext(cwd: string = process.cwd()): string {
   // No local shell (Windows remote-only): the conda/bash local-tool path does
   // not exist here -- don't coach the model to use a shell it can't reach.
   if (isLocalShellDisabled()) return "";
+  const env = `${sessionStateDirName(cwd)}/env`;
   return `
 ## Local-tool environment (per-analysis conda env)
 
 When running any bioinformatics tool locally, use a **per-analysis conda
-environment** rooted at \`.loom/env/\` inside the current analysis
+environment** rooted at \`${env}/\` inside the current analysis
 directory. Isolates tool versions between analyses and keeps each
 notebook's reproducibility record self-contained.
 
 Conventions:
 
-- **Env path:** \`.loom/env/\` (prefix style: \`-p .loom/env\`, not \`-n name\`).
+- **Env path:** \`${env}/\` (prefix style: \`-p ${env}\`, not \`-n name\`).
 - **Channel priority:** \`-c bioconda -c conda-forge\`, in that order.
 - **Prefer \`mamba\`** if available (\`which mamba\`) — much faster solves.
   Fall back to \`conda\` if absent. Same flags either way.
 
 Lifecycle (lazy):
 
-1. First tool needed: \`test -d .loom/env\`. If missing:
-   \`conda create -p .loom/env -c bioconda -c conda-forge -y python=3.11\`
-2. Install in batches: \`conda install -p .loom/env -c bioconda -c conda-forge -y bwa samtools lofreq\`
-3. Run via \`conda run -p .loom/env <cmd>\` or full path \`.loom/env/bin/<cmd>\`.
+1. First tool needed: \`test -d ${env}\`. If missing:
+   \`conda create -p ${env} -c bioconda -c conda-forge -y python=3.11\`
+2. Install in batches: \`conda install -p ${env} -c bioconda -c conda-forge -y bwa samtools lofreq\`
+3. Run via \`conda run -p ${env} <cmd>\` or full path \`${env}/bin/<cmd>\`.
 4. Record installs under a \`## Environment\` heading in \`notebook.md\` for
    reproducibility.
 
@@ -554,7 +575,7 @@ the activity stream.
 # — without the \`.failed\` branch a quick crash gets reported as
 # "still running" indefinitely.
 mkdir -p foldseek_work
-nohup sh -c '.loom/env/bin/foldseek easy-cluster ... > foldseek_work/run.log 2>&1 \\
+nohup sh -c '${env}/bin/foldseek easy-cluster ... > foldseek_work/run.log 2>&1 \\
   && touch foldseek_work/.done || touch foldseek_work/.failed' > /dev/null 2>&1 &
 disown
 echo "Launched foldseek — tail foldseek_work/run.log to monitor"
@@ -616,25 +637,28 @@ its inputs/outputs).
 function buildOperatingDisciplineBlock(): string {
   return `## Operating discipline
 
-### Confirm scope before substantive work
+### Act within the user's authorized scope
 
-Before any side-effectful work — tool invocations that consume quota,
-workflow runs, file creation, credential usage, anything beyond pure
-Q&A or trivial \`Read\` — surface the unknowns and propose a sketch
-**first**, then wait for the user to green-light. Specifically:
+Treat a request to perform work or execute a plan as authorization to do that
+work, including its necessary verification and routine follow-through.
+Authorization carries across turns and background job completion. Consult
+the latest user instructions and notebook; do not ask for another green light
+for already-authorized tool calls, file creation, verification, or next steps.
 
-- Surface ambiguities up front: organism? which Galaxy? which history?
-  paired-end or single? reference genome? — pick the 1-2 things you'd
-  guess wrong on and ask.
-- Propose the approach in 2-3 sentences (NOT a full plan section yet)
-  and get a yes before executing. One short exchange, not a planning
-  ceremony.
-- Pure Q&A and low-stakes exploration ("what's in this VCF?", "show me
-  notebook.md") stay frictionless — no gate.
+Resolve necessary missing information before dependent work: organism,
+reference, destination history, or an actual change in scientific scope.
+Use established context and reasonable defaults for routine implementation
+choices. Ask only when the answer changes correctness, scope, or authorization.
+Do not invent an approval checkpoint simply because a tool consumes resources.
+Existing permission guards and explicit user limits still apply.
 
-The failure mode this prevents: charging into a multi-step pipeline,
-burning quota, the user redirects ("kinda good but xyz first"), the
-quota is gone before the redirect lands.
+When authorized work is ready, execute it rather than ending with a promise,
+an apology, or a status-only reply. A status question does not cancel an
+ongoing execution request: answer briefly, then continue. Yield when waiting
+on a real external prerequisite with follow-up arranged, when a necessary
+user decision is missing, when the requested work is complete, or when the
+user explicitly asks you to pause or stop. Do not create a new plan unless
+asked.
 
 ### Secrets — never solicit in chat
 
@@ -725,8 +749,9 @@ or telling the user the work is done.
 
 Match the verification check to the artifact or action being completed:
 
-- **Galaxy workflow or tool run** — verification is on demand, once the run
-  has reached a terminal state (the background poller gets it there). Confirm
+- **Galaxy workflow or tool run** — verify automatically once the run
+  reaches a terminal state, including during the submission turn if it has
+  already finished. Confirm
   terminal state with \`galaxy_invocation_check_all\` or the relevant Galaxy MCP
   inspection call, then inspect resulting datasets/collections enough to
   confirm they exist and look plausible for the request. Don't block a turn
@@ -1211,6 +1236,9 @@ export function setupContextInjection(pi: ExtensionAPI): void {
     // (see the pi.on("context") handler) instead of busting the cached prefix.
     // The live activity tail was likewise dropped; it stays in the Activity pane.
     const omitAnchors = isLlama4Family(ctx.model);
+    for (const notice of takeShadowNotices(discoverInstructionFiles())) {
+      ctx.ui.notify(notice, "info");
+    }
     const systemPrompt = [
       buildActiveModelBlock(),
       buildTesterIdBlock(),
@@ -1223,8 +1251,10 @@ export function setupContextInjection(pi: ExtensionAPI): void {
       buildNotebookWriteBlock(),
       buildExecutionModeBlock(),
       buildGalaxyContextBlock(),
+      MCP_RECOVERY_GUIDANCE,
+      GALAXY_POLL_GUIDANCE,
       buildSkillsContext(),
-      buildLocalEnvContext(),
+      buildLocalEnvContext(ctx.cwd),
       buildNoLocalShellBlock(),
       buildTeamDispatchContext(),
       buildSessionIndexContext(),

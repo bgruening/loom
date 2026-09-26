@@ -6,6 +6,7 @@ import { humanizeAgentError } from "./chat/error-humanizer.js";
 import { detectStopIntent } from "./chat/stop-intent.js";
 import { ShellPanel } from "./chat/shell-panel.js";
 import { ArtifactPanel } from "./artifacts/artifact-panel.js";
+import { initDashboard, type DashboardBootstrap } from "./dashboard/bootstrap.js";
 import { FilesPanel } from "./files/files-panel.js";
 import { FileViewer } from "./files/file-viewer.js";
 import { shouldRefreshOpenFile } from "./files/file-change-match.js";
@@ -114,6 +115,17 @@ const modelIndicatorNameEl = document.getElementById("model-indicator-name")!;
 
 const chat = new ChatPanel(messagesEl);
 const artifacts = new ArtifactPanel();
+// Guarded, and every use below is optional: this runs during module evaluation,
+// ahead of the chat, files, Galaxy and IPC wiring, so an exception here would
+// replace the whole window with a blank page rather than one broken tab.
+let dashboard: DashboardBootstrap | null = null;
+try {
+  dashboard = initDashboard(artifacts.getDashboardContainer(), {
+    openFile: (relPath: string) => void openFileFromTree(relPath),
+  });
+} catch (err) {
+  console.error("[orbit] the dashboard failed to start:", err);
+}
 const shell = new ShellPanel(document.getElementById("agent-shell-body")!);
 
 // File tree sidebar + file viewer (wired up further below).
@@ -356,6 +368,14 @@ function renderUsage(): void {
     usageCostEl.textContent = "";
     usageCostEl.classList.add("hidden");
   }
+
+  dashboard?.setSession({
+    streaming,
+    cwd: cwdPathEl.textContent ?? "",
+    model: currentModel || null,
+    costUsd: cost,
+    tokens: { ...sessionUsage },
+  });
 }
 
 /**
@@ -671,6 +691,7 @@ window.orbit.onFilesChanged((changedPaths) => {
   }
   void refreshGalaxyInvocations(window.orbit);
   void refreshGalaxyHistory(window.orbit);
+  dashboard?.refreshFromFiles();
 });
 
 // ── Galaxy connection indicator ──────────────────────────────────────────────
@@ -1612,6 +1633,7 @@ function applyCwdChange(dir: string): void {
   void filesPanel.refresh();
   void refreshGalaxyInvocations(window.orbit);
   void loadNotebookFromDisk();
+  dashboard?.reloadForCwd();
 }
 
 cwdChangeBtn.addEventListener("click", async () => {
@@ -1633,6 +1655,7 @@ async function loadNotebookFromDisk(): Promise<void> {
   if (seq !== notebookLoadSeq) return;
   if (r.ok && r.content) {
     artifacts.setNotebookMarkdown(`> \`${r.path}\`\n\n${r.content}`);
+    dashboard?.setNotebook(r.content, r.path);
     setArtifactCollapsed(false);
   }
 }
@@ -3115,7 +3138,9 @@ window.orbit.onUiRequest((request) => {
     // longer pushed as a widget.
     if (key === LoomWidgetKey.Notebook && lines) {
       notebookLoadSeq++;
-      artifacts.setNotebookMarkdown(decodeMarkdownWidget(lines));
+      const markdown = decodeMarkdownWidget(lines);
+      artifacts.setNotebookMarkdown(markdown);
+      dashboard?.setNotebook(markdown);
       setArtifactCollapsed(false);
     }
   }
@@ -3217,6 +3242,7 @@ function tickHeartbeat(): void {
 
 window.orbit.onAgentStatus((status, msg) => {
   setStatusBadge(status, msg);
+  dashboard?.setSession({ status });
 
   // Brain transitioned to stopped/error: clear the "we're streaming" UI
   // so the user has a clean Send button + no stuck "thinking…" card.
@@ -4612,6 +4638,56 @@ window.orbit.onProcUpdate((procs) => {
   renderProcs(procs as ProcInfo[]);
 });
 
+// ── "Loom is now Orbit" banner ───────────────────────────────────────────────
+//
+// Safety net for the GitHub repo rename: main reports a move only once GitHub
+// itself says galaxyproject/loom now lives elsewhere. Dismissal sticks per new
+// release, so a later Orbit release brings it back once.
+const repoMovedCheck: Promise<Awaited<ReturnType<typeof window.orbit.checkRepoMoved>>> =
+  (async () => {
+    try {
+      return (await window.orbit.checkRepoMoved?.()) ?? null;
+    } catch {
+      return null;
+    }
+  })();
+{
+  const movedBanner = document.getElementById("moved-banner");
+  const movedLinkBtn = document.getElementById("moved-banner-link");
+  const movedDismissBtn = document.getElementById("moved-banner-dismiss");
+  const MOVED_DISMISSED_KEY = "orbit:moved-dismissed";
+
+  if (movedBanner && movedLinkBtn && movedDismissBtn) {
+    let movedReleaseUrl: string | null = null;
+    let movedKey: string | null = null;
+    movedLinkBtn.addEventListener("click", () => {
+      if (!movedReleaseUrl) return;
+      void openReleaseWithFallback(movedBanner, movedReleaseUrl, (u) =>
+        window.orbit.openReleasePage(u),
+      );
+    });
+    movedDismissBtn.addEventListener("click", () => {
+      movedBanner.classList.add("hidden");
+      clearReleaseFallback(movedBanner);
+      if (movedKey) {
+        try {
+          localStorage.setItem(MOVED_DISMISSED_KEY, movedKey);
+        } catch {}
+      }
+    });
+    void repoMovedCheck.then((moved) => {
+      if (!moved) return;
+      const key = `${moved.fullName}@${moved.latest ?? ""}`;
+      try {
+        if (localStorage.getItem(MOVED_DISMISSED_KEY) === key) return;
+      } catch {}
+      movedKey = key;
+      movedReleaseUrl = moved.releaseUrl;
+      movedBanner.classList.remove("hidden");
+    });
+  }
+}
+
 // ── Update-available banner ──────────────────────────────────────────────────
 //
 // One non-blocking check per session against the GitHub Releases API; main
@@ -4658,6 +4734,8 @@ window.orbit.onProcUpdate((procs) => {
 
     const showNotifyLinkBanner = async () => {
       try {
+        // Once the repo has moved, the moved banner is the better message.
+        if (await repoMovedCheck) return;
         const info = await window.orbit.checkVersion();
         if (!info || !info.hasUpdate) return;
         let dismissed: string | null = null;

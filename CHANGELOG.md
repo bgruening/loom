@@ -8,6 +8,7 @@ new `## [<version>] - <date>` block with a `### Highlights` list at release time
 
 ### Highlights
 
+- Loom is being renamed Orbit in the next release: the CLI, the desktop app, and the GitHub repo will all be called Orbit. Once that happens, this version will tell you where to get the new one
 - Galaxy skill content now ships inside Loom rather than being fetched from GitHub on first use, so a fresh install has the full catalog with no network and no waiting. Loom takes it from `galaxyproject/agentic-plugins` at a pinned commit -- the same source every other agent reads -- and Preferences shows which repos are bundled and at which commit. Point a repo at a branch and it goes back to being fetched, so evaluating an unmerged skill still works
 - The failure-triage guidance a failed workflow points at is now a whole Foundry cast rather than three files out of the middle of one, and eleven more casts covering finding, adapting and validating a workflow ship alongside it. None of them enter the system prompt; they are reached by name when they become relevant
 

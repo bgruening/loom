@@ -18,12 +18,15 @@ import { registerIpcHandlers, confirmCwdChange } from "./ipc-handlers.js";
 import { primeOAuthProviders } from "./oauth-handler.js";
 import { AgentManager } from "./agent.js";
 import { registerFilesIpc, startFilesWatcher, stopFilesWatcher } from "./files-handler.js";
+import { registerDashboardIpc } from "./dashboard-handler.js";
 import { ProcMonitor } from "./proc-monitor.js";
 import { migratePlaintextSecrets, isAvailable as safeStorageAvailable } from "./secure-config.js";
-import { getConfigDir, getConfigPath } from "../../../shared/loom-config.js";
+import { getConfigPath } from "../../../shared/loom-config.js";
 import { parseCliArgs, type CliArgs } from "./cli-args.js";
 import { initAutoUpdate } from "./auto-update.js";
 import { resolveStartupCwd } from "./startup-cwd.js";
+import { readEnv } from "../../../shared/orbit-env.js";
+import { migrateStateDir, resolveDefaultAnalysesDir } from "../../../shared/state-dir.js";
 
 // Workaround for systems where chrome-sandbox isn't suid root
 app.commandLine.appendSwitch("no-sandbox");
@@ -53,12 +56,10 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 
-// Orbit-specific shell state lives in ~/.orbit/ so multiple Loom shells can
-// coexist without stepping on each other. Brain config remains at ~/.loom/.
+// Desktop-only shell state always lives in ~/.orbit/, whichever dir the
+// brain's own state resolves to (see shared/state-dir.js).
 const ORBIT_DIR = path.join(os.homedir(), ".orbit");
-const LOOM_DIR = path.join(os.homedir(), ".loom");
 const WINDOW_STATE_FILE = path.join(ORBIT_DIR, "window-state.json");
-const DEFAULT_CWD = path.join(LOOM_DIR, "analyses");
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
@@ -98,7 +99,7 @@ let configWatcher: fs.FSWatcher | null = null;
 let configMigrationTimer: NodeJS.Timeout | null = null;
 
 /**
- * Watch ~/.loom/config.json for plaintext writes from the brain process
+ * Watch the brain's config.json for plaintext writes from the brain process
  * (e.g. /connect saves a new profile) and re-encrypt them. Only called
  * when safeStorage is available -- otherwise plaintext is the best we
  * can do anyway.
@@ -108,8 +109,9 @@ let configMigrationTimer: NodeJS.Timeout | null = null;
  * inode after the rename. Filename filter keeps it cheap.
  */
 function startConfigWatcher(): void {
-  const dir = getConfigDir();
-  const targetFile = path.basename(getConfigPath()); // "config.json"
+  const configPath = getConfigPath();
+  const dir = path.dirname(configPath);
+  const targetFile = path.basename(configPath);
   try {
     mkdirSync(dir, { recursive: true });
     configWatcher = fs.watch(dir, { persistent: false }, (_event, filename) => {
@@ -138,9 +140,9 @@ function getDefaultCwd(cliArgs?: CliArgs): string {
   // config.defaultCwd is rewritten by AgentManager.switchCwd on every in-app
   // directory change, so a clean restart reopens the last-used directory (#312).
   let configDefaultCwd: string | undefined;
-  if (!cliArgs?.cwd && !process.env.LOOM_CWD) {
+  if (!cliArgs?.cwd && !readEnv("CWD")) {
     try {
-      const configPath = path.join(LOOM_DIR, "config.json");
+      const configPath = getConfigPath();
       if (fs.existsSync(configPath)) {
         const cfg = JSON.parse(fs.readFileSync(configPath, "utf-8"));
         if (cfg.defaultCwd) configDefaultCwd = cfg.defaultCwd;
@@ -149,9 +151,9 @@ function getDefaultCwd(cliArgs?: CliArgs): string {
   }
   let cwd = resolveStartupCwd({
     cliCwd: cliArgs?.cwd,
-    envCwd: process.env.LOOM_CWD,
+    envCwd: readEnv("CWD"),
     configDefaultCwd,
-    fallback: DEFAULT_CWD,
+    fallback: resolveDefaultAnalysesDir(),
   });
   if (cwd.startsWith("~")) cwd = path.join(os.homedir(), cwd.slice(1));
   mkdirSync(cwd, { recursive: true });
@@ -293,6 +295,7 @@ function createWindow(cwd: string): void {
   void primeOAuthProviders().catch(() => {});
   registerIpcHandlers(agentManager);
   registerFilesIpc(() => agentManager?.getCwd() ?? cwd);
+  registerDashboardIpc(() => agentManager?.getCwd() ?? cwd);
   startFilesWatcher(mainWindow, cwd);
 
   procMonitor = new ProcMonitor(mainWindow, () => agentManager?.getPid() ?? null);
@@ -509,15 +512,24 @@ app.whenReady().then(() => {
 
   buildMenu();
 
+  const migration = migrateStateDir();
+  if (migration.status === "migrated" || migration.status === "failed") {
+    log("state dir migration:", migration.status, migration.error ?? "");
+  }
+
   const cliArgs = parseCliArgs(process.argv);
   const cwd = getDefaultCwd(cliArgs);
   log("cwd:", cwd);
   createWindow(cwd);
   initAutoUpdate();
 
-  powerMonitor.on("suspend", () => log("[diag] powerMonitor suspend"));
+  powerMonitor.on("suspend", () => {
+    log("[diag] powerMonitor suspend");
+    agentManager?.suspendWatchdog();
+  });
   powerMonitor.on("resume", () => {
     log("[diag] powerMonitor resume");
+    agentManager?.resumeWatchdog();
     if (!mainWindow || mainWindow.isDestroyed()) return;
     // Force GPU compositor repaint — macOS resets the GPU process on wake.
     mainWindow.webContents.invalidate();
