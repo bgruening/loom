@@ -386,6 +386,17 @@ if (!isInformationalCommand) {
     directTools: true,
   };
 
+  // Loom doesn't use pi-mcp-adapter's mcpScript tool -- the mcp gateway and
+  // the direct tools cover it -- so keep it off rather than ship its schema
+  // on every request.
+  const mcpSettings =
+    mcpConfig.settings &&
+    typeof mcpConfig.settings === "object" &&
+    !Array.isArray(mcpConfig.settings)
+      ? mcpConfig.settings
+      : {};
+  mcpConfig.settings = { ...mcpSettings, scriptMode: false };
+
   mkdirSync(dirname(mcpConfigPath), { recursive: true });
   // mcp.json carries Galaxy credentials in its env block — keep file mode
   // 0600 so other users on a shared machine can't read the API key. The
