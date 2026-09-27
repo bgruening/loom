@@ -411,7 +411,7 @@ if (!isInformationalCommand) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// pi-web-access default: skip the curator browser popup.
+// pi-web-access defaults: skip the curator browser popup, drop source_check.
 //
 // pi-web-access ships with the brain and exposes a web_search tool. Its
 // default workflow ("summary-review") opens a curator window in the system
@@ -456,10 +456,29 @@ if (!isInformationalCommand) {
       parseOk = false;
     }
   }
-  if (parseOk && webSearchConfig.workflow === undefined) {
-    webSearchConfig.workflow = "none";
-    mkdirSync(dirname(webSearchConfigPath), { recursive: true });
-    writeFileSync(webSearchConfigPath, JSON.stringify(webSearchConfig, null, 2));
+  if (parseOk && webSearchConfig && typeof webSearchConfig === "object") {
+    let changed = false;
+    if (webSearchConfig.workflow === undefined) {
+      webSearchConfig.workflow = "none";
+      changed = true;
+    }
+    // source_check (claim verification against retrieved passages) is rarely
+    // what an analysis needs and its schema costs ~600 tokens on every
+    // request. Off unless the user has set it either way.
+    const tools = webSearchConfig.tools;
+    const toolsOk =
+      tools === undefined || (tools && typeof tools === "object" && !Array.isArray(tools));
+    if (toolsOk && tools?.sourceCheck?.enabled === undefined) {
+      webSearchConfig.tools = {
+        ...tools,
+        sourceCheck: { ...tools?.sourceCheck, enabled: false },
+      };
+      changed = true;
+    }
+    if (changed) {
+      mkdirSync(dirname(webSearchConfigPath), { recursive: true });
+      writeFileSync(webSearchConfigPath, JSON.stringify(webSearchConfig, null, 2));
+    }
   }
 }
 
