@@ -1,14 +1,17 @@
 # Galaxy integration and routing
 
-Four routing modes are an _outcome_ of the plan you draft, not a
+The routing tag records where a plan's compute runs and where its
+provenance lives. It's an _outcome_ of the plan you draft, not a
 configuration setting:
 
-- **galaxy** — steps run on Galaxy's tools and workflows; the default
-  when a matching Galaxy tool or workflow exists
-- **hybrid** — some steps local, some on Galaxy
-- **local** — every step runs locally
-- **remote** — the plan is Galaxy workflow invocations (an IWC workflow,
-  or a short chain of them, covers it end to end)
+- **remote** — all compute runs on Galaxy: tool jobs, user-defined tool
+  jobs and workflow invocations alike. `[galaxy]` is an older spelling of
+  the same thing.
+- **hybrid** — some steps run on Galaxy, some on this machine
+- **local** — everything runs on this machine
+
+Which Galaxy mechanism a step uses (a tool, a UDT, an IWC workflow) is a
+per-step detail, not a different routing.
 
 The agent makes the routing decision **per plan, during drafting**,
 once Galaxy is connected. The mode follows from those step-by-step
@@ -37,8 +40,8 @@ every recommend/search result.
 Before drafting a plan, consult Galaxy resources:
 
 1. **Check the IWC registry** as above. If a workflow (or a chain of
-   them) covers the analysis, propose running it as Galaxy invocations
-   (mode: **remote**).
+   them) covers the analysis, propose running it on Galaxy -- the steps
+   are those invocations.
 2. **Search the Galaxy tool catalog** per step
    (`galaxy_search_tools_by_name`). For each step:
    - Heavy compute (alignment, large variant calling, big assemblies,

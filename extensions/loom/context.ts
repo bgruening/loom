@@ -350,8 +350,8 @@ When drafting a plan, **first** consult Galaxy
 resources before deciding what runs where:
 
 1. Check the IWC registry as above. If a workflow (or a chain of them)
-   covers the analysis, propose running it as Galaxy invocations
-   (mode: **remote**).
+   covers the analysis, propose running it on Galaxy -- the steps are
+   those invocations.
 2. Otherwise, draft step-by-step. Per step:
    - Heavy compute (alignment, large variant calling, big assemblies,
      long-running BLAST, etc.) → check Galaxy tool availability
@@ -390,11 +390,12 @@ resources before deciding what runs where:
 - **IWC**: Intergalactic Workflow Commission — registry of curated
   workflows. See "Finding a community workflow" above.
 
-The routing tag is an *outcome* of the plan you draft, not a mode setting:
-- **galaxy** — steps run on Galaxy tools (the default)
-- **local** — every step runs locally
-- **hybrid** — some local, some Galaxy
-- **remote** — the plan is Galaxy workflow invocations (IWC or the user's)
+The routing tag records where the plan's compute runs and its provenance
+lives -- an *outcome* of the plan you draft, not a mode setting:
+- **remote** — all compute runs on Galaxy: tool jobs, UDT jobs, workflow
+  invocations alike. (\`[galaxy]\` is an older spelling of the same thing.)
+- **hybrid** — some steps run on Galaxy, some on this machine
+- **local** — everything runs on this machine
 
 ### Uploading local data
 

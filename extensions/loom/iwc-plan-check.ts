@@ -29,7 +29,7 @@ export const IWC_TOOLS: ReadonlySet<string> = new Set([
 export const IWC_PLAN_NUDGE =
   "[Loom check] That plan was drafted without checking the IWC workflow registry. Call " +
   "`galaxy_recommend_iwc_workflows` with the analysis goal now. If a workflow (or a short " +
-  "chain of them) covers it and fits the user's data, revise the draft to run it [remote]; " +
+  "chain of them) covers it and fits the user's data, revise the draft to run it on Galaxy; " +
   "if nothing fits, or the user asked for something else, keep the draft and say you " +
   "checked. It is still a draft: don't write it to the notebook or run anything.";
 
