@@ -16,7 +16,7 @@ Loom registers a small set of tools at the extension layer:
 
 Galaxy MCP (separately registered when credentials are present)
 provides `galaxy_connect`, `galaxy_search_tools_by_name`,
-`galaxy_run_tool`, `galaxy_invoke_workflow`, `galaxy_search_iwc`,
+`galaxy_run_tool`, `galaxy_invoke_workflow`, `galaxy_search_iwc_workflows`,
 history/dataset operations, etc.
 
 Pi built-ins (`bash`, `read_file`, `write_file`, `edit_file`, `glob`,
