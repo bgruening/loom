@@ -7,8 +7,8 @@ configuration setting:
   when a matching Galaxy tool or workflow exists
 - **hybrid** — some steps local, some on Galaxy
 - **local** — every step runs locally
-- **remote** — entire plan is one Galaxy workflow invocation (an IWC
-  workflow matches it end to end)
+- **remote** — the plan is Galaxy workflow invocations (an IWC workflow,
+  or a short chain of them, covers it end to end)
 
 The agent makes the routing decision **per plan, during drafting**,
 once Galaxy is connected. The mode follows from those step-by-step
@@ -16,11 +16,29 @@ decisions.
 
 ## When Galaxy is connected
 
+When the user describes an analysis they want run on their data -- as a
+question or as a plan request -- check the IWC registry before
+assembling tools by hand:
+
+1. `galaxy_recommend_iwc_workflows({ intent, limit: 5 })` with the goal in
+   plain words. It ranks by word overlap (BM25) with no relevance floor,
+   so a ranked hit is a candidate, not a match.
+2. `galaxy_get_iwc_workflow_details({ trs_id })` on the plausible ones, to
+   compare their **inputs** with the data the user has. For "which genes
+   changed in my paired-end RNA-seq", the top hit is a DE workflow that
+   starts from count tables; the reads-to-counts workflow ranks lower and
+   has to run first.
+3. Offer the one or two that fit in plain language, or say none do.
+4. `galaxy_import_workflow_from_iwc({ trs_id })`, then invoke as below.
+
+Loom's `iwc-candidates` skill trigger appends a reminder of steps 2-3 to
+every recommend/search result.
+
 Before drafting a plan, consult Galaxy resources:
 
-1. **Search the IWC workflow registry** for matching workflows. If a
-   full match exists, propose running the plan as a single Galaxy
-   workflow invocation (mode: **remote**).
+1. **Check the IWC registry** as above. If a workflow (or a chain of
+   them) covers the analysis, propose running it as Galaxy invocations
+   (mode: **remote**).
 2. **Search the Galaxy tool catalog** per step
    (`galaxy_search_tools_by_name`). For each step:
    - Heavy compute (alignment, large variant calling, big assemblies,
