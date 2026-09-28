@@ -15,7 +15,7 @@
     },
     "plan": {
       "exists": true,
-      "routingIn": ["galaxy", "hybrid", "remote"],
+      "routingIn": ["remote", "hybrid"],
       "minPendingSteps": 4,
       "eachStepHasDescription": true,
       "mentionsOneOf": [
