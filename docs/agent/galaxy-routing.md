@@ -5,8 +5,8 @@ provenance lives. It's an _outcome_ of the plan you draft, not a
 configuration setting:
 
 - **remote** — all compute runs on Galaxy: tool jobs, user-defined tool
-  jobs and workflow invocations alike. `[galaxy]` is an older spelling of
-  the same thing.
+  jobs and workflow invocations alike. Older notebooks may say `[galaxy]`;
+  Loom reads it as `[remote]`.
 - **hybrid** — some steps run on Galaxy, some on this machine
 - **local** — everything runs on this machine
 
@@ -83,7 +83,7 @@ Some builds have no local shell at all -- notably the native Windows
 desktop, which removes the `bash` tool entirely. There, every step must
 run on Galaxy: route plans **remote** (or per-step Galaxy). A plan that
 needs a local leg (**local** or **hybrid**) is rejected by the init-gate
-at `/execute` with a "re-tag `[galaxy]`/`[remote]`" message, so draft for
+at `/execute` with a "re-tag `[remote]`" message, so draft for
 Galaxy from the start. File read/write in the workspace still works; only
 shell/`bash` execution is unavailable.
 

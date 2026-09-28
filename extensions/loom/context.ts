@@ -393,7 +393,7 @@ resources before deciding what runs where:
 The routing tag records where the plan's compute runs and its provenance
 lives -- an *outcome* of the plan you draft, not a mode setting:
 - **remote** — all compute runs on Galaxy: tool jobs, UDT jobs, workflow
-  invocations alike. (\`[galaxy]\` is an older spelling of the same thing.)
+  invocations alike
 - **hybrid** — some steps run on Galaxy, some on this machine
 - **local** — everything runs on this machine
 
@@ -645,9 +645,8 @@ export function buildNoLocalShellBlock(): string {
 ## Execution: remote-only (Galaxy)
 
 This build has no local shell. All computation runs on Galaxy via the Galaxy
-MCP tools -- there is no bash, conda, or local-pipeline path here. Route every
-plan step \`[galaxy]\` or \`[remote]\`; do not propose local shell or conda
-steps. You can still read and write files in the workspace (the notebook and
+MCP tools -- there is no bash, conda, or local-pipeline path here. Tag every
+plan \`[remote]\`; do not propose local shell or conda steps. You can still read and write files in the workspace (the notebook and
 its inputs/outputs).
 `;
 }
@@ -909,7 +908,7 @@ content. **Use a \`\`\`plan fence** in chat (not \`\`\`markdown) so Orbit
 renders it as an interactive draft card with Approve/Edit/Reject buttons.
 
 \`\`\`plan
-## Plan A: chrM Variant Calling [galaxy]
+## Plan A: chrM Variant Calling [remote]
 
 Identify mitochondrial variants from 4 paired-end WGS samples using
 the IWC \`bwa-mem-chrM\` workflow. Output: chrM VCF + per-sample QC.
@@ -946,15 +945,17 @@ markdown so the notebook stays a clean durable record.
 Conventions (please re-read the heading line above before drafting):
 
 - Heading **must** be \`## Plan <Letter>: <Title> [<routing>]\`.
-  Examples that pass: \`## Plan A: RNA-seq DE [galaxy]\`,
+  Examples that pass: \`## Plan A: RNA-seq DE [remote]\`,
   \`## Plan B: Quick local QC [local]\`. Examples that **fail** and
   must be avoided: \`## Plan: ...\` (missing letter),
   \`## Plan A: ...\` (missing routing tag),
-  \`## Plan A - Title [galaxy]\` (dash instead of colon).
-- Routing tag in the section header is one of \`[galaxy]\`, \`[hybrid]\`,
-  \`[local]\`, or \`[remote]\`. Default to \`[galaxy]\` when the work has a
-  matching Galaxy workflow/tool; \`[hybrid]\` when some steps are local
-  and some Galaxy; \`[local]\` only for personal-scale or ad-hoc work.
+  \`## Plan A - Title [remote]\` (dash instead of colon).
+- Routing tag in the section header is one of \`[remote]\`, \`[hybrid]\`,
+  or \`[local]\`, by where the compute runs. Default to \`[remote]\` when
+  every step runs on Galaxy (tools, UDTs or workflows); \`[hybrid]\` when
+  some steps are local and some Galaxy; \`[local]\` only for
+  personal-scale or ad-hoc work. Older notebooks may say \`[galaxy]\`,
+  which means \`[remote]\`.
   Tag literal, lowercase, square brackets, no spaces inside the
   brackets so tooling can grep.
 ${anchorGuidance(omitAnchors)}

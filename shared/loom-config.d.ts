@@ -62,7 +62,7 @@ export interface LoomConfig {
    * Execution mode gate. Independent of whether Galaxy credentials are
    * configured.
    * - \`cloud\` (default): agent decides per-plan whether each step runs
-   *   locally or on Galaxy. Plan routing tags (\`[galaxy]\`/\`[hybrid]\`/\`[local]\`/\`[remote]\`)
+   *   locally or on Galaxy. Plan routing tags (\`[remote]\`/\`[hybrid]\`/\`[local]\`)
    *   describe the resulting mix.
    * - \`local\`: project is sandboxed to local execution. The agent must not
    *   propose Galaxy steps even if Galaxy MCP is registered.
