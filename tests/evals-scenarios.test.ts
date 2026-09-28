@@ -41,9 +41,10 @@ describe("evals scenarios: every scenario.json parses with required fields", () 
     });
   }
 
-  it("rnaseq routes galaxy/hybrid and names a known RNA-seq tool", () => {
+  it("rnaseq routes galaxy/hybrid/remote and names a known RNA-seq tool", () => {
     const s = loadScenario("plan-creation-rnaseq");
-    expect(s.assertions.plan?.routingIn).toEqual(["galaxy", "hybrid"]);
+    // remote = an IWC workflow covers it, which is the answer Loom steers toward.
+    expect(s.assertions.plan?.routingIn).toEqual(["galaxy", "hybrid", "remote"]);
     expect(s.assertions.plan?.mentionsOneOf).toContain("HISAT2");
   });
 
