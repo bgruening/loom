@@ -141,6 +141,93 @@ describe("AgentManager", () => {
     expect(firstProc.kill).not.toHaveBeenCalled();
   });
 
+  describe("MCP bootstrap notifications", () => {
+    it.each(["idle", "prompt sent", "tool running"] as const)(
+      "forwards the notice without restarting when %s",
+      async (phase) => {
+        vi.useFakeTimers();
+        const proc = makeProcess(101);
+        spawnMock.mockReturnValue(proc);
+        const { AgentManager } = await import("../app/src/main/agent.js");
+        const window = {
+          isDestroyed: () => false,
+          setTitle: vi.fn(),
+          webContents: { send: vi.fn() },
+        };
+        const manager = new AgentManager(window as any, "/analysis");
+        try {
+          manager.start();
+          if (phase !== "idle") {
+            manager.send({ type: "prompt", message: "Build the composite figure." });
+          }
+          if (phase === "tool running") {
+            lineHandler?.(JSON.stringify({ type: "agent_start" }));
+            lineHandler?.(
+              JSON.stringify({
+                type: "tool_execution_start",
+                toolCallId: "collection-read",
+                toolName: "galaxy_get_collection_details",
+              }),
+            );
+          }
+
+          const response = manager.sendCommand({ type: "get_state" });
+          // Attach a rejection handler before advancing the restart timer so the
+          // regression reports a failed assertion rather than an unhandled rejection.
+          const responseOutcome = response.catch((error: unknown) => error);
+          const command = JSON.parse(proc.stdin.write.mock.calls.at(-1)![0]);
+          const notice = {
+            type: "extension_ui_request",
+            id: "mcp-bootstrap-notice",
+            method: "notify",
+            message: "MCP: direct tools for another-server will be available after restart",
+            notifyType: "info",
+          };
+          lineHandler?.(JSON.stringify(notice));
+          // The old implementation scheduled a destructive restart on the next tick.
+          vi.advanceTimersByTime(1);
+
+          expect(proc.kill).not.toHaveBeenCalled();
+          expect(spawnMock).toHaveBeenCalledTimes(1);
+          expect(window.webContents.send).toHaveBeenCalledWith("agent:ui-request", notice);
+          expect(manager.getStatusSnapshot()).toMatchObject({
+            status: "running",
+            turnActive: phase === "tool running",
+          });
+
+          // The in-flight RPC and tool result must still reach their consumers.
+          lineHandler?.(
+            JSON.stringify({
+              type: "response",
+              id: command.id,
+              success: true,
+              data: { alive: true },
+            }),
+          );
+          await expect(responseOutcome).resolves.toEqual({ alive: true });
+          if (phase === "tool running") {
+            const result = {
+              type: "tool_execution_end",
+              toolCallId: "collection-read",
+              toolName: "galaxy_get_collection_details",
+              result: { content: [{ type: "text", text: "Collection retrieved" }] },
+              isError: false,
+            };
+            lineHandler?.(JSON.stringify(result));
+            expect(window.webContents.send).toHaveBeenCalledWith("agent:event", result);
+            lineHandler?.(JSON.stringify({ type: "agent_end" }));
+          }
+          vi.advanceTimersByTime(100);
+          expect(proc.kill).not.toHaveBeenCalled();
+          expect(spawnMock).toHaveBeenCalledTimes(1);
+        } finally {
+          manager.stop();
+          vi.useRealTimers();
+        }
+      },
+    );
+  });
+
   describe("stall watchdog (#185)", () => {
     function agentEvents(window: { webContents: { send: ReturnType<typeof vi.fn> } }) {
       return window.webContents.send.mock.calls.filter((c: unknown[]) => c[0] === "agent:event");
