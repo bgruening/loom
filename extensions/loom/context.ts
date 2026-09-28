@@ -328,7 +328,7 @@ When drafting a plan, **first** consult Galaxy
 resources before deciding what runs where:
 
 1. Search the IWC workflow registry for matching workflows
-   (\`galaxy_search_iwc\` / similar Galaxy MCP tool). If a full match
+   (\`galaxy_search_iwc_workflows\` / similar Galaxy MCP tool). If a full match
    exists, propose running the plan as a single Galaxy invocation
    (mode: **remote**).
 2. Otherwise, draft step-by-step. Per step:
@@ -367,7 +367,7 @@ resources before deciding what runs where:
 - **Workflow invocation**: a single run of a Galaxy workflow on a
   history. Tracked in the notebook via \`loom-invocation\` blocks.
 - **IWC**: Intergalactic Workflow Commission — registry of curated
-  workflows. \`galaxy_search_iwc\` queries it.
+  workflows. \`galaxy_search_iwc_workflows\` queries it.
 
 The three operating modes are an *outcome* of the plan you draft, not a
 mode setting:
