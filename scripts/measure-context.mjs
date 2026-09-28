@@ -11,6 +11,10 @@
 //   npm run measure:context -- --json       # machine-readable
 //   npm run measure:context -- --save DIR   # also keep the raw request bodies
 //
+// The prompt is held until every MCP server reports connected, because the
+// adapter only exposes a server's tools once it has listed them -- a cold
+// galaxy-mcp start would otherwise race the first request and vanish from it.
+//
 // Token counts are chars/4 estimates -- good for before/after comparisons,
 // not for billing. The Galaxy run registers galaxy-mcp against usegalaxy.org
 // with a dummy key, so it needs network access but never authenticates.
@@ -24,6 +28,7 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const TIMEOUT_MS = 120_000;
+const MCP_READY_TIMEOUT_MS = 60_000;
 const SECTION_MIN_TOKENS = 150;
 
 const args = process.argv.slice(2);
@@ -124,11 +129,34 @@ async function measure(run) {
   const child = spawn(process.execPath, [join(REPO_ROOT, "bin", "loom.js"), "--mode", "rpc"], {
     cwd: ws,
     env,
-    stdio: ["pipe", "ignore", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
   });
   let stderr = "";
   child.stderr.on("data", (c) => (stderr += c));
-  child.stdin.write(JSON.stringify({ type: "prompt", message: "hello", id: "1" }) + "\n");
+
+  let prompted = false;
+  let mcpReady = false;
+  const sendPrompt = () => {
+    if (prompted) return;
+    prompted = true;
+    child.stdin.write(JSON.stringify({ type: "prompt", message: "hello", id: "1" }) + "\n");
+  };
+  const mcpTimer = setTimeout(sendPrompt, MCP_READY_TIMEOUT_MS);
+  let stdoutBuf = "";
+  child.stdout.on("data", (c) => {
+    stdoutBuf += c;
+    const lines = stdoutBuf.split("\n");
+    stdoutBuf = lines.pop();
+    for (const line of lines) {
+      if (!line.includes('"statusKey":"mcp"')) continue;
+      const m = /(\d+) servers? enabled \((\d+) connected\)/.exec(line);
+      if (m && m[1] === m[2]) {
+        mcpReady = true;
+        clearTimeout(mcpTimer);
+        sendPrompt();
+      }
+    }
+  });
 
   try {
     const body = await new Promise((resolve, reject) => {
@@ -145,15 +173,20 @@ async function measure(run) {
         reject(new Error(`loom exited (${code}) before sending a request`));
       });
     });
+    if (!mcpReady)
+      process.stderr.write(
+        `[measure] ${run.name}: not every MCP server connected; its tools may be missing\n`,
+      );
     if (saveDir) {
       mkdirSync(saveDir, { recursive: true });
       writeFileSync(join(saveDir, `${run.name}.json`), body);
     }
-    return analyze(JSON.parse(body));
+    return { mcpReady, ...analyze(JSON.parse(body)) };
   } catch (err) {
     err.message += `\n--- loom stderr (tail) ---\n${stderr.split("\n").slice(-15).join("\n")}`;
     throw err;
   } finally {
+    clearTimeout(mcpTimer);
     child.stdin.end();
     if (child.exitCode === null) {
       const exited = new Promise((r) => child.once("exit", r));
