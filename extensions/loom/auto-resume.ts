@@ -38,7 +38,11 @@ export function buildResumePrompt(runs: GalaxyFollowUp[]): string {
     "already have been handled. Respect any request to pause or stop. Use the recorded IDs " +
     "and server bindings to inspect each run; do not guess from labels.\n" +
     "For completed runs, verify the output datasets now: check existence, state, datatype, " +
-    "metadata and a suitable preview or content check. Record the evidence in the notebook " +
+    "metadata and a suitable preview or content check. Check required outputs for empty or " +
+    "invalid content even when the job exited successfully. For a mapped batch, verify every " +
+    "expected element, not just the lead job. Separate successful retries do not repair the " +
+    "original collections: assemble and verify replacement collections before claiming the " +
+    "batch is ready for downstream use. Record the evidence in the notebook " +
     "before marking an existing step verified. Galaxy success alone is not verification.\n" +
     "For failed or failing runs, investigate now: read invocation messages (for workflows), " +
     "the failing job details, exit state and stderr. A failing workflow still has active jobs; " +
@@ -79,7 +83,7 @@ export interface FollowUpDelivery {
   agentSettled(): void;
   /** Real user input: a typed prompt or a slash command. Lifts any pause. */
   userInput(): void;
-  /** The user stopped a turn: drop anything held and pause until they speak. */
+  /** The user stopped a turn: retain results, but pause until they speak. */
   aborted(): void;
   clear(): void;
 }
@@ -102,7 +106,7 @@ export interface FollowUpDeliveryOptions {
  * Pi's own queue, which extensions have no way to clear on Stop.
  */
 export function createFollowUpDelivery(
-  send: (text: string) => void,
+  send: (text: string) => void | Promise<void>,
   opts: FollowUpDeliveryOptions = {},
 ): FollowUpDelivery {
   const graceMs = opts.graceMs ?? FOLLOW_UP_GRACE_MS;
@@ -112,13 +116,16 @@ export function createFollowUpDelivery(
   let consecutive = 0;
   let stopped = false;
   let pauseAnnounced = false;
+  let sending = false;
+  let generation = 0;
 
   const cancelTimer = () => {
     if (timer) clearTimeout(timer);
     timer = null;
   };
-  const sendNow = (texts: string[]) => {
-    if (texts.length === 0) return;
+  const flush = () => {
+    timer = null;
+    if (busy || sending || held.length === 0) return;
     const max = opts.maxConsecutive ?? maxAutoFollowUps();
     if (stopped || consecutive >= max) {
       if (!pauseAnnounced) {
@@ -131,24 +138,50 @@ export function createFollowUpDelivery(
       }
       return;
     }
-    consecutive++;
-    // Several held batches become one turn rather than several.
-    send(texts.join("\n\n"));
-  };
-  const flush = () => {
-    timer = null;
-    const batch = held;
+    const texts = held;
     held = [];
-    sendNow(batch);
+    const sendingGeneration = generation;
+    sending = true;
+    consecutive++;
+    const failed = (error: unknown) => {
+      if (generation !== sendingGeneration) return;
+      // The poller has already persisted terminal states and will not emit
+      // them again. Keep the exact run IDs until a later delivery opportunity.
+      held.unshift(...texts);
+      consecutive = Math.max(0, consecutive - 1);
+      sending = false;
+      console.error("[galaxy-poller] auto-resume send failed:", error);
+      opts.onPaused?.(
+        "Galaxy results are waiting — the assistant could not receive the follow-up. The results have been retained.",
+      );
+    };
+    try {
+      const result = send(texts.join("\n\n"));
+      if (result) {
+        void result.then(() => {
+          if (generation !== sendingGeneration) return;
+          sending = false;
+          schedule();
+        }, failed);
+      } else {
+        sending = false;
+      }
+    } catch (error) {
+      failed(error);
+    }
+  };
+  const schedule = () => {
+    if (busy || sending || held.length === 0 || stopped || timer) return;
+    // Flush once even if the preceding asynchronous send reached the cap:
+    // it announces the pause without rescheduling itself or losing results.
+    timer = setTimeout(flush, graceMs);
+    timer.unref?.();
   };
 
   return {
     deliver(text) {
-      if (!busy && !timer) {
-        sendNow([text]);
-        return;
-      }
       held.push(text);
+      if (!busy && !sending && !timer) flush();
     },
     agentStarted() {
       busy = true;
@@ -156,18 +189,22 @@ export function createFollowUpDelivery(
     },
     agentSettled() {
       busy = false;
-      if (held.length === 0) return;
-      cancelTimer();
-      timer = setTimeout(flush, graceMs);
-      timer.unref?.();
+      // Flush once even at the cap so the pause is surfaced, but retain the
+      // batch there rather than throwing it away after announcing it.
+      if (held.length > 0 && !sending && !timer) {
+        timer = setTimeout(flush, graceMs);
+        timer.unref?.();
+      }
     },
     userInput() {
       consecutive = 0;
       stopped = false;
       pauseAnnounced = false;
+      // Never jump ahead of the question that lifted the pause. agentStarted
+      // cancels this grace timer, and agentSettled releases the retained batch.
+      schedule();
     },
     aborted() {
-      held = [];
       cancelTimer();
       stopped = true;
     },
@@ -178,6 +215,8 @@ export function createFollowUpDelivery(
       consecutive = 0;
       stopped = false;
       pauseAnnounced = false;
+      sending = false;
+      generation++;
     },
   };
 }

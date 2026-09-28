@@ -54,7 +54,10 @@ beforeEach(() => {
   vi.stubEnv("LOOM_AUTO_RESUME", undefined);
   vi.stubEnv("LOOM_FRESH_SESSION", "1");
 });
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.useRealTimers();
+});
 
 describe("session Galaxy follow-up wiring", () => {
   it.each([true, false])(
@@ -83,6 +86,7 @@ describe("session Galaxy follow-up wiring", () => {
   const resumeFn = () => vi.mocked(startGalaxyPoller).mock.calls[0][1]!;
 
   it("pauses after the cap and notifies, until the user types or runs a command", async () => {
+    vi.useFakeTimers();
     const { sendUserMessage, notify, emit, commands } = await start();
     for (let i = 0; i < 5; i++) resumeFn()(`auto ${i}`);
     expect(sendUserMessage).toHaveBeenCalledTimes(3);
@@ -94,18 +98,28 @@ describe("session Galaxy follow-up wiring", () => {
     expect(sendUserMessage).toHaveBeenCalledTimes(3);
 
     await emit("input", { type: "input", text: "continue", source: "rpc" });
+    await emit("agent_start", {});
     resumeFn()("resumed by input");
+    expect(sendUserMessage).toHaveBeenCalledTimes(3);
+    await emit("agent_settled", {});
+    vi.advanceTimersByTime(1500);
     expect(sendUserMessage).toHaveBeenCalledTimes(4);
+    expect(sendUserMessage).toHaveBeenLastCalledWith(
+      "auto 3\n\nauto 4\n\nstill paused\n\nresumed by input",
+      { deliverAs: "followUp" },
+    );
 
     for (let i = 0; i < 3; i++) resumeFn()("fill");
     await commands.get("execute")!.handler("", {});
     resumeFn()("resumed by /execute");
-    expect(sendUserMessage).toHaveBeenLastCalledWith("resumed by /execute", {
+    vi.advanceTimersByTime(1500);
+    expect(sendUserMessage).toHaveBeenLastCalledWith("fill\n\nresumed by /execute", {
       deliverAs: "followUp",
     });
   });
 
   it("stops waking the agent after the user stops a turn, until they speak again", async () => {
+    vi.useFakeTimers();
     const { sendUserMessage, emit } = await start();
     await emit("agent_start", {});
     resumeFn()("held during the turn");
@@ -114,10 +128,17 @@ describe("session Galaxy follow-up wiring", () => {
     resumeFn()("after stop");
     expect(sendUserMessage).not.toHaveBeenCalled();
     await emit("input", { type: "input", text: "go on", source: "interactive" });
+    await emit("agent_start", {});
     resumeFn()("after input");
-    expect(sendUserMessage).toHaveBeenCalledExactlyOnceWith("after input", {
-      deliverAs: "followUp",
-    });
+    expect(sendUserMessage).not.toHaveBeenCalled();
+    await emit("agent_settled", {});
+    vi.advanceTimersByTime(1500);
+    expect(sendUserMessage).toHaveBeenCalledExactlyOnceWith(
+      "held during the turn\n\nafter stop\n\nafter input",
+      {
+        deliverAs: "followUp",
+      },
+    );
   });
 
   it("lets an explicit opt-out win over user input", async () => {

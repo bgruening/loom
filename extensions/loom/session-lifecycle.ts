@@ -36,14 +36,8 @@ export function registerSessionLifecycle(pi: ExtensionAPI): void {
   // Refreshed each session_start; a no-op until then.
   let notifyUser: (text: string) => void = () => {};
   const followUps = createFollowUpDelivery(
-    (text) => {
-      // Fired from a timer, so a rejected/throwing send must not escape.
-      try {
-        void pi.sendUserMessage(text, { deliverAs: "followUp" });
-      } catch (err) {
-        console.error("[galaxy-poller] auto-resume send failed:", err);
-      }
-    },
+    // Return the promise so delivery retains the batch if Pi rejects it.
+    (text) => pi.sendUserMessage(text, { deliverAs: "followUp" }),
     { onPaused: (text) => notifyUser(text) },
   );
   setActiveFollowUpDelivery(followUps);
