@@ -411,7 +411,7 @@ if (!isInformationalCommand) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// pi-web-access default: skip the curator browser popup.
+// pi-web-access defaults: skip the curator browser popup, drop source_check.
 //
 // pi-web-access ships with the brain and exposes a web_search tool. Its
 // default workflow ("summary-review") opens a curator window in the system
@@ -425,7 +425,24 @@ if (!isInformationalCommand) {
 // with `/curator on` or by setting "workflow":"summary-review" in this file.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const webSearchConfigPath = join(homedir(), ".pi", "web-search.json");
+// Mirrors pi-web-access's own lookup (utils.ts getWebSearchConfigDir). It
+// prefers ~/.pi/agent over the legacy ~/.pi, so writing a fixed path would
+// leave our defaults in a file it never reads.
+function resolveWebSearchConfigPath() {
+  const file = "web-search.json";
+  if (process.env.PI_CODING_AGENT_DIR) return join(process.env.PI_CODING_AGENT_DIR, file);
+  const legacyDir = join(homedir(), ".pi");
+  const xdgConfigHome = process.env.XDG_CONFIG_HOME;
+  const preferredDir = xdgConfigHome ? join(xdgConfigHome, "pi") : join(homedir(), ".pi", "agent");
+  for (const dir of [preferredDir, legacyDir]) {
+    if (existsSync(join(dir, file))) return join(dir, file);
+  }
+  // Neither exists yet: keep writing the legacy path, which pi-web-access
+  // picks up as long as nothing is at the preferred one.
+  return join(legacyDir, file);
+}
+
+const webSearchConfigPath = resolveWebSearchConfigPath();
 
 if (!isInformationalCommand) {
   let webSearchConfig = {};
@@ -439,10 +456,29 @@ if (!isInformationalCommand) {
       parseOk = false;
     }
   }
-  if (parseOk && webSearchConfig.workflow === undefined) {
-    webSearchConfig.workflow = "none";
-    mkdirSync(dirname(webSearchConfigPath), { recursive: true });
-    writeFileSync(webSearchConfigPath, JSON.stringify(webSearchConfig, null, 2));
+  if (parseOk && webSearchConfig && typeof webSearchConfig === "object") {
+    let changed = false;
+    if (webSearchConfig.workflow === undefined) {
+      webSearchConfig.workflow = "none";
+      changed = true;
+    }
+    // source_check (claim verification against retrieved passages) is rarely
+    // what an analysis needs and its schema costs ~600 tokens on every
+    // request. Off unless the user has set it either way.
+    const tools = webSearchConfig.tools;
+    const toolsOk =
+      tools === undefined || (tools && typeof tools === "object" && !Array.isArray(tools));
+    if (toolsOk && tools?.sourceCheck?.enabled === undefined) {
+      webSearchConfig.tools = {
+        ...tools,
+        sourceCheck: { ...tools?.sourceCheck, enabled: false },
+      };
+      changed = true;
+    }
+    if (changed) {
+      mkdirSync(dirname(webSearchConfigPath), { recursive: true });
+      writeFileSync(webSearchConfigPath, JSON.stringify(webSearchConfig, null, 2));
+    }
   }
 }
 
