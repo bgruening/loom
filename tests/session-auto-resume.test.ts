@@ -88,7 +88,19 @@ describe("session Galaxy follow-up wiring", () => {
   it("pauses after the cap and notifies, until the user types or runs a command", async () => {
     vi.useFakeTimers();
     const { sendUserMessage, notify, emit, commands } = await start();
-    for (let i = 0; i < 5; i++) resumeFn()(`auto ${i}`);
+    // Pi records the sent message, which is delivery; then its turn runs.
+    const turn = async (during?: () => void) => {
+      const text = sendUserMessage.mock.lastCall![0] as string;
+      await emit("message_end", { message: { role: "user", content: [{ type: "text", text }] } });
+      await emit("agent_start", {});
+      during?.();
+      await emit("agent_settled", {});
+      vi.advanceTimersByTime(1500);
+    };
+    resumeFn()("auto 0");
+    await turn(() => resumeFn()("auto 1"));
+    await turn(() => resumeFn()("auto 2"));
+    await turn(() => ["auto 3", "auto 4"].forEach((t) => resumeFn()(t)));
     expect(sendUserMessage).toHaveBeenCalledTimes(3);
     expect(notify).toHaveBeenCalledWith(expect.stringMatching(/paused after 3/), "info");
 
@@ -109,11 +121,17 @@ describe("session Galaxy follow-up wiring", () => {
       { deliverAs: "followUp" },
     );
 
-    for (let i = 0; i < 3; i++) resumeFn()("fill");
+    await turn(() => resumeFn()("fill 1"));
+    await turn(() => resumeFn()("fill 2"));
+    await turn(() => resumeFn()("fill 3"));
+    expect(sendUserMessage).toHaveBeenCalledTimes(6);
+    expect(notify).toHaveBeenCalledTimes(2);
     await commands.get("execute")!.handler("", {});
+    await emit("agent_start", {});
     resumeFn()("resumed by /execute");
+    await emit("agent_settled", {});
     vi.advanceTimersByTime(1500);
-    expect(sendUserMessage).toHaveBeenLastCalledWith("fill\n\nresumed by /execute", {
+    expect(sendUserMessage).toHaveBeenLastCalledWith("fill 3\n\nresumed by /execute", {
       deliverAs: "followUp",
     });
   });

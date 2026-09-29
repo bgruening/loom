@@ -77,22 +77,57 @@ export function maxAutoFollowUps(): number {
   return typeof n === "number" && Number.isInteger(n) && n >= 0 ? n : DEFAULT_MAX_AUTO_FOLLOW_UPS;
 }
 
+/**
+ * How long a sent follow-up may go unrecorded before it counts as undelivered.
+ * Pi's extension `sendUserMessage` returns nothing and swallows a refused
+ * prompt (auth failure, a compaction in progress), so the message showing up
+ * in the conversation is the only delivery receipt there is.
+ */
+export const FOLLOW_UP_ACK_MS = 15_000;
+
+export interface FollowUpOptions {
+  /**
+   * Drop this follow-up if the user stops the turn it was waiting on. Galaxy
+   * results must survive a Stop -- the poller won't report them again -- but a
+   * nudge about the turn that was just stopped is stale by then.
+   */
+  dropOnStop?: boolean;
+}
+
 export interface FollowUpDelivery {
-  deliver(text: string): void;
+  deliver(text: string, opts?: FollowUpOptions): void;
+  /**
+   * A user-role message reached the conversation. Pi emits this both for a
+   * prompt that starts a turn and for a queued follow-up it injects, and
+   * persists the message at that point.
+   */
+  userMessageRecorded(text: string): void;
   agentStarted(): void;
   agentSettled(): void;
   /** Real user input: a typed prompt or a slash command. Lifts any pause. */
   userInput(): void;
-  /** The user stopped a turn: retain results, but pause until they speak. */
+  /** The user stopped a turn: keep results, but pause until they speak. */
   aborted(): void;
   clear(): void;
 }
 
 export interface FollowUpDeliveryOptions {
   graceMs?: number;
+  ackMs?: number;
   maxConsecutive?: number;
+  /**
+   * False while Pi is compacting (or otherwise not accepting a prompt), which
+   * agent_start/agent_settled alone don't show -- a manual /compact runs
+   * outside any turn.
+   */
+  isIdle?: () => boolean;
   /** Told once per pause, so results don't sit waiting without the user knowing. */
   onPaused?: (text: string) => void;
+}
+
+interface Held {
+  text: string;
+  dropOnStop: boolean;
 }
 
 /**
@@ -104,84 +139,120 @@ export interface FollowUpDeliveryOptions {
  *
  * Because nothing is sent while the agent is busy, held follow-ups never sit in
  * Pi's own queue, which extensions have no way to clear on Stop.
+ *
+ * Nothing is dropped for lack of a turn: a Stop, the turn cap, or a send Pi
+ * didn't act on all keep the batch until the next turn settles. The poller has
+ * already persisted terminal states and won't report them again.
  */
 export function createFollowUpDelivery(
-  send: (text: string) => void | Promise<void>,
+  send: (text: string) => void,
   opts: FollowUpDeliveryOptions = {},
 ): FollowUpDelivery {
   const graceMs = opts.graceMs ?? FOLLOW_UP_GRACE_MS;
+  const ackMs = opts.ackMs ?? FOLLOW_UP_ACK_MS;
+  const isIdle = opts.isIdle ?? (() => true);
   let busy = false;
-  let held: string[] = [];
+  let held: Held[] = [];
   let timer: ReturnType<typeof setTimeout> | null = null;
   let consecutive = 0;
   let stopped = false;
   let pauseAnnounced = false;
-  let sending = false;
-  let generation = 0;
+  let failureAnnounced = false;
+  let inFlight: {
+    text: string;
+    items: Held[];
+    timer: ReturnType<typeof setTimeout> | null;
+  } | null = null;
+  // A batch put back after the ack timeout, in case Pi was only slow: if it
+  // lands after all, take it back out of `held` rather than send it twice.
+  let restored: { text: string; items: Held[] } | null = null;
 
   const cancelTimer = () => {
     if (timer) clearTimeout(timer);
     timer = null;
   };
-  const flush = () => {
-    timer = null;
-    if (busy || sending || held.length === 0) return;
-    const max = opts.maxConsecutive ?? maxAutoFollowUps();
-    if (stopped || consecutive >= max) {
-      if (!pauseAnnounced) {
-        pauseAnnounced = true;
-        opts.onPaused?.(
-          stopped
-            ? "Galaxy results are waiting -- automatic follow-up is paused since you stopped. Say continue when you're ready."
-            : `Galaxy results are waiting -- automatic follow-up paused after ${consecutive} automatic turn(s). Say continue to resume.`,
-        );
-      }
-      return;
-    }
-    const texts = held;
-    held = [];
-    const sendingGeneration = generation;
-    sending = true;
-    consecutive++;
-    const failed = (error: unknown) => {
-      if (generation !== sendingGeneration) return;
-      // The poller has already persisted terminal states and will not emit
-      // them again. Keep the exact run IDs until a later delivery opportunity.
-      held.unshift(...texts);
-      consecutive = Math.max(0, consecutive - 1);
-      sending = false;
-      console.error("[galaxy-poller] auto-resume send failed:", error);
-      opts.onPaused?.(
-        "Galaxy results are waiting — the assistant could not receive the follow-up. The results have been retained.",
-      );
-    };
-    try {
-      const result = send(texts.join("\n\n"));
-      if (result) {
-        void result.then(() => {
-          if (generation !== sendingGeneration) return;
-          sending = false;
-          schedule();
-        }, failed);
-      } else {
-        sending = false;
-      }
-    } catch (error) {
-      failed(error);
-    }
-  };
-  const schedule = () => {
-    if (busy || sending || held.length === 0 || stopped || timer) return;
-    // Flush once even if the preceding asynchronous send reached the cap:
-    // it announces the pause without rescheduling itself or losing results.
+  const armFlush = () => {
+    if (timer) return;
     timer = setTimeout(flush, graceMs);
     timer.unref?.();
   };
+  const endInFlight = () => {
+    if (inFlight?.timer) clearTimeout(inFlight.timer);
+    inFlight = null;
+  };
+  const undelivered = (error: unknown) => {
+    if (!inFlight) return;
+    const { text, items } = inFlight;
+    endInFlight();
+    held.unshift(...items);
+    restored = { text, items };
+    consecutive = Math.max(0, consecutive - 1);
+    console.error("[galaxy-poller] auto-resume follow-up was not delivered:", error);
+    // No retry of our own: a prompt Pi just refused would likely be refused
+    // again. The next settled turn is the next attempt.
+    if (!failureAnnounced) {
+      failureAnnounced = true;
+      opts.onPaused?.(
+        "Galaxy results are waiting -- the assistant didn't pick up the automatic follow-up. They're kept for your next message.",
+      );
+    }
+  };
+  const armAck = () => {
+    if (!inFlight) return;
+    inFlight.timer = setTimeout(() => {
+      if (!inFlight) return;
+      inFlight.timer = null;
+      // Still compacting or preparing the prompt: not a refusal yet.
+      if (!isIdle()) return armAck();
+      undelivered(new Error("follow-up turn never started"));
+    }, ackMs);
+    inFlight.timer.unref?.();
+  };
+  const announcePause = () => {
+    if (pauseAnnounced) return;
+    pauseAnnounced = true;
+    opts.onPaused?.(
+      stopped
+        ? "Galaxy results are waiting -- automatic follow-up is paused since you stopped. Say continue when you're ready."
+        : `Galaxy results are waiting -- automatic follow-up paused after ${consecutive} automatic turn(s). Say continue to resume.`,
+    );
+  };
+  const flush = () => {
+    timer = null;
+    if (busy || inFlight || held.length === 0) return;
+    if (!isIdle()) return armFlush();
+    const max = opts.maxConsecutive ?? maxAutoFollowUps();
+    if (stopped || consecutive >= max) return announcePause();
+    const items = held;
+    held = [];
+    consecutive++;
+    restored = null;
+    const text = items.map((h) => h.text).join("\n\n");
+    inFlight = { text, items, timer: null };
+    armAck();
+    try {
+      send(text);
+    } catch (error) {
+      undelivered(error);
+    }
+  };
 
   return {
-    deliver(text) {
-      held.push(text);
-      if (!busy && !sending && !timer) flush();
+    deliver(text, deliverOpts) {
+      held.push({ text, dropOnStop: deliverOpts?.dropOnStop ?? false });
+      if (!busy && !inFlight && !timer) flush();
+    },
+    userMessageRecorded(text) {
+      // Matched on our own text: another turn starting (the user's, another
+      // extension's) says nothing about whether Pi took this one.
+      if (inFlight?.text === text) {
+        endInFlight();
+        failureAnnounced = false;
+      } else if (restored?.text === text) {
+        const late = new Set(restored.items);
+        held = held.filter((h) => !late.has(h));
+        restored = null;
+      }
     },
     agentStarted() {
       busy = true;
@@ -189,34 +260,36 @@ export function createFollowUpDelivery(
     },
     agentSettled() {
       busy = false;
-      // Flush once even at the cap so the pause is surfaced, but retain the
-      // batch there rather than throwing it away after announcing it.
-      if (held.length > 0 && !sending && !timer) {
-        timer = setTimeout(flush, graceMs);
-        timer.unref?.();
-      }
+      if (held.length === 0 || inFlight) return;
+      // A stopped turn arms nothing, so input that starts no turn (a slash
+      // command) can't let the batch out during the grace window.
+      if (stopped) return announcePause();
+      // At the cap this flush only surfaces the pause; the batch stays held.
+      armFlush();
     },
     userInput() {
       consecutive = 0;
       stopped = false;
       pauseAnnounced = false;
-      // Never jump ahead of the question that lifted the pause. agentStarted
-      // cancels this grace timer, and agentSettled releases the retained batch.
-      schedule();
+      // No flush here. The user's own turn goes first and agentSettled releases
+      // the batch after it; a slash command that starts no turn leaves the
+      // batch for the next one rather than waking the agent on its own.
     },
     aborted() {
       cancelTimer();
       stopped = true;
+      held = held.filter((h) => !h.dropOnStop);
     },
     clear() {
       busy = false;
       held = [];
       cancelTimer();
+      endInFlight();
+      restored = null;
       consecutive = 0;
       stopped = false;
       pauseAnnounced = false;
-      sending = false;
-      generation++;
+      failureAnnounced = false;
     },
   };
 }
@@ -231,9 +304,9 @@ export function setActiveFollowUpDelivery(d: FollowUpDelivery | null): void {
  * Queue a brain-initiated follow-up on the same path as Galaxy results, so it
  * gets the same Stop, pause and turn-cap handling. False if no session is up.
  */
-export function deliverAutoFollowUp(text: string): boolean {
+export function deliverAutoFollowUp(text: string, opts?: FollowUpOptions): boolean {
   if (!activeDelivery) return false;
-  activeDelivery.deliver(text);
+  activeDelivery.deliver(text, opts);
   return true;
 }
 
