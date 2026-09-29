@@ -5,6 +5,7 @@ import { join } from "path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   applySkillTriggers,
+  IWC_CANDIDATES_HINT,
   registerSkillTriggers,
   type SkillTrigger,
 } from "../extensions/loom/skill-triggers";
@@ -47,6 +48,38 @@ describe("applySkillTriggers -- the ported rows", () => {
     );
     expect(out?.fired.map((f) => f.id)).toEqual(["invocation-failed"]);
     expect(out?.content[0].text).toContain(INVOCATION_FAILED_HINT);
+  });
+
+  it("reminds the model to vet IWC candidates on recommend and search results", () => {
+    for (const toolName of ["galaxy_recommend_iwc_workflows", "galaxy_search_iwc_workflows"]) {
+      const out = applySkillTriggers(
+        { toolName, isError: false, content: [text('{"data":[],"count":0}')] },
+        () => TOOLS,
+      );
+      expect(out?.fired.map((f) => f.id)).toEqual(["iwc-candidates"]);
+      expect(out?.content[0].text).toContain(IWC_CANDIDATES_HINT);
+    }
+  });
+
+  it("hints on an IWC result the output guard truncated into non-JSON", () => {
+    const truncated = '{"data": [{"name": "RNA-Seq\n\n[Output truncated: 2000 lines shown]';
+    const out = applySkillTriggers(
+      { toolName: "galaxy_recommend_iwc_workflows", isError: false, content: [text(truncated)] },
+      () => TOOLS,
+    );
+    expect(out?.content[0].text).toContain(IWC_CANDIDATES_HINT);
+  });
+
+  it("leaves other IWC tools and failed IWC calls alone", () => {
+    for (const [toolName, isError] of [
+      ["galaxy_get_iwc_workflow_details", false],
+      ["galaxy_import_workflow_from_iwc", false],
+      ["galaxy_recommend_iwc_workflows", true],
+    ] as const) {
+      expect(
+        applySkillTriggers({ toolName, isError, content: [text("{}")] }, () => TOOLS),
+      ).toBeNull();
+    }
   });
 
   it("only watches the tools a row names", () => {

@@ -180,8 +180,6 @@ export class AgentManager {
   // SIGTERM session_shutdown writes (which only append to the *old* .jsonl,
   // not the symlink).
   private pinnedSessionFile: string | null = null;
-  private mcpBootstrapRestartDone = false; // → guard: only auto-restart once per app lifetime
-  private silentRestarting = false; // → suppresses status flicker during MCP bootstrap restart
 
   /**
    * Crash-restart bookkeeping. We allow up to MAX_RESTARTS_PER_WINDOW
@@ -426,12 +424,7 @@ export class AgentManager {
     // When resuming with --continue, the agent reloads its in-memory context
     // from the on-disk session but the renderer has no way to see prior turns.
     // Replay them into the chat pane so the UI reflects what the model remembers.
-    if (
-      wantsContinue &&
-      this.pinnedSessionFile &&
-      !this.silentRestarting &&
-      !this.window.isDestroyed()
-    ) {
+    if (wantsContinue && this.pinnedSessionFile && !this.window.isDestroyed()) {
       try {
         const history = loadSessionHistory(this.pinnedSessionFile);
         if (history.length > 0) {
@@ -674,9 +667,6 @@ export class AgentManager {
       this.watchdog.stop();
     }
     log("status:", status, message || "");
-    // During a silent restart we suppress the transient stopped→running flicker;
-    // the renderer keeps showing "running" the whole time.
-    if (this.silentRestarting && (status === "stopped" || status === "running")) return;
     if (!this.window.isDestroyed()) {
       this.window.webContents.send("agent:status", status, message);
     }
@@ -740,15 +730,10 @@ export class AgentManager {
 
     if (type === "extension_ui_request") {
       log("  ui request:", (data as { method?: string }).method, (data as { id?: string }).id);
-      // First-run MCP bootstrap emits a notify telling the user to restart so
-      // newly-cached tool metadata loads as direct tools. Swallow it and do the
-      // restart silently instead — users shouldn't have to care.
-      if (this.shouldSwallowMcpBootstrapNotify(data)) {
-        log("swallowing MCP bootstrap notify → scheduling silent restart");
-        this.mcpBootstrapRestartDone = true;
-        setTimeout(() => this.silentRestart(), 0);
-        return;
-      }
+      // MCP catalog bootstrap can finish during a request. Its restart notice
+      // is advisory, not a lifecycle command: restarting here cancels tools,
+      // drops pending work, and leaves the restored session idle. Forward the
+      // notice; newly cached direct tools load on the next explicit restart.
       this.window.webContents.send("agent:ui-request", data);
       return;
     }
@@ -760,27 +745,5 @@ export class AgentManager {
     }
 
     this.window.webContents.send("agent:event", data);
-  }
-
-  private shouldSwallowMcpBootstrapNotify(data: Record<string, unknown>): boolean {
-    if (this.mcpBootstrapRestartDone) return false;
-    if ((data as { method?: string }).method !== "notify") return false;
-    const message = (data as { message?: string }).message;
-    return typeof message === "string" && message.includes("will be available after restart");
-  }
-
-  private silentRestart(): void {
-    log("silent restart (MCP bootstrap)");
-    // Preserve chat continuity across the restart so the user sees no turn break.
-    this.hasStartedBefore = true;
-    this.nextStartSkipContinue = false;
-    this.nextStartIsFresh = false;
-    this.silentRestarting = true;
-    try {
-      this.stop();
-      this.start();
-    } finally {
-      this.silentRestarting = false;
-    }
   }
 }

@@ -228,6 +228,16 @@ export function setActiveFollowUpDelivery(d: FollowUpDelivery | null): void {
 }
 
 /**
+ * Queue a brain-initiated follow-up on the same path as Galaxy results, so it
+ * gets the same Stop, pause and turn-cap handling. False if no session is up.
+ */
+export function deliverAutoFollowUp(text: string): boolean {
+  if (!activeDelivery) return false;
+  activeDelivery.deliver(text);
+  return true;
+}
+
+/**
  * Slash commands run without firing Pi's `input` event, so they report user
  * input here. Wrapping registration covers every command at once, including
  * /execute and /run, which are exactly the "keep going" signals.

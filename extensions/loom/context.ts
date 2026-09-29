@@ -322,15 +322,36 @@ page id:
 5. Then read the bound history (its datasets/results) to see what actually
    happened before proposing new analysis.
 
+### Finding a community workflow (IWC)
+
+When the user describes an analysis they want run on their data -- even as
+a question ("which genes changed between my samples?") rather than a
+request for a plan -- check the IWC registry before assembling tools by hand:
+
+1. \`galaxy_recommend_iwc_workflows({ intent, limit: 5 })\` with their goal in
+   plain words. It ranks by word overlap and always returns something, so a
+   ranked hit is a candidate, not a match.
+2. \`galaxy_get_iwc_workflow_details({ trs_id })\` on the plausible ones, for
+   the **inputs**. Compare them with the data the user actually has (reads vs
+   count tables, paired vs single-end, collection vs dataset). The right
+   analysis with the wrong starting point is not a match -- though it may be
+   the second half of one, after a workflow that produces its inputs.
+3. Offer the one or two that fit, in plain language: what each does and what
+   it needs from them. If none fit, say so and draft step-by-step.
+4. Once they choose: \`galaxy_import_workflow_from_iwc({ trs_id })\`, then invoke
+   it as below.
+
+\`galaxy_search_iwc_workflows\` is plain keyword search for when the user
+names a workflow or tool; it has no limit, so prefer recommend for a goal.
+
 ### Drafting a new plan
 
 When drafting a plan, **first** consult Galaxy
 resources before deciding what runs where:
 
-1. Search the IWC workflow registry for matching workflows
-   (\`galaxy_search_iwc_workflows\` / similar Galaxy MCP tool). If a full match
-   exists, propose running the plan as a single Galaxy invocation
-   (mode: **remote**).
+1. Check the IWC registry as above. If a workflow (or a chain of them)
+   covers the analysis, propose running it on Galaxy -- the steps are
+   those invocations.
 2. Otherwise, draft step-by-step. Per step:
    - Heavy compute (alignment, large variant calling, big assemblies,
      long-running BLAST, etc.) → check Galaxy tool availability
@@ -367,13 +388,14 @@ resources before deciding what runs where:
 - **Workflow invocation**: a single run of a Galaxy workflow on a
   history. Tracked in the notebook via \`loom-invocation\` blocks.
 - **IWC**: Intergalactic Workflow Commission — registry of curated
-  workflows. \`galaxy_search_iwc_workflows\` queries it.
+  workflows. See "Finding a community workflow" above.
 
-The three operating modes are an *outcome* of the plan you draft, not a
-mode setting:
-- **local** — every step runs locally
-- **hybrid** — some local, some Galaxy
-- **remote** — entire plan is a Galaxy workflow invocation
+The routing tag records where the plan's compute runs and its provenance
+lives -- an *outcome* of the plan you draft, not a mode setting:
+- **remote** — all compute runs on Galaxy: tool jobs, UDT jobs, workflow
+  invocations alike
+- **hybrid** — some steps run on Galaxy, some on this machine
+- **local** — everything runs on this machine
 
 ### Uploading local data
 
@@ -623,9 +645,8 @@ export function buildNoLocalShellBlock(): string {
 ## Execution: remote-only (Galaxy)
 
 This build has no local shell. All computation runs on Galaxy via the Galaxy
-MCP tools -- there is no bash, conda, or local-pipeline path here. Route every
-plan step \`[galaxy]\` or \`[remote]\`; do not propose local shell or conda
-steps. You can still read and write files in the workspace (the notebook and
+MCP tools -- there is no bash, conda, or local-pipeline path here. Tag every
+plan \`[remote]\`; do not propose local shell or conda steps. You can still read and write files in the workspace (the notebook and
 its inputs/outputs).
 `;
 }
@@ -841,7 +862,10 @@ the geographic distribution analysis").
 
 ### Plan lifecycle — the four-stage approval gate
 
-When the user **does** ask for a plan, follow this order strictly:
+When the user **does** ask for a plan, follow this order strictly. With
+Galaxy connected, the order starts before the draft: call
+\`galaxy_recommend_iwc_workflows\`, then check tool availability (see
+"Drafting a new plan") -- the routing tag depends on what they return.
 
 1. **Draft in chat (NOT in the notebook yet).** Reply in chat with a
    \`\`\`plan fenced block formatted as a plan section (see template
@@ -884,7 +908,7 @@ content. **Use a \`\`\`plan fence** in chat (not \`\`\`markdown) so Orbit
 renders it as an interactive draft card with Approve/Edit/Reject buttons.
 
 \`\`\`plan
-## Plan A: chrM Variant Calling [galaxy]
+## Plan A: chrM Variant Calling [remote]
 
 Identify mitochondrial variants from 4 paired-end WGS samples using
 the IWC \`bwa-mem-chrM\` workflow. Output: chrM VCF + per-sample QC.
@@ -921,15 +945,17 @@ markdown so the notebook stays a clean durable record.
 Conventions (please re-read the heading line above before drafting):
 
 - Heading **must** be \`## Plan <Letter>: <Title> [<routing>]\`.
-  Examples that pass: \`## Plan A: RNA-seq DE [galaxy]\`,
+  Examples that pass: \`## Plan A: RNA-seq DE [remote]\`,
   \`## Plan B: Quick local QC [local]\`. Examples that **fail** and
   must be avoided: \`## Plan: ...\` (missing letter),
   \`## Plan A: ...\` (missing routing tag),
-  \`## Plan A - Title [galaxy]\` (dash instead of colon).
-- Routing tag in the section header is one of \`[galaxy]\`, \`[hybrid]\`,
-  \`[local]\`, or \`[remote]\`. Default to \`[galaxy]\` when the work has a
-  matching Galaxy workflow/tool; \`[hybrid]\` when some steps are local
-  and some Galaxy; \`[local]\` only for personal-scale or ad-hoc work.
+  \`## Plan A - Title [remote]\` (dash instead of colon).
+- Routing tag in the section header is one of \`[remote]\`, \`[hybrid]\`,
+  or \`[local]\`, by where the compute runs. Default to \`[remote]\` when
+  every step runs on Galaxy (tools, UDTs or workflows); \`[hybrid]\` when
+  some steps are local and some Galaxy; \`[local]\` only for
+  personal-scale or ad-hoc work. Older notebooks may say \`[galaxy]\`,
+  which means \`[remote]\`.
   Tag literal, lowercase, square brackets, no spaces inside the
   brackets so tooling can grep.
 ${anchorGuidance(omitAnchors)}

@@ -44,6 +44,14 @@ export interface SkillTrigger {
 // agent-loop.js wording when dispatch finds no tool by that exact name.
 const NOT_FOUND_RE = /^Tool\s+(\S+)\s+not found\b/;
 
+export const IWC_CANDIDATES_HINT =
+  "[loom] These are ranked by word overlap, not relevance. Before offering one, call " +
+  "`galaxy_get_iwc_workflow_details` on the plausible candidates and check their inputs " +
+  "against the data the user actually has (reads vs count tables, paired vs single-end). " +
+  "A workflow that needs another's outputs first is half of a chain, not a match. If none " +
+  "fit, say so. If nothing came back, retry once with just the assay; if the query had no " +
+  "searchable terms, ask the user what they want to find out.";
+
 export const SKILL_TRIGGERS: readonly SkillTrigger[] = [
   {
     // STOPGAP for #100: the model emitted a Cyrillic/Greek lookalike in a tool
@@ -65,6 +73,16 @@ export const SKILL_TRIGGERS: readonly SkillTrigger[] = [
     tools: new Set(["galaxy_invocation_check_all", "galaxy_invocation_check_one"]),
     on: "success",
     hint: ({ text }) => (hasFailedTransition(text) ? INVOCATION_FAILED_HINT : null),
+  },
+  {
+    // IWC ranking is BM25 with no relevance floor, so an off-topic question
+    // still gets confident-looking hits. Fires on the tool name alone: the
+    // adapter's output guard can truncate a big result into non-JSON, so the
+    // body can't be relied on.
+    id: "iwc-candidates",
+    tools: new Set(["galaxy_recommend_iwc_workflows", "galaxy_search_iwc_workflows"]),
+    on: "success",
+    hint: () => IWC_CANDIDATES_HINT,
   },
 ];
 
